@@ -55,18 +55,27 @@ final class DispatcharrStore {
     private(set) var channelProfiles: [DispatcharrChannelProfile] = []
     /// Set when the chosen channel profile's membership couldn't be applied.
     private(set) var channelProfileNote: String?
-    /// The XC password could not be fetched from /me (account / API-key servers).
+    /// A problem with the account (e.g. Dispatcharr refused the REST API in REST streaming mode).
     private(set) var credentialWarning: String?
 
     private var epgCache: [Int: (Date, [XCEPGListing])] = [:]
     private var epgInFlight: [Int: Task<[XCEPGListing], Never>] = [:]
-    private var rest: DispatcharrREST?
+    @ObservationIgnored private var rest: DispatcharrREST?
     @ObservationIgnored private var credentialsSyncedFor: UUID?
 
     var activeServer: DispatcharrServer? {
         servers.first { $0.id == activeServerID } ?? servers.first
     }
-    var client: XtreamClient? { activeServer.map(XtreamClient.init(server:)) }
+    var client: XtreamClient? {
+        guard let server = activeServer else { return nil }
+        return XtreamClient(server: server, rest: server.usesRESTStreaming ? restClient() : nil)
+    }
+
+    /// Shown in Settings when the active server streams without an XC password.
+    var streamingModeNote: String? {
+        guard let server = activeServer, server.usesRESTStreaming else { return nil }
+        return "This Dispatcharr user has no XC password, so StreamForge streams through Dispatcharr's own API and stream proxy. Everything works except catch-up (an Xtream Codes feature)."
+    }
     var isConfigured: Bool { activeServer != nil }
 
     private init() {
@@ -200,18 +209,20 @@ final class DispatcharrStore {
     }
 
     /// Account / API-key servers: re-reads the XC password from /me once per launch, so a
-    /// password changed by the Dispatcharr admin is picked up automatically.
+    /// password set, changed or removed by the Dispatcharr admin is picked up automatically. A blank
+    /// XC password is fine: the server then streams through the REST API (`usesRESTStreaming`).
     func syncCredentials(force: Bool = false) async {
         guard let server = activeServer, server.authMode != .xc, let rest = restClient() else { return }
         if !force, credentialsSyncedFor == server.id { return }
         do {
             let me = try await rest.me()
             credentialsSyncedFor = server.id
-            if let xc = me.xcPassword, !xc.isEmpty {
-                if xc != server.xcPassword { server.xcPassword = xc }
-                credentialWarning = nil
-            } else if server.xcPassword.isEmpty {
-                credentialWarning = "Your Dispatcharr user has no XC password. Ask the admin to set one (Users → edit → XC Password), or enter it in the server settings."
+            credentialWarning = nil
+            let xc = me.xcPassword ?? ""
+            // Switches between XC and REST streaming when the password appears or disappears (only
+            // trusted when /me actually returned the user's custom properties).
+            if xc != server.xcPassword, !xc.isEmpty || me.hasCustomProperties {
+                server.xcPassword = xc
             }
             if !me.username.isEmpty, me.username != server.username, let i = servers.firstIndex(where: { $0.id == server.id }) {
                 servers[i].username = me.username
@@ -268,8 +279,18 @@ final class DispatcharrStore {
             applyLive(categories: c, channels: ch)
             liveState = .loaded
         } catch {
-            liveState = channels.isEmpty ? .failed(error.localizedDescription) : .loaded
+            let message = Self.loadErrorMessage(error, server: client.server)
+            if client.server.usesRESTStreaming, case HTTPError.unauthorized = error { credentialWarning = message }
+            liveState = channels.isEmpty ? .failed(message) : .loaded
         }
+    }
+
+    /// Dispatcharr's REST API needs a "standard" user; streamer-level users only have XC access.
+    private static func loadErrorMessage(_ error: Error, server: DispatcharrServer) -> String {
+        if server.usesRESTStreaming, case HTTPError.unauthorized = error {
+            return "Dispatcharr didn't let this account browse channels through its API. Streamer-level users can only use Xtream Codes: ask the admin to set an XC password for your user (Users → edit → XC Password), or to raise your user level."
+        }
+        return error.localizedDescription
     }
 
     private func refreshVOD(_ client: XtreamClient) async {
@@ -284,7 +305,7 @@ final class DispatcharrStore {
             applyVOD(movieCategories: mcv, movies: mv, seriesCategories: scv, series: sv)
             vodState = .loaded
         } catch {
-            vodState = (movies.isEmpty && series.isEmpty) ? .failed(error.localizedDescription) : .loaded
+            vodState = (movies.isEmpty && series.isEmpty) ? .failed(Self.loadErrorMessage(error, server: client.server)) : .loaded
         }
     }
 

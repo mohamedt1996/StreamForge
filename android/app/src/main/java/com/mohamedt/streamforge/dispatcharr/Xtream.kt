@@ -15,6 +15,7 @@ import com.mohamedt.streamforge.core.child
 import com.mohamedt.streamforge.core.dbl
 import com.mohamedt.streamforge.core.enc
 import com.mohamedt.streamforge.core.int
+import com.mohamedt.streamforge.core.list
 import com.mohamedt.streamforge.core.long
 import com.mohamedt.streamforge.core.normalizedBase
 import com.mohamedt.streamforge.core.obj
@@ -27,6 +28,7 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
@@ -58,6 +60,13 @@ data class Server(
             AuthMode.API_KEY -> apiKey.isNotEmpty()
             else -> webPassword.isNotEmpty()
         }
+
+    /**
+     * Account / API-key servers whose Dispatcharr user has no XC password: channels, guide and VOD come
+     * from the REST API and playback goes through Dispatcharr's proxy (see RestCatalog). No catch-up.
+     */
+    val usesRestStreaming: Boolean
+        get() = authMode != AuthMode.XC && xcPassword.isEmpty()
 }
 
 @Serializable
@@ -161,9 +170,15 @@ data class Programme(
         }
 }
 
-/** Dispatcharr's Xtream Codes API: channels, EPG, movies, series, catch-up. */
-class XtreamClient(private val server: Server) {
+/**
+ * Dispatcharr's Xtream Codes API: channels, EPG, movies, series, catch-up. Servers in REST streaming
+ * mode (no XC password) get the same answers from the REST API instead (RestCatalog).
+ */
+class XtreamClient(val server: Server, private val rest: DispatcharrRest? = null) {
     private val base: String get() = server.url ?: throw IllegalStateException("Invalid server address")
+
+    private val catalog: RestCatalog?
+        get() = if (server.usesRestStreaming) RestCatalog(server, rest ?: DispatcharrRest(server)) else null
 
     private fun api(action: String?, params: Map<String, String?> = emptyMap()): String {
         val q = linkedMapOf<String, String?>("username" to server.username, "password" to server.xcPassword)
@@ -179,16 +194,18 @@ class XtreamClient(private val server: Server) {
         return root
     }
 
-    suspend fun liveCategories(): List<Category> = categories("get_live_categories")
-    suspend fun vodCategories(): List<Category> = categories("get_vod_categories")
-    suspend fun seriesCategories(): List<Category> = categories("get_series_categories")
+    suspend fun liveCategories(): List<Category> = catalog?.liveCategories() ?: categories("get_live_categories")
+    suspend fun vodCategories(): List<Category> = catalog?.vodLibrary()?.movieCategories ?: categories("get_vod_categories")
+    suspend fun seriesCategories(): List<Category> = catalog?.vodLibrary()?.seriesCategories ?: categories("get_series_categories")
 
     private suspend fun categories(action: String): List<Category> =
         Http.json(api(action)).arr()?.mapNotNull { it.obj() }?.map {
             Category(it.str("category_id") ?: "0", it.str("category_name") ?: "Uncategorized")
         } ?: emptyList()
 
-    suspend fun channels(): List<Channel> =
+    suspend fun channels(): List<Channel> = catalog?.channels() ?: xcChannels()
+
+    private suspend fun xcChannels(): List<Channel> =
         Http.json(api("get_live_streams"), timeoutSeconds = 120).arr()?.mapNotNull { e ->
             val o = e.obj() ?: return@mapNotNull null
             val id = o.long("stream_id") ?: return@mapNotNull null
@@ -205,7 +222,9 @@ class XtreamClient(private val server: Server) {
             )
         } ?: emptyList()
 
-    suspend fun movies(): List<Movie> =
+    suspend fun movies(): List<Movie> = catalog?.vodLibrary()?.movies ?: xcMovies()
+
+    private suspend fun xcMovies(): List<Movie> =
         Http.json(api("get_vod_streams"), timeoutSeconds = 180).arr()?.mapNotNull { e ->
             val o = e.obj() ?: return@mapNotNull null
             val id = o.long("stream_id") ?: return@mapNotNull null
@@ -226,7 +245,9 @@ class XtreamClient(private val server: Server) {
             )
         } ?: emptyList()
 
-    suspend fun series(): List<Series> =
+    suspend fun series(): List<Series> = catalog?.vodLibrary()?.series ?: xcSeries()
+
+    private suspend fun xcSeries(): List<Series> =
         Http.json(api("get_series"), timeoutSeconds = 180).arr()?.mapNotNull { e ->
             val o = e.obj() ?: return@mapNotNull null
             val id = o.long("series_id") ?: return@mapNotNull null
@@ -247,6 +268,7 @@ class XtreamClient(private val server: Server) {
         } ?: emptyList()
 
     suspend fun seriesInfo(id: Long): SeriesInfo {
+        catalog?.let { return it.seriesInfo(id) }
         val root = Http.json(api("get_series_info", mapOf("series_id" to id.toString()))).obj()
             ?: throw IllegalStateException("No series info")
         val eps = mutableMapOf<Int, MutableList<XcEpisode>>()
@@ -283,6 +305,7 @@ class XtreamClient(private val server: Server) {
     }
 
     suspend fun vodInfo(id: Long): VodInfo {
+        catalog?.let { return it.vodInfo(id) }
         val root = Http.json(api("get_vod_info", mapOf("vod_id" to id.toString()))).obj()
         val info = root?.child("info")
         return VodInfo(
@@ -300,6 +323,7 @@ class XtreamClient(private val server: Server) {
 
     /** Per-channel guide fallback when the full XMLTV guide isn't loaded. */
     suspend fun channelGuide(channelId: Long): List<Programme> {
+        catalog?.let { return it.programmes(channelId, includePast = true, limit = 200) }
         val root = Http.json(api("get_simple_data_table", mapOf("stream_id" to channelId.toString())), timeoutSeconds = 60).obj()
         return root?.objects("epg_listings")?.mapNotNull { o ->
             val s = o.long("start_timestamp") ?: return@mapNotNull null
@@ -309,26 +333,49 @@ class XtreamClient(private val server: Server) {
         }?.sortedBy { it.start } ?: emptyList()
     }
 
-    fun xmltvUrl(days: Int, prevDays: Int): String =
-        buildUrl(base, "xmltv.php", mapOf("username" to server.username, "password" to server.xcPassword,
-            "days" to days.coerceAtLeast(1).toString(), "prev_days" to prevDays.takeIf { it > 0 }?.toString()))
+    /**
+     * The XMLTV guide. REST streaming servers use the public /output/epg export (no credentials; only
+     * Dispatcharr's "M3U / EPG" network setting applies), whose channel ids are channel numbers too.
+     */
+    fun xmltvUrl(days: Int, prevDays: Int): String {
+        val range = mapOf("days" to days.coerceAtLeast(1).toString(), "prev_days" to prevDays.takeIf { it > 0 }?.toString())
+        if (server.usesRestStreaming) return buildUrl(base, "output/epg", range)
+        return buildUrl(base, "xmltv.php", mapOf("username" to server.username, "password" to server.xcPassword) + range)
+    }
 
-    // Playback URLs
+    // Playback URLs. REST streaming servers play through Dispatcharr's proxy, addressed by UUID; those
+    // endpoints are open (AllowAny, "Streams" network setting), so no auth header (an expired JWT would
+    // get a reconnect rejected). Null when the UUID isn't known yet (see preparePlayback).
     private val u get() = enc(server.username)
     private val p get() = enc(server.xcPassword)
 
-    fun liveUrl(channelId: Long) = "${base}/live/$u/$p/$channelId"
-    fun movieUrl(id: Long, ext: String) = "${base}/movie/$u/$p/$id.$ext"
-    fun episodeUrl(id: Long, ext: String) = "${base}/series/$u/$p/$id.$ext"
+    private fun proxyUrl(kind: Char, id: Long, path: String): String? =
+        DispatcharrUuids.uuid(kind, id, server.id)?.let { "${base}/$path/$it" }
 
-    fun catchupUrl(channelId: Long, start: Long, end: Long): String {
+    fun liveUrl(channelId: Long): String? =
+        if (server.usesRestStreaming) proxyUrl(DispatcharrUuids.CHANNEL, channelId, "proxy/ts/stream") else "${base}/live/$u/$p/$channelId"
+
+    fun movieUrl(id: Long, ext: String): String? =
+        if (server.usesRestStreaming) proxyUrl(DispatcharrUuids.MOVIE, id, "proxy/vod/movie") else "${base}/movie/$u/$p/$id.$ext"
+
+    fun episodeUrl(id: Long, ext: String): String? =
+        if (server.usesRestStreaming) proxyUrl(DispatcharrUuids.EPISODE, id, "proxy/vod/episode") else "${base}/series/$u/$p/$id.$ext"
+
+    /** REST streaming mode: fetches UUIDs this device hasn't seen yet. A no-op for XC servers. */
+    suspend fun preparePlayback(movieId: Long? = null, episodeId: Long? = null) {
+        catalog?.resolveUuids(movieId, episodeId)
+    }
+
+    /** XC timeshift; not available in REST streaming mode. */
+    fun catchupUrl(channelId: Long, start: Long, end: Long): String? {
+        if (server.usesRestStreaming) return null
         val f = SimpleDateFormat("yyyy-MM-dd:HH-mm", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         val minutes = ((end - start) / 60000).coerceAtLeast(1)
         return "${base}/timeshift/$u/$p/$minutes/${f.format(Date(start))}/$channelId.ts"
     }
 }
 
-/** REST API: account login (JWT) or API key; used to fetch the XC password and for DVR. */
+/** REST API: account login (JWT) or API key; /me (XC password), DVR, and REST streaming mode. */
 class DispatcharrRest(private val server: Server) {
     private var access: String? = null
     private val base: String get() = server.url ?: throw IllegalStateException("Invalid server address")
@@ -357,15 +404,34 @@ class DispatcharrRest(private val server: Server) {
         access = res?.str("access") ?: throw IllegalStateException("Login failed")
     }
 
-    data class Me(val id: Long?, val username: String, val xcPassword: String?, val userLevel: Int)
+    data class Me(
+        val id: Long?,
+        val username: String,
+        val xcPassword: String?,
+        val userLevel: Int,
+        val channelProfileIds: List<Long> = emptyList(),
+        /** Whether /me returned custom_properties (so a missing xc_password really means none). */
+        val hasCustomProperties: Boolean = false,
+    )
 
     suspend fun me(): Me {
         val o = authed { h -> Http.json(buildUrl(base, "api/accounts/users/me/"), h) }.obj() ?: throw IllegalStateException("No user")
         val props = o.child("custom_properties")
-        return Me(o.long("id"), o.str("username") ?: server.username, props?.str("xc_password"), o.int("user_level") ?: 0)
+        val profiles = o.list("channel_profiles").mapNotNull { e ->
+            (e as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: e.obj()?.long("id")
+        }
+        return Me(o.long("id"), o.str("username") ?: server.username, props?.str("xc_password"), o.int("user_level") ?: 0,
+            profiles, props != null)
     }
 
-    /** Admins without an XC password can have one generated (Dispatcharr merges custom_properties). */
+    /** Authenticated GET on any REST path (REST streaming mode). */
+    suspend fun get(path: String, query: Map<String, String?> = emptyMap(), timeoutSeconds: Long? = null): JsonElement =
+        authed { h -> Http.json(buildUrl(base, path, query), h, timeoutSeconds = timeoutSeconds) }
+
+    /**
+     * Sets a user's XC password. Admin only: Dispatcharr's PATCH /api/accounts/users/{id}/ is IsAdmin and
+     * /users/me/ strips xc_password. Dispatcharr merges custom_properties, so other properties stay.
+     */
     suspend fun setXcPassword(userId: Long, password: String) {
         val body = """{"custom_properties":{"xc_password":${jsonString(password)}}}"""
         authed { h -> Http.json(buildUrl(base, "api/accounts/users/$userId/"), h, method = "PATCH", body = body) }

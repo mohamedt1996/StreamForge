@@ -137,9 +137,19 @@ final class SourcesModel {
     func load() async {
         isLoading = true
         sources = []
+        await prepareDispatcharrPlayback()
         addDispatcharrSources()
         await loadAddonStreams()
         isLoading = false
+    }
+
+    /// REST streaming servers address streams by UUID: look up any this device hasn't seen yet
+    /// (e.g. an episode from Continue Watching synced from another device).
+    private func prepareDispatcharrPlayback() async {
+        guard let client = DispatcharrStore.shared.client, client.server.usesRESTStreaming else { return }
+        var movieID: Int?
+        if case .dispatcharrMovie(_, let id, _) = item.origin { movieID = id }
+        await client.preparePlayback(movieID: episode == nil ? movieID : nil, episodeID: episode?.dispatcharrEpisodeID)
     }
 
     private func addDispatcharrSources() {

@@ -380,7 +380,9 @@ final class GuideStore {
     /// Downloads and parses the XMLTV guide.
     func refresh(force: Bool = false) async {
         let store = DispatcharrStore.shared
-        guard let server = store.activeServer, let client = store.client, !server.xcPassword.isEmpty else { return }
+        // REST streaming servers (no XC password) use Dispatcharr's /output/epg export instead.
+        guard let server = store.activeServer, let client = store.client,
+              !server.xcPassword.isEmpty || server.usesRESTStreaming else { return }
         guard !phase.isBusy else { return }
         if !force, !isStale { return }
         let days = AppSettings.shared.values.guideDays

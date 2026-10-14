@@ -22,7 +22,7 @@ Live TV with the full guide, catch-up and DVR, the organized movie/series librar
 
 | Area | Implementation |
 | --- | --- |
-| Dispatcharr | Xtream Codes API (`player_api.php`) for live/EPG/VOD/series/catch-up; REST API (JWT) for DVR recordings |
+| Dispatcharr | Xtream Codes API (`player_api.php`) for live/EPG/VOD/series/catch-up when the user has an XC password; otherwise the REST API (`/api/channels`, `/api/vod`, `/api/epg`), `/output/epg` and the stream proxy (`/proxy/ts`, `/proxy/vod`), without catch-up. REST API (JWT / API key) for DVR recordings |
 | Addons | Stremio addon protocol: `manifest`, `catalog`, `meta`, `stream`, `subtitles` |
 | Torrents | `TorrServerKit.xcframework` (TorrServer built with gomobile), started on `127.0.0.1:8091`; same HTTP API for remote servers |
 | Player | `MPVKit` (LGPL build), `vo=gpu-next`, `gpu-context=moltenvk`, `hwdec=videotoolbox` |
@@ -30,7 +30,7 @@ Live TV with the full guide, catch-up and DVR, the organized movie/series librar
 
 ## Setting up
 
-1. **Dispatcharr**: Settings → Dispatcharr → Add Server and sign in with your normal Dispatcharr **username and password** (or an API key). The app reads your XC streaming password from your account automatically (admins without one get one created). The full TV guide downloads in the background and refreshes every few hours.
+1. **Dispatcharr**: Settings → Dispatcharr → Add Server and sign in with your normal Dispatcharr **username and password** (or an API key). No XC password is needed: the app reads it from your account if there is one (admins without one get one created); otherwise it streams through Dispatcharr's own API and stream proxy (everything except catch-up). The full TV guide downloads in the background and refreshes every few hours.
 2. **Addons**: Cinemeta and OpenSubtitles are installed by default. Paste any other addon's manifest link in Settings → Addons, or open a `stremio://` link.
 3. **Metadata**: add a free TMDB key (themoviedb.org → Settings → API) for artwork, cast, trailers and trending. OMDb and Fanart.tv keys are optional.
 4. **Torrents**: iPhone/iPad work out of the box. Apple TV needs a TorrServer address (e.g. `http://192.168.1.10:8090`).

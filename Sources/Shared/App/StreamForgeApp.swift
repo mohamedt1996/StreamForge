@@ -229,6 +229,23 @@ final class AppRouter {
 
     /// Resumes a continue-watching entry: offline copy, server copy, else the detail page.
     func resume(_ entry: WatchProgress) {
+        // REST streaming servers need the stream's UUID, which this device may not have seen yet.
+        if let client = DispatcharrStore.shared.client, client.server.usesRESTStreaming {
+            var movieID: Int?
+            if case .dispatcharrMovie(_, let id, _) = entry.item.origin { movieID = id }
+            let episodeID = entry.episode?.dispatcharrEpisodeID
+            if movieID != nil || episodeID != nil {
+                Task {
+                    await client.preparePlayback(movieID: entry.episode == nil ? movieID : nil, episodeID: episodeID)
+                    resumeNow(entry)
+                }
+                return
+            }
+        }
+        resumeNow(entry)
+    }
+
+    private func resumeNow(_ entry: WatchProgress) {
         let store = DispatcharrStore.shared
         let start = max(0, entry.position - 5)
         if let rec = DownloadManager.shared.record(for: entry.item, episode: entry.episode), rec.state == .completed,

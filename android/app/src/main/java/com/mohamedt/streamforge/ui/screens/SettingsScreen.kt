@@ -189,12 +189,13 @@ private fun DispatcharrSection() {
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
 
-    Section("Dispatcharr", "Account login uses your Dispatcharr username and password: the app reads your XC password automatically (admins get one created). Live TV, the full guide, catch-up, movies, series and DVR all come from your server.") {
+    Section("Dispatcharr", "Account login uses your Dispatcharr username and password (or an API key); no XC password is needed. If your user has one, the app reads it automatically (admins get one created) and uses Xtream Codes, including catch-up. Without one, live TV, the guide, movies, series and DVR come through Dispatcharr's own API.") {
         DispatcharrRepo.servers.forEach { server ->
             Row(Modifier.fillMaxWidth().card({ DispatcharrRepo.activate(server.id) }).padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(server.name + if (server.id == DispatcharrRepo.active?.id) "  ✓" else "", fontWeight = FontWeight.Bold)
-                    Text("${server.username} @ ${server.baseUrl} · ${server.authMode.name.lowercase().replace('_', ' ')}", fontSize = 12.sp, color = Palette.secondary)
+                    Text("${server.username} @ ${server.baseUrl} · ${server.authMode.name.lowercase().replace('_', ' ')}" +
+                        if (server.usesRestStreaming) " · API streaming (no catch-up)" else "", fontSize = 12.sp, color = Palette.secondary)
                 }
                 TextButton(onClick = { DispatcharrRepo.remove(server) }) { Text("Remove", color = Palette.live) }
             }

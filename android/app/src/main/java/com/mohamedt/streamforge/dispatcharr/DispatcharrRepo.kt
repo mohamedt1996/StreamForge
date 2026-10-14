@@ -3,6 +3,7 @@ package com.mohamedt.streamforge.dispatcharr
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.mohamedt.streamforge.core.HttpException
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.Settings
 import com.mohamedt.streamforge.core.Store
@@ -65,9 +66,10 @@ object DispatcharrRepo {
     private var rawMovies: List<Movie> = emptyList()
     private var rawSeries: List<Series> = emptyList()
     private var rest: DispatcharrRest? = null
+    private var credentialsSyncedFor: String? = null
 
     val active: Server? get() = servers.firstOrNull { it.id == activeId } ?: servers.firstOrNull()
-    val client: XtreamClient? get() = active?.let { XtreamClient(it) }
+    val client: XtreamClient? get() = active?.let { XtreamClient(it, if (it.usesRestStreaming) restClient() else null) }
     val isConfigured: Boolean get() = active != null
 
     fun restClient(): DispatcharrRest? {
@@ -85,7 +87,8 @@ object DispatcharrRepo {
 
     /**
      * Signs in and saves the server. Account / API-key logins read the XC password from
-     * /api/accounts/users/me/; admins without one get a generated XC password.
+     * /api/accounts/users/me/. Without one, admins get a generated XC password (only admins may set
+     * it); everyone else streams through the REST API and Dispatcharr's proxy (REST streaming mode).
      */
     suspend fun connect(draft: Server, xcPassword: String, webPassword: String, apiKey: String): String {
         draft.webPassword = webPassword
@@ -97,29 +100,63 @@ object DispatcharrRepo {
             rest.login()
             val me = rest.me()
             if (draft.authMode == AuthMode.API_KEY && draft.username.isEmpty()) server = draft.copy(username = me.username)
-            var xc = me.xcPassword
-            if (xc.isNullOrEmpty()) {
-                if (me.userLevel >= 10 && me.id != null) {
-                    xc = generatePassword()
-                    rest.setXcPassword(me.id, xc)
+            var xc = me.xcPassword.orEmpty()
+            if (xc.isEmpty()) {
+                val created = createXcPasswordIfAllowed(rest, me)
+                if (created != null) {
+                    xc = created
                     note = "Connected · created an XC password for streaming"
-                } else {
-                    throw IllegalStateException("Your Dispatcharr user has no XC password. Ask an admin to set one (Users → edit → XC Password).")
                 }
             }
             server.xcPassword = xc
+            if (xc.isEmpty()) {
+                // No XC password and not allowed to set one: check the REST API lets this user browse.
+                try {
+                    rest.get("api/channels/groups/")
+                } catch (e: HttpException) {
+                    if (e.code == 401 || e.code == 403) {
+                        throw IllegalStateException("Signed in, but Dispatcharr doesn't let this user browse channels through its API. " +
+                            "Streamer-level users need an XC password: ask the admin to set one (Users → edit → XC Password).")
+                    }
+                    throw e
+                }
+                note = "Connected · streaming through Dispatcharr's API (no XC password needed; catch-up unavailable)"
+            }
         } else {
             server.xcPassword = xcPassword
         }
-        XtreamClient(server).authenticate()
+        if (server.xcPassword.isNotEmpty()) XtreamClient(server).authenticate()
         withContext(Dispatchers.Main) { upsert(server) }
         return note
     }
 
+    /** Admins may set their own XC password: generate one, save it, and read it back. Null otherwise. */
+    private suspend fun createXcPasswordIfAllowed(rest: DispatcharrRest, me: DispatcharrRest.Me): String? {
+        if (me.userLevel < 10 || me.id == null) return null
+        val password = generatePassword()
+        return runCatching {
+            rest.setXcPassword(me.id, password)
+            password.takeIf { rest.me().xcPassword == it }
+        }.getOrNull()
+    }
+
+    /** From Dispatcharr's allowed XC password characters (^[A-Za-z0-9._@-]+$). */
     private fun generatePassword(): String {
         val chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         val r = SecureRandom()
-        return (1..16).map { chars[r.nextInt(chars.length)] }.joinToString("")
+        return (1..20).map { chars[r.nextInt(chars.length)] }.joinToString("")
+    }
+
+    /**
+     * Account / API-key servers: re-reads the XC password from /me (once per activation), so one the
+     * admin sets, changes or removes is picked up. Blank switches the server to REST streaming mode.
+     */
+    private suspend fun syncCredentials(server: Server) {
+        if (server.authMode == AuthMode.XC || !server.hasRest || credentialsSyncedFor == server.id) return
+        val me = runCatching { (restClient() ?: return).me() }.getOrNull() ?: return
+        credentialsSyncedFor = server.id
+        val xc = me.xcPassword.orEmpty()
+        if (xc != server.xcPassword && (xc.isNotEmpty() || me.hasCustomProperties)) server.xcPassword = xc
     }
 
     private fun upsert(server: Server) {
@@ -149,6 +186,7 @@ object DispatcharrRepo {
         Store.save(ListSerializer(Server.serializer()), servers, "servers.json")
         RemoteSync.changed()
         Store.file(cacheName(server.id)).delete()
+        DispatcharrUuids.remove(server.id)
         if (activeId == server.id) activate(servers.firstOrNull()?.id)
     }
 
@@ -156,6 +194,7 @@ object DispatcharrRepo {
         activeId = id
         Store.prefs.edit().putString("active.server", id).apply()
         rest = null
+        credentialsSyncedFor = null
         clear()
         loadDiskCache()
         refreshAll(force = true)
@@ -172,9 +211,11 @@ object DispatcharrRepo {
     // MARK: Loading
 
     fun refreshAll(force: Boolean = false) {
-        val c = client ?: return
+        val server = active ?: return
         if (!force && System.currentTimeMillis() - lastRefresh < 15 * 60_000 && channels.isNotEmpty()) return
         scope.launch {
+            syncCredentials(server)
+            val c = client ?: return@launch
             if (channels.isEmpty()) liveState = LoadState.Loading
             if (movieItems.isEmpty() && seriesItems.isEmpty()) vodState = LoadState.Loading
             val live = async(Dispatchers.IO) { runCatching { c.liveCategories() to c.channels() } }
@@ -182,14 +223,23 @@ object DispatcharrRepo {
                 runCatching { listOf(c.vodCategories(), c.seriesCategories()) to (c.movies() to c.series()) }
             }
             live.await().onSuccess { (cats, ch) -> applyLive(cats, ch); liveState = LoadState.Loaded }
-                .onFailure { if (channels.isEmpty()) liveState = LoadState.Failed(it.message ?: "Couldn't load channels") }
+                .onFailure { if (channels.isEmpty()) liveState = LoadState.Failed(loadError(it, c, "Couldn't load channels")) }
             vod.await().onSuccess { (cats, data) -> applyVod(cats[0], data.first, cats[1], data.second); vodState = LoadState.Loaded }
-                .onFailure { if (movieItems.isEmpty()) vodState = LoadState.Failed(it.message ?: "Couldn't load the library") }
+                .onFailure { if (movieItems.isEmpty()) vodState = LoadState.Failed(loadError(it, c, "Couldn't load the library")) }
             lastRefresh = System.currentTimeMillis()
             saveDiskCache()
             GuideRepo.refreshIfStale()
         }
     }
+
+    /** Streamer-level users can't use the REST API, only Xtream Codes. */
+    private fun loadError(e: Throwable, c: XtreamClient, fallback: String): String =
+        if (c.server.usesRestStreaming && e is HttpException && (e.code == 401 || e.code == 403)) {
+            "Dispatcharr didn't let this account browse channels through its API. Streamer-level users can only use Xtream Codes: " +
+                "ask the admin to set an XC password for your user (Users → edit → XC Password)."
+        } else {
+            e.message ?: fallback
+        }
 
     private fun applyLive(cats: List<Category>, list: List<Channel>) {
         val hideAdult = Settings.values.hideAdult

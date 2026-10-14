@@ -155,9 +155,9 @@ fun DetailScreen(initial: MediaItem) {
 
     fun play(ep: Episode) {
         val upcoming = episodes.dropWhile { it.id != ep.id }.drop(1)
-        val client = DispatcharrRepo.client
-        if (ep.xcEpisodeId != null && client != null) {
-            Player.play(context, PlaybackRequest(item, ep, PlaybackSource("xc-ep-${ep.xcEpisodeId}", SourceKind.Direct(client.episodeUrl(ep.xcEpisodeId, ep.ext ?: "mp4")),
+        val url = ep.xcEpisodeId?.let { id -> DispatcharrRepo.client?.episodeUrl(id, ep.ext ?: "mp4") }
+        if (ep.xcEpisodeId != null && url != null) {
+            Player.play(context, PlaybackRequest(item, ep, PlaybackSource("xc-ep-${ep.xcEpisodeId}", SourceKind.Direct(url),
                 "${item.title} ${ep.code}", provider = DispatcharrRepo.active?.name ?: "Server", cached = true), upcoming = upcoming))
         } else {
             picker = ep to upcoming

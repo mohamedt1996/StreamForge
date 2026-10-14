@@ -61,17 +61,19 @@ object Player {
     fun playChannel(context: Context, channel: Channel, list: List<Channel>) {
         val server = DispatcharrRepo.active ?: return
         val client = DispatcharrRepo.client ?: return
+        val url = client.liveUrl(channel.id) ?: return
         Library.recordChannel(channel.id)
         play(context, PlaybackRequest(channel.toItem(server.id),
-            source = PlaybackSource("live:${channel.id}", SourceKind.Direct(client.liveUrl(channel.id)), channel.name, provider = server.name),
+            source = PlaybackSource("live:${channel.id}", SourceKind.Direct(url), channel.name, provider = server.name),
             channelId = channel.id, channelList = list.ifEmpty { DispatcharrRepo.channels }))
     }
 
     fun playCatchup(context: Context, channel: Channel, p: Programme) {
         val server = DispatcharrRepo.active ?: return
         val client = DispatcharrRepo.client ?: return
+        val url = client.catchupUrl(channel.id, p.start, p.end) ?: return
         play(context, PlaybackRequest(channel.toItem(server.id),
-            source = PlaybackSource("catchup:${channel.id}:${p.start}", SourceKind.Direct(client.catchupUrl(channel.id, p.start, p.end)), p.title, provider = server.name),
+            source = PlaybackSource("catchup:${channel.id}:${p.start}", SourceKind.Direct(url), p.title, provider = server.name),
             channelId = channel.id, catchup = p))
     }
 }
@@ -307,10 +309,11 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     fun switchChannel(channel: Channel) {
         val server = DispatcharrRepo.active ?: return
         val client = DispatcharrRepo.client ?: return
+        val url = client.liveUrl(channel.id) ?: return
         previousChannel = request.channelId
         Library.recordChannel(channel.id)
         load(request.copy(item = channel.toItem(server.id), channelId = channel.id, catchup = null, startMs = null,
-            source = PlaybackSource("live:${channel.id}", SourceKind.Direct(client.liveUrl(channel.id)), channel.name, provider = server.name)))
+            source = PlaybackSource("live:${channel.id}", SourceKind.Direct(url), channel.name, provider = server.name)))
     }
 
     fun lastChannel() {

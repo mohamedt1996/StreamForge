@@ -112,7 +112,12 @@ struct DispatcharrSettingsView: View {
                 }
                 Button { adding = true } label: { Label("Add Server", systemImage: "plus.circle.fill") }
             } footer: {
-                Text("Sign in with your Dispatcharr account (or an API key): StreamForge fetches your XC streaming password automatically. Live TV, the guide, catch-up, movies and series come through Dispatcharr's Xtream Codes API; recordings and channel profiles use its REST API.")
+                Text("Sign in with your Dispatcharr account (or an API key). When your user has an XC password, live TV, the guide, catch-up, movies and series come through Dispatcharr's Xtream Codes API; without one, StreamForge streams through Dispatcharr's own API instead (no catch-up). Recordings and channel profiles always use the REST API.")
+            }
+            if let note = store.streamingModeNote {
+                Section {
+                    Label(note, systemImage: "info.circle").font(.footnote).foregroundStyle(Theme.secondaryText)
+                }
             }
             if let warning = store.credentialWarning {
                 Section {
@@ -171,8 +176,6 @@ struct DispatcharrServerForm: View {
     @State private var testing = false
     @State private var result: String?
     @State private var ok = false
-    /// Account / API-key login worked but the user has no XC password in Dispatcharr.
-    @State private var needsManualXC = false
     @State private var verified = false
 
     var body: some View {
@@ -195,15 +198,13 @@ struct DispatcharrServerForm: View {
                         #endif
                 }
                 credentialsSection
-                if needsManualXC || mode == .xc {
+                if mode == .xc {
                     Section {
                         SecureField("XC password", text: $xcPassword)
                     } header: {
-                        Text(mode == .xc ? "Streaming (required)" : "XC password")
+                        Text("Streaming (required)")
                     } footer: {
-                        Text(mode == .xc
-                             ? "The XC password is set per user in Dispatcharr (Users → edit → XC Password). It is not your web login password."
-                             : "Your Dispatcharr user has no XC password yet. Ask the admin to set one (Users → edit user → XC Password), or enter it here if you know it.")
+                        Text("The XC password is set per user in Dispatcharr (Users → edit → XC Password). It is not your web login password. If your user has no XC password, sign in with your account or an API key instead.")
                     }
                 }
                 if mode == .xc {
@@ -236,7 +237,7 @@ struct DispatcharrServerForm: View {
                     Button("Save") { Task { await saveTapped() } }.disabled(!canSave || testing)
                 }
             }
-            .onChange(of: mode) { result = nil; needsManualXC = false; verified = false }
+            .onChange(of: mode) { result = nil; verified = false }
         }
         .onAppear {
             if let server {
@@ -269,7 +270,7 @@ struct DispatcharrServerForm: View {
             Section {
                 SecureField("API key", text: $apiKey)
             } header: { Text("API key") } footer: {
-                Text("Create a key in Dispatcharr (your user menu → API keys). The username and XC password are read from your account.")
+                Text("Create a key in Dispatcharr (your user menu → API keys). The username and XC password (if your user has one) are read from your account.")
             }
         case .xc:
             Section {
@@ -284,7 +285,7 @@ struct DispatcharrServerForm: View {
 
     private var modeFooter: String {
         switch mode {
-        case .account: return "Recommended: one login gives live TV, guide, VOD, DVR and channel profiles."
+        case .account: return "Recommended: one login gives live TV, guide, VOD, DVR and channel profiles. No XC password needed."
         case .apiKey: return "For accounts that use API keys instead of a password."
         case .xc: return "Only the Xtream Codes credentials. Add a web password for DVR."
         }
@@ -299,11 +300,7 @@ struct DispatcharrServerForm: View {
         }
     }
 
-    private var canSave: Bool {
-        guard canTest else { return false }
-        if mode == .xc { return true }
-        return verified || !xcPassword.isEmpty
-    }
+    private var canSave: Bool { canTest }
 
     private func draft() -> DispatcharrServer {
         var s = server ?? DispatcharrServer(name: "", baseURL: "", username: "")
@@ -333,23 +330,41 @@ struct DispatcharrServerForm: View {
             var text = ""
             var probeServer = p
             if mode != .xc {
-                let me = try await DispatcharrREST(server: p).me()
+                let rest = DispatcharrREST(server: p)
+                let me = try await rest.me()
                 if !me.username.isEmpty {
                     username = me.username
                     probeServer.username = me.username
                 }
+                text = "Signed in as \(me.username.isEmpty ? "API key" : me.username)"
                 if let xc = me.xcPassword, !xc.isEmpty {
                     xcPassword = xc
                     p.xcPassword = xc
-                    needsManualXC = false
-                } else if xcPassword.isEmpty {
-                    needsManualXC = true
+                } else if let created = await rest.createXCPasswordIfAllowed(for: me) {
+                    // Admins may set their own XC password: create one so catch-up works too.
+                    xcPassword = created
+                    p.xcPassword = created
+                    text += " · created an XC password for streaming"
+                } else {
+                    // No XC password (and not allowed to set one): stream through the REST API.
+                    xcPassword = ""
+                    p.xcPassword = ""
+                    do {
+                        _ = try await rest.get("api/channels/groups/")
+                    } catch {
+                        // Signed in, but the REST API refused the channel list: a streamer-level
+                        // user (an API key that worked for /me is reported as "rejected" too).
+                        var denied = false
+                        if case HTTPError.unauthorized = error { denied = true }
+                        if mode == .apiKey, case HTTPError.transport(_) = error { denied = true }
+                        guard denied else { throw error }
+                        throw HTTPError.transport("Signed in, but Dispatcharr doesn't let this user browse channels through its API. Streamer-level users need an XC password: ask the admin to set one (Users → edit → XC Password).")
+                    }
                     verified = true
-                    result = "Signed in as \(me.username), but this user has no XC password. Ask your Dispatcharr admin to set one (Users → edit → XC Password), or enter it below."
-                    ok = false
+                    result = text + " · streaming through Dispatcharr's API (no XC password needed; catch-up unavailable)"
+                    ok = true
                     return
                 }
-                text = "Signed in as \(me.username.isEmpty ? "API key" : me.username)"
             }
             let auth = try await XtreamClient(server: probeServer).authenticate()
             text += text.isEmpty ? "Connected" : " · streaming OK"
@@ -372,9 +387,9 @@ struct DispatcharrServerForm: View {
     }
 
     private func saveTapped() async {
-        if mode != .xc, !verified || xcPassword.isEmpty {
+        if mode != .xc, !verified {
             await test()
-            guard ok, !xcPassword.isEmpty else { return }
+            guard ok else { return }
         }
         switch mode {
         case .account:
