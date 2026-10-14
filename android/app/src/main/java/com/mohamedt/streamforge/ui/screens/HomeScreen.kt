@@ -67,7 +67,8 @@ fun HomeScreen(onSearch: () -> Unit, onSettings: () -> Unit) {
     var trendingSeries by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var catalogs by remember { mutableStateOf<List<Pair<Addons.CatalogEntry, List<MediaItem>>>>(emptyList()) }
 
-    LaunchedEffect(Unit) {
+    // Re-run when addons change: on first launch Cinemeta is installed in the background after Home is shown.
+    LaunchedEffect(Addons.addons) {
         coroutineScope {
             val m = async { if (Tmdb.configured) runCatching { Tmdb.trending(MediaType.MOVIE) }.getOrDefault(emptyList()) else emptyList() }
             val s = async { if (Tmdb.configured) runCatching { Tmdb.trending(MediaType.SERIES) }.getOrDefault(emptyList()) else emptyList() }
@@ -131,8 +132,8 @@ fun HomeScreen(onSearch: () -> Unit, onSettings: () -> Unit) {
         item { Shelf("My List", Library.favorites, key = { it.id }) { PosterCard(it, { open(it) }) } }
         item { Shelf("Trending Movies", trendingMovies, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
         item { Shelf("Trending Series", trendingSeries, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
-        catalogs.forEach { (entry, items) ->
-            item(key = "cat-${entry.addon.id}-${entry.catalog.type}-${entry.catalog.id}") {
+        catalogs.forEachIndexed { i, (entry, items) ->
+            item(key = "cat-$i-${entry.addon.id}-${entry.catalog.type}-${entry.catalog.id}") {
                 Shelf(entry.title, items, subtitle = entry.addon.name, seeAll = { nav.push(Screen.Catalog(entry)) }, key = { it.id }) { PosterCard(it, { open(it) }) }
             }
         }

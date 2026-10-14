@@ -202,7 +202,8 @@ fun <T> Shelf(title: String, items: List<T>, subtitle: String? = null, seeAll: (
         SectionHeader(title, subtitle, seeAll)
         Spacer(Modifier.height(10.dp))
         LazyRow(contentPadding = PaddingValues(horizontal = Dims.gutter(), vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(if (isTv()) 22.dp else 12.dp)) {
-            if (key != null) items(items, key = key) { content(it) } else items(items) { content(it) }
+            // Duplicate keys crash a lazy list (addons, TMDB credits and providers do repeat ids).
+            if (key != null) items(items.distinctBy { key(it) }, key = key) { content(it) } else items(items) { content(it) }
         }
     }
 }

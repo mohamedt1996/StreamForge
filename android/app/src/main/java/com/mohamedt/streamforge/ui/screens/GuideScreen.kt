@@ -54,6 +54,7 @@ fun GuideScreen() {
     val hours = 12
     var windowStart by remember { mutableStateOf(roundedStart()) }
     var favoritesOnly by remember { mutableStateOf(false) }
+    var detailsFor by remember { mutableStateOf<Channel?>(null) }
     val scroll = rememberScrollState()
     val channels = if (favoritesOnly) Library.favoriteChannels.mapNotNull { DispatcharrRepo.channel(it) }
     else DispatcharrRepo.channels.filter { !Library.isHidden("live:${it.categoryId}") }
@@ -82,9 +83,12 @@ fun GuideScreen() {
             }
         }
         LazyColumn(Modifier.fillMaxSize()) {
-            items(channels, key = { it.id }) { ch -> GuideRow(ch, channels, windowStart, hours, minuteWidth, rowHeight, channelWidth, scroll) }
+            items(channels, key = { it.id }) { ch -> GuideRow(ch, channels, windowStart, hours, minuteWidth, rowHeight, channelWidth, scroll) { detailsFor = ch } }
         }
     }
+
+    // Upcoming programmes / long-press: full schedule with Record, catch-up and favorite.
+    detailsFor?.let { ch -> ProgrammeDialog(ch) { detailsFor = null } }
 }
 
 private fun roundedStart(): Long {
@@ -94,14 +98,13 @@ private fun roundedStart(): Long {
 
 @Composable
 private fun GuideRow(ch: Channel, list: List<Channel>, windowStart: Long, hours: Int, minuteWidth: androidx.compose.ui.unit.Dp,
-                     rowHeight: androidx.compose.ui.unit.Dp, channelWidth: androidx.compose.ui.unit.Dp, scroll: ScrollState) {
+                     rowHeight: androidx.compose.ui.unit.Dp, channelWidth: androidx.compose.ui.unit.Dp, scroll: ScrollState, onDetails: () -> Unit) {
     val context = LocalContext.current
-    var selected by remember { mutableStateOf<Boolean>(false) }
     LaunchedEffect(ch.id) { GuideRepo.ensure(ch) }
     val windowEnd = windowStart + hours * 3_600_000L
     val programmes = GuideRepo.forChannel(ch).filter { it.end > windowStart && it.start < windowEnd }
     Row(Modifier.fillMaxWidth().height(rowHeight).padding(vertical = 2.dp)) {
-        Row(Modifier.width(channelWidth).fillMaxHeight().card({ Player.playChannel(context, ch, list) }).background(Palette.surfaceHigh).padding(6.dp),
+        Row(Modifier.width(channelWidth).fillMaxHeight().card({ Player.playChannel(context, ch, list) }, onDetails).background(Palette.surfaceHigh).padding(6.dp),
             verticalAlignment = Alignment.CenterVertically) {
             ChannelLogo(ch.icon, ch.name, rowHeight * 0.6f)
             Spacer(Modifier.width(6.dp))
@@ -117,9 +120,9 @@ private fun GuideRow(ch: Channel, list: List<Channel>, windowStart: Long, hours:
                 val x = minuteWidth * ((start - windowStart) / 60_000f)
                 val w = minuteWidth * ((end - start) / 60_000f)
                 Column(
-                    Modifier.offset(x = x).width(w - 3.dp).fillMaxHeight()
-                        .card({ if (p.isLive) Player.playChannel(context, ch, list) else if (p.end < System.currentTimeMillis() && ch.hasArchive) Player.playCatchup(context, ch, p) else selected = !selected },
-                            shape = RoundedCornerShape(8.dp))
+                    Modifier.offset(x = x).width(maxOf(w - 3.dp, 1.dp)).fillMaxHeight()
+                        .card({ if (p.isLive) Player.playChannel(context, ch, list) else if (p.end < System.currentTimeMillis() && ch.hasArchive) Player.playCatchup(context, ch, p) else onDetails() },
+                            onDetails, shape = RoundedCornerShape(8.dp))
                         .background(if (p.isLive) Palette.accent.copy(alpha = 0.35f) else Palette.surface)
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 ) {

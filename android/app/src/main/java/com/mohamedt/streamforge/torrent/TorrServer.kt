@@ -18,6 +18,8 @@ import com.mohamedt.streamforge.core.str
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -129,7 +131,15 @@ object TorrServer {
             return mapOf("Authorization" to "Basic $token")
         }
 
+    private val startLock = Mutex()
+
     suspend fun startEmbeddedIfNeeded() {
+        if (!embedded || embeddedRunning) return
+        // App start, the Activity tab and every API call race here; start the Go server only once.
+        startLock.withLock { startLocked() }
+    }
+
+    private suspend fun startLocked() {
         if (!embedded || embeddedRunning) return
         val dir = Store.file("torrserver").apply { mkdirs() }
         val err = withContext(Dispatchers.IO) {

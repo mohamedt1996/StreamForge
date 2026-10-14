@@ -6,7 +6,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -63,7 +64,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -92,6 +93,8 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
     var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
     val tv = isTv()
     val focus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    val errorFocus = remember { FocusRequester() }
     val step = Settings.values.seekStep * 1000L
 
     LaunchedEffect(interaction) { if (interaction > 0) { controls = true; lastTouch = System.currentTimeMillis() } }
@@ -100,6 +103,20 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
         if (!c.paused && panel == null) controls = false
     }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    // TV: the root Box is itself focusable, so D-pad focus search can't descend into the controls on its own.
+    // Move focus explicitly: play button when controls show, error buttons on error, root when hidden.
+    val hasError = c.error != null
+    LaunchedEffect(controls, panel, hasError) {
+        if (!tv || panel != null) return@LaunchedEffect
+        delay(60)
+        runCatching {
+            when {
+                hasError -> errorFocus.requestFocus()
+                controls -> playFocus.requestFocus()
+                else -> focus.requestFocus()
+            }
+        }
+    }
 
     BackHandler(enabled = panel != null || (controls && tv && c.started)) {
         if (panel != null) panel = null else controls = false
@@ -108,10 +125,11 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(focus)
-            .onKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown || panel != null) return@onKeyEvent false
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // Any remote key keeps the controls alive (also keys consumed by a focused button).
                 lastTouch = System.currentTimeMillis()
-                if (controls) return@onKeyEvent false
+                if (panel != null || controls || c.error != null) return@onPreviewKeyEvent false
                 when (e.key) {
                     Key.DirectionLeft -> { if (c.isLive) c.lastChannel() else c.seekBy(-step); true }
                     Key.DirectionRight -> { if (c.isLive) panel = Panel.CHANNELS else c.seekBy(step); true }
@@ -150,7 +168,7 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
                 Text(err, color = Palette.secondary)
                 Row {
                     TextButton(onClick = onClose) { Text("Close") }
-                    TextButton(onClick = { c.retry() }) { Text("Try again") }
+                    TextButton(onClick = { c.retry() }, modifier = Modifier.focusRequester(errorFocus)) { Text("Try again") }
                     if (c.isLive) TextButton(onClick = { c.zap(1) }) { Text("Next channel") }
                 }
             }
@@ -187,15 +205,15 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
                 }
             }
 
-            AnimatedVisibility(controls && c.error == null, enter = fadeIn(), exit = fadeOut()) { Controls(c, onClose, onPip) { panel = it } }
+            AnimatedVisibility(controls && c.error == null, enter = fadeIn(), exit = fadeOut()) { Controls(c, onClose, onPip, playFocus) { panel = it } }
 
-            panel?.let { p -> SidePanel(c, p) { panel = null } }
+            panel?.let { p -> androidx.compose.runtime.key(p) { SidePanel(c, p) { panel = null } } }
         }
     }
 }
 
 @Composable
-private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit, openPanel: (Panel) -> Unit) {
+private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit, playFocus: FocusRequester, openPanel: (Panel) -> Unit) {
     val tv = isTv()
     val step = Settings.values.seekStep * 1000L
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.85f))))) {
@@ -216,7 +234,7 @@ private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit
         Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
             if (c.isLive) CtrlButton(Icons.Filled.KeyboardArrowUp, "Previous channel", { c.zap(-1) }, 56.dp)
             else CtrlButton(Icons.Filled.FastRewind, "Back", { c.seekBy(-step) }, 56.dp)
-            CtrlButton(if (c.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause, "Play/Pause", { c.togglePause() }, 76.dp)
+            CtrlButton(if (c.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause, "Play/Pause", { c.togglePause() }, 76.dp, Modifier.focusRequester(playFocus))
             if (c.isLive) CtrlButton(Icons.Filled.KeyboardArrowDown, "Next channel", { c.zap(1) }, 56.dp)
             else CtrlButton(Icons.Filled.FastForward, "Forward", { c.seekBy(step) }, 56.dp)
         }
@@ -268,8 +286,8 @@ private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit
 }
 
 @Composable
-private fun CtrlButton(icon: ImageVector, label: String, onClick: () -> Unit, size: androidx.compose.ui.unit.Dp = 44.dp) {
-    Box(Modifier.size(size).card(onClick, shape = CircleShape), contentAlignment = Alignment.Center) {
+private fun CtrlButton(icon: ImageVector, label: String, onClick: () -> Unit, size: androidx.compose.ui.unit.Dp = 44.dp, modifier: Modifier = Modifier) {
+    Box(modifier.size(size).card(onClick, shape = CircleShape), contentAlignment = Alignment.Center) {
         Icon(icon, label, Modifier.size(size * 0.6f), tint = Color.White)
     }
 }
@@ -292,17 +310,28 @@ private fun TextChipIcon(icon: ImageVector, text: String, onClick: () -> Unit) {
 
 @Composable
 private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
-    Box(Modifier.fillMaxSize().clickable(onClick = onClose)) {
-        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(if (isTv()) 460.dp else 340.dp).background(Color(0xF0121026)).padding(16.dp)
-            .clickable(enabled = false) {}) {
+    val tv = isTv()
+    val first = remember { FocusRequester() }
+    val channels = c.request.channelList
+    val focusChannelId = channels.firstOrNull { it.id == c.request.channelId }?.id ?: channels.firstOrNull()?.id
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = if (panel == Panel.CHANNELS) channels.indexOfFirst { it.id == focusChannelId }.coerceAtLeast(0) else 0)
+    // Give the remote something to focus inside the panel.
+    LaunchedEffect(panel) { if (tv) { delay(60); runCatching { first.requestFocus() } } }
+    // Tap outside closes; not a focus target, so the D-pad stays inside the list.
+    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { onClose() } }) {
+        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(if (tv) 460.dp else 340.dp).background(Color(0xF0121026)).padding(16.dp)
+            .pointerInput(Unit) { detectTapGestures { } }) {
             Text(when (panel) { Panel.AUDIO -> "Audio"; Panel.SUBTITLES -> "Subtitles"; Panel.CHANNELS -> "Channels"; Panel.SETTINGS -> "Playback" },
                 fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
-            LazyColumn {
+            LazyColumn(state = listState) {
                 when (panel) {
-                    Panel.AUDIO -> items(c.audioTracks) { t -> Option(t.label, t.selected) { c.selectAudio(t) } }
+                    Panel.AUDIO -> itemsIndexed(c.audioTracks) { i, t ->
+                        Option(t.label, t.selected, if (i == 0) Modifier.focusRequester(first) else Modifier) { c.selectAudio(t) }
+                    }
                     Panel.SUBTITLES -> {
-                        item { Option("Off", c.subtitleTracks.none { it.selected }) { c.selectSubtitle(null) } }
+                        item { Option("Off", c.subtitleTracks.none { it.selected }, Modifier.focusRequester(first)) { c.selectSubtitle(null) } }
                         items(c.subtitleTracks) { t -> Option(t.label, t.selected) { c.selectSubtitle(t) } }
                         if (c.addonSubtitles.isNotEmpty()) item { Text("FROM ADDONS", fontSize = 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
                         items(c.addonSubtitles.take(60)) { s ->
@@ -317,9 +346,9 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
                             }
                         }
                     }
-                    Panel.CHANNELS -> items(c.request.channelList, key = { it.id }) { ch ->
+                    Panel.CHANNELS -> items(channels.distinctBy { it.id }, key = { it.id }) { ch ->
                         val now = GuideRepo.now(ch)
-                        Row(Modifier.fillMaxWidth().card({ c.switchChannel(ch); onClose() }).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row((if (ch.id == focusChannelId) Modifier.focusRequester(first) else Modifier).fillMaxWidth().card({ c.switchChannel(ch); onClose() }).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             ch.number?.let { Text("$it", fontSize = 12.sp, color = Palette.secondary, modifier = Modifier.width(36.dp)) }
                             ChannelLogo(ch.icon, ch.name, 34.dp)
                             Spacer(Modifier.width(8.dp))
@@ -330,14 +359,14 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
                         }
                     }
                     Panel.SETTINGS -> {
-                        item { Option("Night mode", c.nightMode) { c.toggleNightMode() } }
+                        item { Option("Night mode", c.nightMode, Modifier.focusRequester(first)) { c.toggleNightMode() } }
                         item { Option("Volume +25%", false) { c.changeVolume(25) } }
                         item { Option("Volume −25%", false) { c.changeVolume(-25) } }
                         if (c.request.episode != null) {
                             item { Option("Mark intro start here", false) { c.markIntro(true) } }
                             item { Option("Mark intro end here", false) { c.markIntro(false) } }
                         }
-                        c.mpv.chapters().takeIf { it.size > 1 }?.let { chs ->
+                        c.chapters.takeIf { it.size > 1 }?.let { chs ->
                             item { Text("CHAPTERS", fontSize = 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
                             items(chs) { ch -> Option("${ch.title} · ${(ch.time * 1000).toLong().clockText()}", false) { c.seekTo((ch.time * 1000).toLong()) } }
                         }
@@ -350,8 +379,8 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
 }
 
 @Composable
-private fun Option(text: String, selected: Boolean, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().card(onClick, shape = RoundedCornerShape(10.dp)).background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+private fun Option(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Row(modifier.fillMaxWidth().card(onClick, shape = RoundedCornerShape(10.dp)).background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
         .padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(text, Modifier.weight(1f), fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
         if (selected) Text("✓", color = Palette.accent)

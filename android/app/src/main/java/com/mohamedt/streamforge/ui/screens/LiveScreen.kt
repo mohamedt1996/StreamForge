@@ -92,7 +92,7 @@ fun LiveScreen() {
         DispatcharrRepo.channels.isEmpty() -> { Loading("Loading channels…"); return }
     }
 
-    val list: List<Channel> = remember(filter, query, DispatcharrRepo.channels, Library.favoriteChannels, GuideRepo.programmes) {
+    val list: List<Channel> = remember(filter, query, DispatcharrRepo.channels, Library.favoriteChannels, Library.recentChannels, GuideRepo.programmes) {
         val base = when (val f = filter) {
             LiveFilter.Favorites -> Library.favoriteChannels.mapNotNull { DispatcharrRepo.channel(it) }
             LiveFilter.Recent -> Library.recentChannels.mapNotNull { DispatcharrRepo.channel(it) }

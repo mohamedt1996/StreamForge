@@ -104,6 +104,7 @@ class SourcesModel(val item: MediaItem, val episode: Episode?) {
         get() {
             val s = Settings.values
             return sources.filter { !(s.excludeCam && "CAM" in it.tags) && (it.resolution <= s.maxResolution || it.resolution == 0) }
+                .distinctBy { it.id }
                 .sortedByDescending { it.score }
         }
 

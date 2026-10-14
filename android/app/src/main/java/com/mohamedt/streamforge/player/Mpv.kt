@@ -64,15 +64,22 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
         setNightMode(s.nightMode)
     }
 
+    /** True while a Surface is attached; loadfile is deferred until then (like mpv-android) so the VO can initialise. */
+    private var surfaceAttached = false
+    private var pendingLoad: (() -> Unit)? = null
+
     fun attach(surface: Surface) {
         if (destroyed) return
         lib.attachSurface(surface)
         lib.setOptionString("force-window", "yes")
         lib.setOptionString("vo", "gpu-next")
+        surfaceAttached = true
+        pendingLoad?.let { pendingLoad = null; it() }
     }
 
     fun detach() {
         if (destroyed) return
+        surfaceAttached = false
         lib.setOptionString("vo", "null")
         lib.setOptionString("force-window", "no")
         lib.detachSurface()
@@ -81,6 +88,10 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
 
     fun load(url: String, start: Double? = null, headers: Map<String, String> = emptyMap(), live: Boolean = false, title: String? = null) {
         if (destroyed) return
+        if (!surfaceAttached) {
+            pendingLoad = { load(url, start, headers, live, title) }
+            return
+        }
         val s = Settings.values
         lib.setPropertyString("http-header-fields", headers.entries.joinToString(",") { "${it.key}: ${it.value}" })
         lib.setPropertyString("start", start?.let { "%.2f".format(java.util.Locale.US, it) } ?: "none")
@@ -161,6 +172,7 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        pendingLoad = null
         lib.removeObserver(this)
         lib.destroy()
     }
@@ -174,6 +186,8 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
     override fun event(eventId: Int) { main.post { listener.onEvent(eventId) } }
 
     companion object {
+        /** MPV_EVENT_START_FILE from mpv's client.h (stable ABI value). */
+        const val EVENT_START_FILE = 6
         const val EVENT_FILE_LOADED = MpvEvent.MPV_EVENT_FILE_LOADED
         const val EVENT_END_FILE = MpvEvent.MPV_EVENT_END_FILE
         const val EVENT_PLAYBACK_RESTART = MpvEvent.MPV_EVENT_PLAYBACK_RESTART

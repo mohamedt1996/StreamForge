@@ -44,7 +44,8 @@ fun SearchScreen() {
 
     LaunchedEffect(query) {
         val q = query.trim()
-        if (q.length < 2) { channels = emptyList(); groups = emptyList(); return@LaunchedEffect }
+        // Reset the spinner too: a cancelled previous search leaves `searching` true.
+        if (q.length < 2) { channels = emptyList(); groups = emptyList(); searching = false; return@LaunchedEffect }
         delay(350)
         searching = true
         val lower = q.lowercase()
@@ -67,14 +68,15 @@ fun SearchScreen() {
             item {
                 Shelf("Live Channels", channels, key = { it.id }) { ch -> ChannelTile(ch, GuideRepo.now(ch)) { Player.playChannel(context, ch, channels) } }
             }
-            groups.forEach { (title, items) ->
-                item(key = title) { Shelf(title, items, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
+            groups.forEachIndexed { i, (title, items) ->
+                // Two catalogs can share a display title: key by position to avoid duplicate-key crashes.
+                item(key = "g$i") { Shelf(title, items, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
             }
             if (searching) item { CircularProgressIndicator(Modifier.padding(24.dp)) }
             if (query.trim().length < 2) {
                 item { Text("Explore addon catalogs", color = Palette.secondary, modifier = Modifier.padding(Dims.gutter())) }
-                Addons.catalogs.forEach { entry ->
-                    item(key = "c-${entry.addon.id}-${entry.catalog.type}-${entry.catalog.id}") {
+                Addons.catalogs.forEachIndexed { i, entry ->
+                    item(key = "c-$i-${entry.addon.id}-${entry.catalog.type}-${entry.catalog.id}") {
                         Text("${entry.title} · ${entry.addon.name}", color = Palette.accent,
                             modifier = Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 2.dp)
                                 .card({ nav.push(Screen.Catalog(entry)) }).padding(8.dp))

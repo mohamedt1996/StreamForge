@@ -1,6 +1,7 @@
 package com.mohamedt.streamforge
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -86,8 +87,9 @@ class PlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> { c.togglePause(); return true }
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { c.seekBy(step); return true }
             KeyEvent.KEYCODE_MEDIA_REWIND -> { c.seekBy(-step); return true }
-            KeyEvent.KEYCODE_CHANNEL_UP -> { c.zap(-1); return true }
-            KeyEvent.KEYCODE_CHANNEL_DOWN -> { c.zap(1); return true }
+            // Channel up = next (higher) channel number; the list is sorted by number.
+            KeyEvent.KEYCODE_CHANNEL_UP -> { c.zap(1); return true }
+            KeyEvent.KEYCODE_CHANNEL_DOWN -> { c.zap(-1); return true }
             KeyEvent.KEYCODE_LAST_CHANNEL -> { c.lastChannel(); return true }
             KeyEvent.KEYCODE_MEDIA_NEXT -> { if (c.isLive) c.zap(1) else c.playNextEpisode(); return true }
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { if (c.isLive) c.zap(-1) else c.seekTo(0); return true }
@@ -97,9 +99,24 @@ class PlayerActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTask: a second Player.play() (e.g. while in PiP) lands here instead of onCreate.
+        val request = Player.pending ?: return
+        Player.pending = null
+        controller?.open(request)
+    }
+
     override fun onStop() {
         super.onStop()
-        controller?.saveProgress(force = true)
+        val c = controller ?: return
+        c.saveProgress(force = true)
+        if (inPip || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode)) {
+            // The PiP window was dismissed: stop playback entirely.
+            finish()
+        } else {
+            c.pauseForBackground()
+        }
     }
 
     override fun onDestroy() {

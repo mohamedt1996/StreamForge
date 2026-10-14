@@ -188,7 +188,7 @@ fun DetailScreen(initial: MediaItem) {
                     d.seasons.forEach { s -> Chip(if (s == 0) "Specials" else "Season $s", season == s) { season = s } }
                 }
             }
-            episodes.forEach { ep -> item(key = "ep-${ep.id}") { EpisodeRow(item, ep) { play(ep) } } }
+            episodes.distinctBy { it.id }.forEach { ep -> item(key = "ep-${ep.id}") { EpisodeRow(item, ep) { play(ep) } } }
         }
         if (item.type == MediaType.MOVIE) {
             item {

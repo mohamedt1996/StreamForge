@@ -47,6 +47,13 @@ object Player {
     var pending: PlaybackRequest? = null
 
     fun play(context: Context, request: PlaybackRequest) {
+        // Addon "externalUrl" streams open in another app instead of failing inside the player.
+        (request.source.kind as? SourceKind.External)?.let { ext ->
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(ext.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            return
+        }
         pending = request
         context.startActivity(Intent(context, PlayerActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
@@ -106,6 +113,9 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     private var autoSkipped = HashSet<String>()
     private var numberJob: Job? = null
     private var resolveJob: Job? = null
+    /** Set when mpv reports START_FILE / FILE_LOADED for the current load; events from the replaced file are ignored. */
+    private var fileStarted = false
+    private var fileLoaded = false
 
     val isLive get() = request.isLive
     val title get() = request.catchup?.title ?: if (isLive) currentChannel?.name ?: request.item.title else request.item.title
@@ -131,6 +141,7 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     private fun load(r: PlaybackRequest) {
         request = r
         positionMs = 0; durationMs = 0; cachedMs = 0; started = false; buffering = true; error = null; status = null
+        fileStarted = false; fileLoaded = false
         segments = emptyList(); addonSubtitles = emptyList(); autoSkipped.clear()
         resolveJob?.cancel()
         resolveJob = scope.launch {
@@ -252,6 +263,23 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     fun retry() { load(request) }
 
+    /** A new request while the (singleTask) player is already open, e.g. from PiP. */
+    fun open(r: PlaybackRequest) {
+        saveProgress(force = true)
+        val old = torrentHash
+        val newHash = (r.source.kind as? SourceKind.Torrent)?.source?.infoHash
+        if (old != null && old != newHash) {
+            torrentHash = null
+            CoroutineScope(Dispatchers.IO).launch { runCatching { TorrServer.drop(old) } }
+        }
+        previousChannel = null
+        if (paused) mpv.setFlag("pause", false)
+        load(r)
+    }
+
+    /** Leaving the player without PiP (Home on TV, screen off): don't keep playing audio in the background. */
+    fun pauseForBackground() { if (!paused) mpv.setFlag("pause", true) }
+
     // MARK: Live TV
 
     private val channelIndex: Int? get() = request.channelId?.let { id -> request.channelList.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
@@ -322,7 +350,7 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     override fun onProperty(name: String, value: Any?) {
         when (name) {
-            "time-pos" -> (value as? Double)?.let { positionMs = (it * 1000).toLong(); if (it > 0.3 && !started) onStarted() }
+            "time-pos" -> if (fileLoaded) (value as? Double)?.let { positionMs = (it * 1000).toLong(); if (it > 0.3 && !started) onStarted() }
             "duration" -> durationMs = ((value as? Double) ?: 0.0).times(1000).toLong()
             "pause" -> paused = value as? Boolean ?: false
             "paused-for-cache" -> buffering = value as? Boolean ?: false
@@ -336,10 +364,15 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     override fun onEvent(id: Int) {
         when (id) {
-            Mpv.EVENT_FILE_LOADED -> { status = null; error = null; refreshTracks(); chapters = mpv.chapters() }
-            Mpv.EVENT_END_FILE -> if (!started && error == null) scope.launch {
-                delay(1500)
-                if (!started) { error = if (isLive) "The channel isn't responding." else "Playback failed."; buffering = false }
+            Mpv.EVENT_START_FILE -> fileStarted = true
+            Mpv.EVENT_FILE_LOADED -> { fileLoaded = true; status = null; error = null; refreshTracks(); chapters = mpv.chapters() }
+            // END_FILE of the file being replaced (channel zap, next episode) arrives before START_FILE of the new one: ignore it.
+            Mpv.EVENT_END_FILE -> if (fileStarted && !started && error == null) {
+                val failed = request
+                scope.launch {
+                    delay(1500)
+                    if (!started && request === failed) { error = if (isLive) "The channel isn't responding." else "Playback failed."; buffering = false }
+                }
             }
         }
     }

@@ -1,6 +1,7 @@
 package com.mohamedt.streamforge.dispatcharr
 
 import com.mohamedt.streamforge.core.Http
+import com.mohamedt.streamforge.core.HttpException
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.MediaType
 import com.mohamedt.streamforge.core.Origin
@@ -338,6 +339,17 @@ class DispatcharrRest(private val server: Server) {
         return mapOf("Authorization" to "Bearer $access")
     }
 
+    /** Runs [block] with auth headers; an expired JWT (401/403) triggers one fresh login and a retry. */
+    private suspend fun <T> authed(block: suspend (Map<String, String>) -> T): T =
+        try {
+            block(headers())
+        } catch (e: HttpException) {
+            if (server.authMode == AuthMode.API_KEY || (e.code != 401 && e.code != 403)) throw e
+            access = null
+            login()
+            block(headers())
+        }
+
     suspend fun login() {
         if (server.authMode == AuthMode.API_KEY) return
         val body = """{"username":${jsonString(server.username)},"password":${jsonString(server.webPassword)}}"""
@@ -348,7 +360,7 @@ class DispatcharrRest(private val server: Server) {
     data class Me(val id: Long?, val username: String, val xcPassword: String?, val userLevel: Int)
 
     suspend fun me(): Me {
-        val o = Http.json(buildUrl(base, "api/accounts/users/me/"), headers()).obj() ?: throw IllegalStateException("No user")
+        val o = authed { h -> Http.json(buildUrl(base, "api/accounts/users/me/"), h) }.obj() ?: throw IllegalStateException("No user")
         val props = o.child("custom_properties")
         return Me(o.long("id"), o.str("username") ?: server.username, props?.str("xc_password"), o.int("user_level") ?: 0)
     }
@@ -356,13 +368,13 @@ class DispatcharrRest(private val server: Server) {
     /** Admins without an XC password can have one generated (Dispatcharr merges custom_properties). */
     suspend fun setXcPassword(userId: Long, password: String) {
         val body = """{"custom_properties":{"xc_password":${jsonString(password)}}}"""
-        Http.json(buildUrl(base, "api/accounts/users/$userId/"), headers(), method = "PATCH", body = body)
+        authed { h -> Http.json(buildUrl(base, "api/accounts/users/$userId/"), h, method = "PATCH", body = body) }
     }
 
     data class Recording(val id: Long, val channelId: Long?, val start: Long, val end: Long, val title: String)
 
     suspend fun recordings(): List<Recording> {
-        val root = Http.json(buildUrl(base, "api/channels/recordings/"), headers())
+        val root = authed { h -> Http.json(buildUrl(base, "api/channels/recordings/"), h) }
         val list = root.arr()?.mapNotNull { it.obj() } ?: root.obj()?.objects("results") ?: emptyList()
         val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         fun parse(s: String?): Long = s?.let { runCatching { iso.parse(it.take(19))?.time }.getOrNull() } ?: 0L
@@ -377,10 +389,14 @@ class DispatcharrRest(private val server: Server) {
         val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         val body = """{"channel":$channelId,"start_time":"${iso.format(Date(p.start))}","end_time":"${iso.format(Date(p.end))}",""" +
             """"custom_properties":{"program":{"title":${jsonString(p.title)},"description":${jsonString(p.desc ?: "")}}}}"""
-        Http.text(buildUrl(base, "api/channels/recordings/"), headers(), method = "POST", body = body)
+        authed { h -> Http.text(buildUrl(base, "api/channels/recordings/"), h, method = "POST", body = body) }
     }
 
-    suspend fun recordingHeaders(): Map<String, String> = headers()
+    /** mpv sends these itself and can't refresh them, so hand it a freshly issued token. */
+    suspend fun recordingHeaders(): Map<String, String> {
+        if (server.authMode != AuthMode.API_KEY) { access = null; login() }
+        return headers()
+    }
     fun recordingUrl(id: Long) = buildUrl(base, "api/channels/recordings/$id/file/")
 
     private fun jsonString(s: String) = kotlinx.serialization.json.JsonPrimitive(s).toString()

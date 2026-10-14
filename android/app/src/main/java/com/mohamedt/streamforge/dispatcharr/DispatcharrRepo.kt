@@ -175,7 +175,8 @@ object DispatcharrRepo {
 
     private fun applyLive(cats: List<Category>, list: List<Channel>) {
         val hideAdult = Settings.values.hideAdult
-        val visible = list.filter { !(hideAdult && it.isAdult) }
+        // Channel ids are used as LazyColumn keys everywhere: a duplicate would crash the list.
+        val visible = list.distinctBy { it.id }.filter { !(hideAdult && it.isAdult) }
             .sortedWith(compareBy<Channel> { it.number ?: Int.MAX_VALUE }.thenBy { it.name })
         channels = visible
         val grouped = visible.groupBy { it.categoryId }.toMutableMap()
@@ -194,8 +195,9 @@ object DispatcharrRepo {
         val sid = active?.id ?: return
         val hideAdult = Settings.values.hideAdult
         val result = withContext(Dispatchers.Default) {
-            val m = dedupeMovies(movies.filter { !(hideAdult && it.isAdult) })
-            val s = dedupeSeries(series)
+            // Same stream id can be listed under several categories; item ids must stay unique (lazy keys).
+            val m = dedupeMovies(movies.distinctBy { it.id }.filter { !(hideAdult && it.isAdult) })
+            val s = dedupeSeries(series.distinctBy { it.id })
             val mItems = m.map { it.toItem(sid) }
             val sItems = s.map { it.toItem(sid) }
             val mCats = m.map { it.categoryId }.toSet()
@@ -287,17 +289,25 @@ object DispatcharrRepo {
 
     private fun loadDiskCache() {
         val id = active?.id ?: return
-        val cache = Store.load(DiskCache.serializer(), cacheName(id)) ?: return
-        applyLive(cache.liveCategories, cache.channels)
+        // The cache holds the whole VOD library (can be tens of MB): decode it off the main thread.
         scope.launch {
-            applyVod(cache.movieCategories, cache.movies, cache.seriesCategories, cache.series)
-            vodState = LoadState.Loaded
+            val cache = withContext(Dispatchers.IO) { Store.load(DiskCache.serializer(), cacheName(id)) } ?: return@launch
+            if (active?.id != id) return@launch
+            // A network refresh that finished first wins.
+            if (channels.isEmpty()) {
+                applyLive(cache.liveCategories, cache.channels)
+                liveState = LoadState.Loaded
+            }
+            if (movieItems.isEmpty() && seriesItems.isEmpty()) {
+                applyVod(cache.movieCategories, cache.movies, cache.seriesCategories, cache.series)
+                vodState = LoadState.Loaded
+            }
         }
-        liveState = LoadState.Loaded
     }
 
     private fun saveDiskCache() {
         val id = active?.id ?: return
+        if (channels.isEmpty() && rawMovies.isEmpty() && rawSeries.isEmpty()) return
         val cache = DiskCache(liveCategories.filter { it.id != "__other" }, channels, movieCategories, rawMovies,
             seriesCategories, rawSeries, System.currentTimeMillis())
         scope.launch(Dispatchers.IO) { Store.save(DiskCache.serializer(), cache, cacheName(id)) }

@@ -90,6 +90,8 @@ private fun FilterBar(kind: MediaType, filter: VodFilter, grid: Boolean?, onGrid
 @Composable
 fun PosterGrid(items: List<MediaItem>, header: @Composable (() -> Unit)? = null) {
     val nav = LocalNav.current
+    // Unique ids only: duplicate lazy keys crash (addon catalogs and collections can repeat items).
+    val unique = remember(items) { items.distinctBy { it.id } }
     var visible by remember(items) { mutableStateOf(150) }
     LazyVerticalGrid(
         columns = GridCells.Adaptive(Dims.poster() + 8.dp),
@@ -99,9 +101,10 @@ fun PosterGrid(items: List<MediaItem>, header: @Composable (() -> Unit)? = null)
         modifier = Modifier.fillMaxSize(),
     ) {
         if (header != null) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) { header() }
-        items(items.take(visible), key = { it.id }) { item ->
+        val shown = unique.take(visible)
+        items(shown, key = { it.id }) { item ->
             PosterCard(item, { nav.push(Screen.Detail(item)) }, { Library.toggleFavorite(item) })
-            if (item.id == items.take(visible).lastOrNull()?.id && visible < items.size) LaunchedEffect(visible) { visible += 150 }
+            if (item.id == shown.lastOrNull()?.id && visible < unique.size) LaunchedEffect(visible) { visible += 150 }
         }
     }
 }
