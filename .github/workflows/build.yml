@@ -93,6 +93,7 @@ jobs:
           SYMS=$(nm -gU "$BIN" 2>/dev/null; nm "$BIN" 2>/dev/null)
           echo "$SYMS" | grep -q "mpv_create" && echo "::notice::libmpv linked" || echo "::error::libmpv not linked"
           echo "$SYMS" | grep -qi "TorrserverkitStartServer" && echo "::notice::Embedded TorrServer linked" || echo "::warning::Embedded TorrServer NOT linked (on-device torrents disabled)"
+          ls build/Build/Products/Release-iphoneos/StreamForge.app/PlugIns/ 2>/dev/null | grep -q "StreamForgeWidgets.appex" && echo "::notice::Widgets extension embedded" || echo "::error::Widgets extension missing"
       - uses: actions/upload-artifact@v4
         with:
           name: StreamForge-iOS-unsigned-ipa
@@ -124,6 +125,7 @@ jobs:
           mkdir -p Payload
           cp -R build/Build/Products/Release-appletvos/StreamForgeTV.app Payload/
           zip -qry StreamForgeTV-unsigned.ipa Payload
+          ls build/Build/Products/Release-appletvos/StreamForgeTV.app/PlugIns/ 2>/dev/null | grep -q "StreamForgeTopShelf.appex" && echo "::notice::Top Shelf extension embedded" || echo "::error::Top Shelf extension missing"
       - uses: actions/upload-artifact@v4
         with:
           name: StreamForge-tvOS-unsigned-ipa
@@ -134,9 +136,96 @@ jobs:
           name: xcodebuild-tvos-log
           path: xcodebuild-tvos.log
 
+  torrserver-android:
+    name: TorrServer engine (Android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache engine
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: android/app/libs/torrserverkit.aar
+          key: torrserver-android-${{ env.TORRSERVER_COMMIT }}-api26-v1
+      - uses: actions/setup-go@v5
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - uses: actions/setup-node@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          node-version: "20"
+      - uses: actions/setup-java@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build engine
+        if: steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          corepack enable || true
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          bash scripts/build-torrserver-android.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torrserver-android
+          path: android/app/libs/torrserverkit.aar
+          if-no-files-found: warn
+          retention-days: 3
+
+  android:
+    name: Android (phone + TV)
+    needs: torrserver-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: torrserver-android
+          path: android/app/libs
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build release APKs
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          [ -z "$ANDROID_KEYSTORE_PASSWORD" ] && unset ANDROID_KEYSTORE_PASSWORD
+          [ -z "$ANDROID_KEY_PASSWORD" ] && unset ANDROID_KEY_PASSWORD
+          ls -la android/app/libs || true
+          bash scripts/gradle-annotate.sh :app:assembleRelease
+      - name: Collect APKs
+        run: |
+          mkdir -p apk
+          for f in android/app/build/outputs/apk/release/*.apk; do
+            name=$(basename "$f" | sed 's/app-/StreamForge-/; s/-release//')
+            cp "$f" "apk/$name"
+          done
+          ls -lh apk
+          unzip -l apk/StreamForge-universal.apk | grep -q "libmpv.so" && echo "::notice::libmpv packaged" || echo "::error::libmpv missing from APK"
+          unzip -l apk/StreamForge-universal.apk | grep -qi "libgojni.so" && echo "::notice::TorrServer engine packaged" || echo "::warning::On-device torrent engine not packaged (remote TorrServer only)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StreamForge-Android
+          path: apk/*.apk
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gradle-log
+          path: gradle.log
+
   release:
     name: Publish release
-    needs: [ios, tvos]
+    needs: [ios, tvos, android]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -146,6 +235,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: StreamForge-tvOS-unsigned-ipa
+      - uses: actions/download-artifact@v4
+        with:
+          name: StreamForge-Android
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.1.${{ github.run_number }}
@@ -156,6 +248,8 @@ jobs:
             Unsigned builds of ${{ github.sha }}. Sign and sideload with AltStore, SideStore, Sideloadly or similar.
             - `StreamForge-unsigned.ipa`: iPhone and iPad (iOS 17+)
             - `StreamForgeTV-unsigned.ipa`: Apple TV (tvOS 17+)
+            - `StreamForge-universal.apk`: Android phones, tablets and Android TV (Android 8+). Per-ABI APKs are smaller: `arm64-v8a` for most modern devices, `armeabi-v7a` for older TV boxes.
           files: |
             StreamForge-unsigned.ipa
             StreamForgeTV-unsigned.ipa
+            StreamForge-*.apk

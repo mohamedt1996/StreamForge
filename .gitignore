@@ -12,3 +12,10 @@ Payload/
 *.whl
 Support/*/Info.plist
 Support/*/*.entitlements
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/*.aar
+android/local.properties
+.kotlin/
+android/.kotlin/
