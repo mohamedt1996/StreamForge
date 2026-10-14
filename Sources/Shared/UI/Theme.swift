@@ -70,6 +70,58 @@ struct RemoteImage: View {
     }
 }
 
+/// Round cast/crew photo. Fixed size so nothing shifts while it loads; shows the person's
+/// initials only when there is no photo (no URL, or the image failed to load).
+struct CastAvatar: View {
+    var url: URL?
+    var name: String
+    var size: CGFloat
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Theme.surfaceHigh, Theme.surface], startPoint: .top, endPoint: .bottom)
+            if let url {
+                LazyImage(url: url) { state in
+                    if let image = state.image {
+                        // Profiles are portrait: keep the face (top) in the circle.
+                        Color.clear
+                            .overlay(alignment: .top) { image.resizable().aspectRatio(contentMode: .fill) }
+                            .clipped()
+                    } else if case .failure? = state.result {
+                        initialsView
+                    } else {
+                        Color.clear
+                    }
+                }
+                .pipeline(ImagePipeline.shared)
+            } else {
+                initialsView
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(.white.opacity(0.08), lineWidth: 1))
+        .accessibilityHidden(true)
+    }
+
+    private var initialsView: some View {
+        Text(Self.initials(name))
+            .font(.system(size: size * 0.34, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.75))
+            .minimumScaleFactor(0.5)
+            .lineLimit(1)
+            .frame(width: size, height: size)
+            .background(Theme.accentGradient.opacity(0.35))
+    }
+
+    static func initials(_ name: String) -> String {
+        let words = name.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "." }).filter { $0.first?.isLetter == true }
+        let letters = words.count > 1 ? [words.first!, words.last!].compactMap(\.first) : words.first.map { Array($0.prefix(2)) } ?? []
+        let text = String(letters).uppercased()
+        return text.isEmpty ? "?" : text
+    }
+}
+
 enum ImagePipelineSetup {
     static func configure() {
         var config = ImagePipeline.Configuration.withDataCache(name: "streamforge.images", sizeLimit: 600 * 1024 * 1024)

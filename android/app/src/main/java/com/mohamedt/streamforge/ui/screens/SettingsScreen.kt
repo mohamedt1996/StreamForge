@@ -46,11 +46,14 @@ import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
 import com.mohamedt.streamforge.dispatcharr.GuideRepo
 import com.mohamedt.streamforge.dispatcharr.Server
 import com.mohamedt.streamforge.stremio.Addons
+import com.mohamedt.streamforge.sync.ServerSync
+import com.mohamedt.streamforge.sync.SyncDevice
 import com.mohamedt.streamforge.torrent.TorrServer
 import com.mohamedt.streamforge.ui.Chip
 import com.mohamedt.streamforge.ui.Dims
 import com.mohamedt.streamforge.ui.Palette
 import com.mohamedt.streamforge.ui.card
+import com.mohamedt.streamforge.ui.isTv
 import kotlinx.coroutines.launch
 
 @Composable
@@ -96,6 +99,7 @@ fun SettingsScreen() {
     val s = Settings.values
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(Dims.gutter())) {
         item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
+        item { SyncServerSection() }
         item { DispatcharrSection() }
         item { AddonsSection() }
         item {
@@ -132,6 +136,7 @@ fun SettingsScreen() {
                 Choice("Live rewind buffer", listOf(0 to "Off", 15 to "15 min", 30 to "30 min", 60 to "60 min"), s.timeshiftMinutes) { v -> upd { it.copy(timeshiftMinutes = v) } }
                 Choice("Maximum quality", listOf(2160 to "4K", 1080 to "1080p", 720 to "720p"), s.maxResolution) { v -> upd { it.copy(maxResolution = v) } }
                 Toggle("Hide CAM / telesync releases", s.excludeCam) { v -> upd { it.copy(excludeCam = v) } }
+                Toggle("Play trailers on detail pages (never on mobile data)", s.trailerAutoplay) { v -> upd { it.copy(trailerAutoplay = v) } }
                 Field("Preferred audio language", s.audioLanguage) { v -> upd { it.copy(audioLanguage = v) } }
                 Field("Preferred subtitle language", s.subtitleLanguage) { v -> upd { it.copy(subtitleLanguage = v) } }
                 Toggle("Turn on subtitles automatically", s.autoSubtitles) { v -> upd { it.copy(autoSubtitles = v) } }
@@ -314,4 +319,218 @@ private fun SpeedSection() {
         }
         if (failed) Text("Speed test failed. Check your connection.", color = androidx.compose.ui.graphics.Color(0xFFF87171), fontSize = 12.sp)
     }
+}
+
+// MARK: Sync server
+
+private enum class SyncPanel { DEVICES, APPROVE, PASSWORD }
+
+private fun dateTimeText(ms: Long): String =
+    java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date(ms))
+
+private fun platformLabel(platform: String): String = when (platform) {
+    "ios" -> "iPhone"
+    "ipados" -> "iPad"
+    "tvos" -> "Apple TV"
+    "android" -> "Android"
+    "androidtv" -> "Android TV"
+    "web" -> "Web"
+    else -> platform
+}
+
+private const val SYNC_FOOTER = "Keeps Continue Watching, watched marks, favourites, addons, Dispatcharr servers and settings in step " +
+    "across your devices through your own StreamForge sync server. Everything also stays on this device, and signing out keeps it."
+
+@Composable
+private fun SyncServerSection() {
+    if (ServerSync.signedIn) SyncSignedIn() else SyncSignIn()
+}
+
+@Composable
+private fun SyncSignIn() {
+    val tv = isTv()
+    val scope = rememberCoroutineScope()
+    var url by remember { mutableStateOf(ServerSync.serverUrl) }
+    // TVs default to the pairing code (no typing a password with a remote).
+    var pairMode by remember { mutableStateOf(tv) }
+    var user by remember { mutableStateOf(ServerSync.username) }
+    var password by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val pairing = ServerSync.pairing
+
+    Section("Sync server", SYNC_FOOTER) {
+        ServerSync.signOutReason?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+        if (pairing != null) {
+            Text("Pairing code", color = Palette.secondary)
+            Text(pairing.code, fontSize = if (tv) 64.sp else 44.sp, fontWeight = FontWeight.Black, letterSpacing = 6.sp)
+            Text("On your phone open StreamForge → Settings → Sync server → Approve a TV code, or open ${pairing.serverUrl} in a browser, sign in and approve the code there.",
+                fontSize = 13.sp, color = Palette.secondary)
+            Text(pairing.failed ?: "Waiting for approval…", color = if (pairing.failed != null) Palette.live else Palette.accent, fontSize = 13.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (pairing.failed != null) {
+                    Button(onClick = { ServerSync.startPairing(pairing.serverUrl) }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) {
+                        Text("Get a new code")
+                    }
+                }
+                TextButton(onClick = { ServerSync.cancelPairing() }) { Text("Cancel") }
+            }
+        } else {
+            Field("Server address, e.g. http://192.168.1.10:8484", url) { url = it }
+            if (pairMode) {
+                Button(enabled = url.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent),
+                    onClick = { message = null; ServerSync.startPairing(url) }) { Text("Get a pairing code") }
+            } else {
+                Field("Username", user) { user = it }
+                Field("Password", password, secret = true) { password = it }
+                Button(enabled = !busy && url.isNotBlank() && user.isNotBlank() && password.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+                        busy = true
+                        message = null
+                        scope.launch {
+                            message = runCatching { ServerSync.signIn(url, user, password) }
+                                .fold({ password = ""; null }, { it.message ?: "Couldn't sign in" })
+                            busy = false
+                        }
+                    }) { Text(if (busy) "Signing in…" else "Sign in") }
+            }
+            TextButton(onClick = { pairMode = !pairMode; message = null }) {
+                Text(if (pairMode) "Sign in with username and password instead" else "Use a pairing code instead (approve it from another device)")
+            }
+        }
+        (message ?: ServerSync.pairMessage)?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun SyncSignedIn() {
+    val scope = rememberCoroutineScope()
+    var panel by remember { mutableStateOf<SyncPanel?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+    fun toggle(p: SyncPanel) {
+        panel = if (panel == p) null else p
+        message = null
+    }
+
+    Section("Sync server", SYNC_FOOTER) {
+        Text("Signed in as ${ServerSync.username}" + if (ServerSync.userRole == "admin") " (admin)" else "", fontWeight = FontWeight.Bold)
+        Text("${ServerSync.serverName.ifEmpty { ServerSync.serverUrl }} · this device: ${ServerSync.deviceName}", fontSize = 12.sp, color = Palette.secondary)
+        Text("Status: ${ServerSync.status}", fontSize = 13.sp)
+        Text("Last sync: " + if (ServerSync.lastSyncAt > 0) dateTimeText(ServerSync.lastSyncAt) else "never", fontSize = 13.sp, color = Palette.secondary)
+        if (!ServerSync.canReadSecrets) {
+            Text("This device doesn't send or receive passwords and API keys (no secrets access).", fontSize = 12.sp, color = Palette.secondary)
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = { ServerSync.syncNow() }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) { Text("Sync now") }
+            TextButton(onClick = { toggle(SyncPanel.DEVICES) }) { Text("Devices") }
+            TextButton(onClick = { toggle(SyncPanel.APPROVE) }) { Text("Approve a TV code") }
+            TextButton(onClick = { toggle(SyncPanel.PASSWORD) }) { Text("Change password") }
+            TextButton(onClick = { scope.launch { ServerSync.signOut() } }) { Text("Sign out", color = Palette.live) }
+        }
+        when (panel) {
+            SyncPanel.DEVICES -> SyncDevicesPanel()
+            SyncPanel.APPROVE -> SyncApprovePanel()
+            SyncPanel.PASSWORD -> SyncPasswordPanel { done -> panel = null; message = done }
+            null -> Unit
+        }
+        message?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun SyncDevicesPanel() {
+    val scope = rememberCoroutineScope()
+    var error by remember { mutableStateOf<String?>(null) }
+    var loaded by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<String?>(null) }
+    var newName by remember { mutableStateOf("") }
+    var confirmRevoke by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        error = runCatching { ServerSync.loadDevices() }.exceptionOrNull()?.message
+        loaded = true
+    }
+    if (!loaded) Text("Loading devices…", color = Palette.secondary, fontSize = 13.sp)
+    ServerSync.devices.forEach { d: SyncDevice ->
+        val isThis = d.current || d.id == ServerSync.deviceId
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Palette.surface).padding(10.dp)) {
+            Text(d.name + if (isThis) "  (this device)" else "", fontWeight = FontWeight.Bold)
+            Text(listOfNotNull(platformLabel(d.platform), d.scopes.joinToString(" / ").ifEmpty { null },
+                d.lastSeenAt.takeIf { it > 0 }?.let { "seen ${dateTimeText(it)}" }, d.lastIp).joinToString(" · "),
+                fontSize = 12.sp, color = Palette.secondary)
+            if (editing == d.id) {
+                Field("Device name", newName) { newName = it }
+                Row {
+                    TextButton(onClick = {
+                        scope.launch { error = runCatching { ServerSync.renameDevice(d.id, newName) }.fold({ editing = null; null }, { it.message }) }
+                    }) { Text("Save") }
+                    TextButton(onClick = { editing = null }) { Text("Cancel") }
+                }
+            } else {
+                Row {
+                    TextButton(onClick = { editing = d.id; newName = d.name; confirmRevoke = null }) { Text("Rename") }
+                    TextButton(onClick = {
+                        if (confirmRevoke != d.id) {
+                            confirmRevoke = d.id
+                        } else {
+                            confirmRevoke = null
+                            scope.launch { error = runCatching { ServerSync.revokeDevice(d.id) }.exceptionOrNull()?.message }
+                        }
+                    }) {
+                        Text(if (confirmRevoke == d.id) "Press again to revoke" else if (isThis) "Revoke & sign out" else "Revoke", color = Palette.live)
+                    }
+                }
+            }
+        }
+    }
+    if (loaded && ServerSync.devices.isEmpty() && error == null) Text("No devices.", color = Palette.secondary, fontSize = 13.sp)
+    error?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+}
+
+@Composable
+private fun SyncApprovePanel() {
+    val scope = rememberCoroutineScope()
+    var code by remember { mutableStateOf("") }
+    var secrets by remember { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    Text("Enter the code your TV shows. The TV joins your account.", fontSize = 13.sp, color = Palette.secondary)
+    Field("Code, e.g. K7Q-4MX", code) { code = it }
+    Toggle("Also share passwords and API keys with it", secrets) { secrets = it }
+    Button(enabled = !busy && code.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+        busy = true
+        result = null
+        scope.launch {
+            result = runCatching { ServerSync.approvePairing(code, secrets) }.fold({ code = ""; it }, { it.message ?: "Couldn't approve the code" })
+            busy = false
+        }
+    }) { Text(if (busy) "Approving…" else "Approve") }
+    result?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+}
+
+@Composable
+private fun SyncPasswordPanel(onDone: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var current by remember { mutableStateOf("") }
+    var new by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    Field("Current password", current, secret = true) { current = it }
+    Field("New password", new, secret = true) { new = it }
+    Field("Repeat new password", confirm, secret = true) { confirm = it }
+    Button(enabled = !busy && current.isNotEmpty() && new.isNotEmpty(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+        if (new != confirm) {
+            error = "The new passwords don't match"
+        } else {
+            busy = true
+            error = null
+            scope.launch {
+                runCatching { ServerSync.changePassword(current, new) }
+                    .onSuccess { onDone("Password changed") }
+                    .onFailure { error = it.message ?: "Couldn't change the password" }
+                busy = false
+            }
+        }
+    }) { Text(if (busy) "Saving…" else "Change password") }
+    error?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
 }

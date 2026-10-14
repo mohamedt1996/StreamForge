@@ -92,16 +92,19 @@ final class MetadataService {
             if let secs = info.durationSecs, secs > 0 { d.item.runtimeMinutes = secs / 60 }
             if d.directors.isEmpty, let dir = info.director { d.directors = dir.split(separator: ",").map { String($0).trimmed } }
             if d.cast.isEmpty, let cast = info.cast {
-                d.cast = cast.split(separator: ",").prefix(15).enumerated().map { Person(id: -$0.offset - 1, name: String($0.element).trimmed) }
+                d.cast = Self.castNames(cast).prefix(20).enumerated().map { Person(id: -$0.offset - 1, name: $0.element) }
             }
-            if d.trailerYouTubeKey == nil, let t = info.trailer, !t.isEmpty { d.trailerYouTubeKey = Self.youtubeKey(t) }
+            if let t = info.trailer, !t.isEmpty { d.addTrailers([t]) }
         case .dispatcharrSeries(_, let seriesID):
             guard let info = try? await client.seriesInfo(seriesID) else { return }
             if overwrite || d.item.overview == nil { d.item.overview = info.plot ?? d.item.overview }
             if overwrite || d.item.backdrop == nil { d.item.backdrop = info.backdrop ?? d.item.backdrop }
             d.item.tmdbID = d.item.tmdbID ?? info.tmdbID.flatMap { $0 > 0 ? $0 : nil }
             d.item.imdbID = d.item.imdbID ?? info.imdbID
-            if d.trailerYouTubeKey == nil, let t = info.trailer, !t.isEmpty { d.trailerYouTubeKey = Self.youtubeKey(t) }
+            if d.cast.isEmpty, let cast = info.cast {
+                d.cast = Self.castNames(cast).prefix(20).enumerated().map { Person(id: -$0.offset - 1, name: $0.element) }
+            }
+            if let t = info.trailer, !t.isEmpty { d.addTrailers([t]) }
             // Provider episodes are what's actually playable from the server.
             var seasons: [SeasonInfo] = []
             for (number, eps) in info.episodes.sorted(by: { $0.key < $1.key }) {
@@ -144,16 +147,21 @@ final class MetadataService {
             d.item.logo = d.item.logo ?? TMDBClient.image(pick?.file_path, size: "w500")
         }
         if let cast = t.credits?.cast, !cast.isEmpty {
-            d.cast = cast.prefix(20).map { Person(id: $0.id, name: $0.name, role: $0.character, photo: TMDBClient.image($0.profile_path, size: "w185")) }
+            // TMDB credits carry photos and person ids: they replace plain-name lists from the
+            // provider, but keep a provider/Cinemeta photo if TMDB has none for someone.
+            let previous = Dictionary(d.cast.compactMap { p in p.photo.map { (CastPhotoResolver.normalize(p.name), $0) } },
+                                      uniquingKeysWith: { a, _ in a })
+            d.cast = cast.prefix(20).map {
+                Person(id: $0.id, name: $0.name, role: $0.character,
+                       photo: TMDBClient.image($0.profile_path, size: CastPhotoResolver.profileSize) ?? previous[CastPhotoResolver.normalize($0.name)])
+            }
         }
         if let crew = t.credits?.crew {
             let dirs = crew.filter { $0.job == "Director" }.map(\.name)
             if !dirs.isEmpty { d.directors = dirs }
         }
-        if let vids = t.videos?.results.filter({ $0.site == "YouTube" }) {
-            let trailer = vids.first { $0.type == "Trailer" && $0.official == true } ?? vids.first { $0.type == "Trailer" } ?? vids.first
-            d.trailerYouTubeKey = d.trailerYouTubeKey ?? trailer?.key
-        }
+        // TMDB's curated, ranked trailers go first; provider/addon ids stay as fallbacks.
+        if let vids = t.videos?.results { d.addTrailers(TMDBClient.trailerKeys(vids), atFront: true) }
         d.similar = t.recommendations?.results.elements.prefix(20).map { $0.mediaItem(defaultType: d.item.type) } ?? d.similar
         let region = Locale.current.region?.identifier ?? "US"
         if let rel = t.release_dates?.results {
@@ -189,9 +197,13 @@ final class MetadataService {
             }
             return
         }
-        guard case let (_, meta)? = await AddonManager.shared.meta(type: d.item.type.stremioType, id: imdb) else { return }
+        // Ask Cinemeta first when it's installed: its metas carry cast photos and trailers.
+        guard case let (_, meta)? = await AddonManager.shared.meta(type: d.item.type.stremioType, id: imdb,
+                                                                   preferredAddonID: Self.cinemetaAddonID) else { return }
         apply(meta, to: &d)
     }
+
+    static let cinemetaAddonID = "com.linvo.cinemeta"
 
     private func apply(_ meta: StremioMetaPreview, to d: inout MediaDetails) {
         if d.item.overview?.isEmpty ?? true { d.item.overview = meta.description }
@@ -204,10 +216,37 @@ final class MetadataService {
         if let r = meta.imdbRating, !d.ratings.contains(where: { $0.source == "IMDb" }) {
             d.ratings.insert(RatingBadge(source: "IMDb", value: String(format: "%.1f", r)), at: 0)
         }
-        if d.trailerYouTubeKey == nil { d.trailerYouTubeKey = meta.trailers.first { $0.type == "Trailer" }?.source ?? meta.trailers.first?.source }
-        if d.cast.isEmpty {
-            let names = meta.links.filter { $0.category == "Cast" }.compactMap(\.name)
-            d.cast = names.prefix(15).enumerated().map { Person(id: -1000 - $0.offset, name: $0.element) }
+        let trailers = meta.trailers.filter { $0.type == "Trailer" } + meta.trailers.filter { $0.type != "Trailer" }
+        d.addTrailers(trailers.compactMap(\.source))
+        let profiles = Array(meta.castProfiles.prefix(20))
+        let hasFaces = profiles.contains { $0.photo != nil }
+        func person(_ p: StremioMetaPreview.CastProfile, _ offset: Int) -> Person {
+            Person(id: p.tmdbID ?? (-1000 - offset), name: p.name, role: p.character, photo: p.photo)
+        }
+        let namesOnly = d.cast.allSatisfy({ $0.photo == nil && $0.id <= 0 })
+        if d.cast.isEmpty || (hasFaces && namesOnly) {
+            // Nothing yet, or only plain names (provider string): Cinemeta's list has characters
+            // and TMDB photos, so it replaces the names outright.
+            if !profiles.isEmpty {
+                d.cast = profiles.enumerated().map { person($0.element, $0.offset) }
+            } else if d.cast.isEmpty {
+                var names = meta.links.filter { $0.category == "Cast" }.compactMap(\.name)
+                if names.isEmpty { names = meta.castNames }
+                d.cast = names.map(\.trimmed).filter { !$0.isEmpty }.prefix(20).enumerated().map { Person(id: -1000 - $0.offset, name: $0.element) }
+            }
+        } else if hasFaces {
+            // Keep the existing list (TMDB order/roles) and only borrow missing faces by name.
+            var byName: [String: StremioMetaPreview.CastProfile] = [:]
+            for p in profiles where byName[CastPhotoResolver.normalize(p.name)] == nil { byName[CastPhotoResolver.normalize(p.name)] = p }
+            var usedIDs = Set(d.cast.map(\.id))
+            d.cast = d.cast.map { p in
+                guard p.photo == nil, let match = byName[CastPhotoResolver.normalize(p.name)] else { return p }
+                var p = p
+                p.photo = match.photo
+                if p.id <= 0, let id = match.tmdbID, !usedIDs.contains(id) { usedIDs.insert(id); p.id = id }
+                if (p.role ?? "").isEmpty { p.role = match.character }
+                return p
+            }
         }
         if d.item.type == .series, d.episodesBySeason.isEmpty, !meta.videos.isEmpty {
             let grouped = Dictionary(grouping: meta.videos.map(\.episodeRef), by: \.season)
@@ -246,6 +285,53 @@ final class MetadataService {
             return ep
         }
         return eps
+    }
+
+    // MARK: Cast photos
+
+    /// Fills in photos (w185) and TMDB person ids for cast entries that came as plain names.
+    /// Returns the cast unchanged when TMDB isn't configured. Also updates the details cache.
+    func castWithPhotos(for details: MediaDetails) async -> [Person] {
+        let cast = details.cast
+        guard tmdb.isConfigured, cast.contains(where: { $0.photo == nil && $0.id <= 0 }) else { return cast }
+        let resolved = await CastPhotoResolver.shared.resolve(cast: cast, tmdbID: details.item.tmdbID, imdbID: details.item.imdbID,
+                                                               type: details.item.type, client: tmdb)
+        if resolved != cast, var cached = await detailCache.value(details.item.id) {
+            cached.cast = resolved
+            await detailCache.set(details.item.id, cached)
+        }
+        return resolved
+    }
+
+    /// "Keanu Reeves (Neo), Carrie-Anne Moss / Laurence Fishburne as Morpheus" → names.
+    /// Roles are stripped so the names match TMDB/Cinemeta credits when faces are looked up.
+    static func castNames(_ raw: String) -> [String] {
+        raw.components(separatedBy: CharacterSet(charactersIn: ",;/|\n"))
+            .map { part -> String in
+                var s = part.replacingOccurrences(of: #"\s*[\(\[][^\)\]]*[\)\]]"#, with: "", options: .regularExpression)
+                if let r = s.range(of: " as ", options: .caseInsensitive) { s = String(s[..<r.lowerBound]) }
+                return s.trimmed
+            }
+            .filter { !$0.isEmpty && $0.lowercased() != "n/a" }
+    }
+
+    // MARK: Trailers for the home billboard
+
+    private var trailerKeyCache: [String: [String]] = [:]
+
+    /// Ranked trailer ids for an item without loading the full detail page when possible:
+    /// cached details → TMDB /videos → full metadata merge (which also warms the detail page).
+    func trailerKeys(for item: MediaItem) async -> [String] {
+        if let cached = await detailCache.value(item.id) { return cached.trailerKeys }
+        if let keys = trailerKeyCache[item.id] { return keys }
+        var keys: [String] = []
+        if tmdb.isConfigured, let id = item.tmdbID, let found = try? await tmdb.trailerKeys(id: id, type: item.type) {
+            keys = found
+        }
+        if keys.isEmpty { keys = await details(for: item).trailerKeys }
+        if trailerKeyCache.count > 300 { trailerKeyCache.removeAll() }
+        trailerKeyCache[item.id] = keys
+        return keys
     }
 
     static func youtubeKey(_ raw: String) -> String? {

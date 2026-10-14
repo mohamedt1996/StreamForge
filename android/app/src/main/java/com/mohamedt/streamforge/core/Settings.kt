@@ -3,6 +3,7 @@ package com.mohamedt.streamforge.core
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.mohamedt.streamforge.sync.RemoteSync
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -40,6 +41,8 @@ data class SettingsValues(
     // Live TV
     val showChannelNumbers: Boolean = true,
     val guideDays: Int = 3,
+    // Detail pages
+    val trailerAutoplay: Boolean = true,
 )
 
 object Settings {
@@ -49,11 +52,15 @@ object Settings {
     fun update(transform: (SettingsValues) -> SettingsValues) {
         values = transform(values)
         Store.save(SettingsValues.serializer(), values, "settings.json")
+        RemoteSync.changed()
     }
 
     var tmdbKey: String
         get() = Store.secret("tmdb")
-        set(v) = Store.setSecret("tmdb", v.trim())
+        set(v) {
+            Store.setSecret("tmdb", v.trim())
+            RemoteSync.changed()
+        }
 
     var torrServerPassword: String
         get() = Store.secret("torrserver.password")

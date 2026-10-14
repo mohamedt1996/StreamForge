@@ -19,3 +19,8 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 -ignorewarnings
+# Hero trailer WebView bridge: called from JavaScript by name.
+-keepattributes JavascriptInterface
+-keepclassmembers class com.mohamedt.streamforge.ui.TrailerController$Bridge {
+    @android.webkit.JavascriptInterface <methods>;
+}

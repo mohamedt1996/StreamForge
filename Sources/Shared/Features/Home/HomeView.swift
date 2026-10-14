@@ -348,11 +348,17 @@ struct ChannelTile: View {
     }
 }
 
-/// Auto-advancing hero banner.
+/// Auto-advancing hero banner. The visible slide plays its trailer (muted, after a short
+/// delay) like Netflix's billboard; the carousel holds still while it plays.
 struct HeroCarousel: View {
     var items: [MediaItem]
     var onSelect: (MediaItem) -> Void
+    @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.scenePhase) private var scenePhase
     @State private var index = 0
+    @State private var trailer = TrailerController()
+    @State private var heroVisible = true
+    @State private var pageVisible = false
 
     private var height: CGFloat {
         #if os(tvOS)
@@ -362,12 +368,22 @@ struct HeroCarousel: View {
         #endif
     }
 
+    private var trailerActive: Bool {
+        pageVisible && heroVisible && scenePhase == .active
+            && player.current == nil && player.multiview == nil && player.sourcePickerRequest == nil
+            && TrailerPolicy.allowsAutoplay
+    }
+
+    private var currentID: String? { items.indices.contains(index) ? items[index].id : nil }
+
     var body: some View {
         TabView(selection: $index) {
             ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
-                Button { onSelect(item) } label: { HeroSlide(item: item, height: height) }
-                    .buttonStyle(.plain)
-                    .tag(i)
+                Button { onSelect(item) } label: {
+                    HeroSlide(item: item, height: height, trailer: i == index ? trailer : nil)
+                }
+                .buttonStyle(.plain)
+                .tag(i)
             }
         }
         #if os(iOS)
@@ -376,10 +392,47 @@ struct HeroCarousel: View {
         .tabViewStyle(.page)
         #endif
         .frame(height: height)
+        #if os(iOS)
+        .overlay(alignment: .bottomTrailing) {
+            // Outside the slide buttons so a tap mutes instead of opening the title.
+            TrailerControlButton(controller: trailer)
+                .padding(.trailing, Theme.gutter)
+                .padding(.bottom, 40)
+        }
+        #endif
+        .background(HeroVisibilityReader(height: height, isVisible: $heroVisible))
+        .onAppear { pageVisible = true }
+        .onDisappear { pageVisible = false }
+        .onChange(of: trailerActive, initial: true) { _, active in trailer.setActive(active) }
+        .task(id: currentID) {
+            // New slide: back to its artwork, then look up its trailer while the backdrop shows.
+            trailer.setKeys([])
+            guard let id = currentID, let item = items.first(where: { $0.id == id }) else { return }
+            let shownAt = Date()
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled, TrailerPolicy.allowsAutoplay else { return }
+            let keys = await MetadataService.shared.trailerKeys(for: item)
+            guard !Task.isCancelled, currentID == id else { return }
+            trailer.setKeys(keys, delay: max(0.3, TrailerPolicy.startDelay - Date().timeIntervalSince(shownAt)))
+        }
         .task(id: items.count) {
+            // Advance every 7 s of artwork; hold while a trailer loads or plays.
+            var idle: TimeInterval = 0
+            var shown = index
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 7_000_000_000)
-                withAnimation(.easeInOut(duration: 0.6)) { index = items.isEmpty ? 0 : (index + 1) % items.count }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if Task.isCancelled { return }
+                if shown != index { shown = index; idle = 0 }
+                switch trailer.phase {
+                case .loading, .playing:
+                    idle = 0
+                case .idle, .ended, .unavailable:
+                    idle += 0.5
+                }
+                if idle >= 7, !items.isEmpty {
+                    idle = 0
+                    withAnimation(.easeInOut(duration: 0.6)) { index = (index + 1) % items.count }
+                }
             }
         }
     }
@@ -388,20 +441,31 @@ struct HeroCarousel: View {
 struct HeroSlide: View {
     var item: MediaItem
     var height: CGFloat
+    /// Set only on the visible slide.
+    var trailer: TrailerController?
+
+    private var playing: Bool { trailer?.isRevealed ?? false }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(maxWidth: .infinity)
                 .frame(height: height)
+                .overlay {
+                    if let trailer { TrailerSurface(controller: trailer) }
+                }
                 .clipped()
             LinearGradient(colors: [.clear, Theme.background.opacity(0.6), Theme.background], startPoint: .top, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
-                if let logo = item.logo {
-                    RemoteImage(url: logo, contentMode: .fit).frame(maxWidth: 260, maxHeight: 90, alignment: .leading)
-                } else {
-                    Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(2)
+                Group {
+                    if let logo = item.logo {
+                        RemoteImage(url: logo, contentMode: .fit).frame(maxWidth: 260, maxHeight: 90, alignment: .leading)
+                    } else {
+                        Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(2)
+                    }
                 }
+                .scaleEffect(playing ? 0.8 : 1, anchor: .bottomLeading)
+                .animation(.easeInOut(duration: TrailerPolicy.fade), value: playing)
                 HStack(spacing: 8) {
                     if let r = item.rating { RatingView(rating: r) }
                     if let y = item.yearText { Text(y) }
@@ -412,8 +476,11 @@ struct HeroSlide: View {
                 .foregroundStyle(Theme.secondaryText)
                 if let overview = item.overview {
                     Text(overview).font(.subheadline).foregroundStyle(.white.opacity(0.8)).lineLimit(2).frame(maxWidth: 560, alignment: .leading)
+                        .opacity(playing ? 0 : 1)
+                        .animation(.easeInOut(duration: TrailerPolicy.fade), value: playing)
                 }
             }
+            .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
             .padding(.horizontal, Theme.gutter)
             .padding(.bottom, 34)
         }

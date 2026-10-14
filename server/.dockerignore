@@ -1,0 +1,7 @@
+data/
+dist/
+bin/
+*.db
+*.db-*
+secret.key
+.git

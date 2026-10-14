@@ -35,6 +35,11 @@ final class LibraryStore {
         var watched: Set<String> = []
         var lastChannelID: Int?
         var hiddenCategoryIDs: Set<String> = []
+        // Added for the sync server; optional so older files still decode.
+        /// Favorite item id → when it was added (ms since 1970).
+        var favoriteDates: [String: Double]?
+        /// Watched local key → canonical sync key (see SyncKeys).
+        var watchedCanonical: [String: String]?
     }
 
     private(set) var favorites: [MediaItem] = []
@@ -44,6 +49,8 @@ final class LibraryStore {
     private(set) var watched: Set<String> = []
     private(set) var lastChannelID: Int?
     private(set) var hiddenCategoryIDs: Set<String> = []
+    @ObservationIgnored private var favoriteDates: [String: Double] = [:]
+    @ObservationIgnored private var watchedCanonical: [String: String] = [:]
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     /// The profile whose library is loaded.
@@ -71,11 +78,14 @@ final class LibraryStore {
         watched = s.watched
         lastChannelID = s.lastChannelID
         hiddenCategoryIDs = s.hiddenCategoryIDs
+        favoriteDates = s.favoriteDates ?? [:]
+        watchedCanonical = s.watchedCanonical ?? [:]
     }
 
     private func currentSnapshot() -> Snapshot {
         Snapshot(favorites: favorites, favoriteChannelIDs: favoriteChannelIDs, recentChannelIDs: recentChannelIDs,
-                 progress: progress, watched: watched, lastChannelID: lastChannelID, hiddenCategoryIDs: hiddenCategoryIDs)
+                 progress: progress, watched: watched, lastChannelID: lastChannelID, hiddenCategoryIDs: hiddenCategoryIDs,
+                 favoriteDates: favoriteDates, watchedCanonical: watchedCanonical)
     }
 
     private func apply(_ s: Snapshot) {
@@ -98,6 +108,7 @@ final class LibraryStore {
             FileStore.save(snapshot, name, mirrorToDefaults: true)
             SnapshotPublisher.schedule()
             CloudSync.shared.schedulePush()
+            ServerSync.shared.noteLocalChange()
         }
     }
 
@@ -202,12 +213,23 @@ final class LibraryStore {
     func isFavorite(_ item: MediaItem) -> Bool { favorites.contains { $0.id == item.id } }
 
     func toggleFavorite(_ item: MediaItem) {
+        // Pin dates on older favorites first so their sync records don't change with the order.
+        Self.backfillFavoriteDates(favorites, &favoriteDates)
         if let i = favorites.firstIndex(where: { $0.id == item.id }) {
             favorites.remove(at: i)
+            favoriteDates[item.id] = nil
         } else {
             favorites.insert(item, at: 0)
+            favoriteDates[item.id] = (Date().timeIntervalSince1970 * 1000).rounded()
         }
         scheduleSave()
+    }
+
+    /// Favorites saved before dates were tracked get stable, ordered placeholder dates.
+    static func backfillFavoriteDates(_ list: [MediaItem], _ dates: inout [String: Double]) {
+        for (i, item) in list.enumerated() where dates[item.id] == nil {
+            dates[item.id] = SyncKeys.legacyFavoriteBase - Double(i) * 1000
+        }
     }
 
     func isFavoriteChannel(_ id: Int) -> Bool { favoriteChannelIDs.contains(id) }
@@ -254,7 +276,14 @@ final class LibraryStore {
 
     func setWatched(_ item: MediaItem, episode: EpisodeRef? = nil, _ value: Bool) {
         let key = Self.key(item, episode)
-        if value { watched.insert(key); progress[key] = nil } else { watched.remove(key) }
+        if value {
+            watched.insert(key)
+            progress[key] = nil
+            watchedCanonical[key] = SyncKeys.fullKey(item, episode)
+        } else {
+            watched.remove(key)
+            watchedCanonical[key] = nil
+        }
         scheduleSave()
     }
 
@@ -265,6 +294,7 @@ final class LibraryStore {
         if p.isFinished {
             progress[key] = nil
             watched.insert(key)
+            watchedCanonical[key] = SyncKeys.fullKey(item, episode)
         } else {
             progress[key] = p
         }
@@ -285,5 +315,55 @@ final class LibraryStore {
     func clearProgress(_ key: String) {
         progress[key] = nil
         scheduleSave()
+    }
+
+    // MARK: Sync server
+
+    /// The parts of a profile's library that the sync server mirrors.
+    struct SyncLibrary {
+        var favorites: [MediaItem]
+        /// Favorite item id → added (ms since 1970); complete for every favorite.
+        var favoriteDates: [String: Double]
+        var favoriteChannelIDs: [Int]
+        var progress: [String: WatchProgress]
+        var watched: Set<String>
+        var watchedCanonical: [String: String]
+    }
+
+    private static func syncLibrary(from s: Snapshot) -> SyncLibrary {
+        var dates = s.favoriteDates ?? [:]
+        backfillFavoriteDates(s.favorites, &dates)
+        return SyncLibrary(favorites: s.favorites, favoriteDates: dates, favoriteChannelIDs: s.favoriteChannelIDs,
+                           progress: s.progress, watched: s.watched, watchedCanonical: s.watchedCanonical ?? [:])
+    }
+
+    private static func merge(_ lib: SyncLibrary, into s: inout Snapshot) {
+        s.favorites = lib.favorites
+        let ids = Set(lib.favorites.map(\.id))
+        s.favoriteDates = lib.favoriteDates.filter { ids.contains($0.key) }
+        s.favoriteChannelIDs = lib.favoriteChannelIDs
+        s.progress = lib.progress
+        s.watched = lib.watched
+        s.watchedCanonical = lib.watchedCanonical.filter { lib.watched.contains($0.key) }
+    }
+
+    /// A profile's library (the active one from memory, others from disk).
+    func syncLibrary(for id: UUID) -> SyncLibrary {
+        let snap = id == profileID ? currentSnapshot() : (FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot())
+        return Self.syncLibrary(from: snap)
+    }
+
+    /// Writes records received from the sync server into a profile's library.
+    func applySyncLibrary(_ lib: SyncLibrary, for id: UUID) {
+        if id == profileID {
+            var snap = currentSnapshot()
+            Self.merge(lib, into: &snap)
+            apply(snap)
+            scheduleSave()
+        } else {
+            var snap = FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot()
+            Self.merge(lib, into: &snap)
+            FileStore.save(snap, Self.fileName(id), mirrorToDefaults: true)
+        }
     }
 }

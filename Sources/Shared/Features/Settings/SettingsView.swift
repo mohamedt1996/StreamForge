@@ -36,6 +36,12 @@ struct SettingsView: View {
                 }
                 NavigationLink { LiveSettingsView() } label: { row("Live TV & Library", icon: "dot.radiowaves.left.and.right", value: nil) }
             }
+            Section("Sync Server") {
+                NavigationLink { ServerSyncView() } label: {
+                    row("StreamForge Server", icon: "arrow.triangle.2.circlepath.circle",
+                        value: ServerSync.shared.isSignedIn ? (ServerSync.shared.username ?? "Signed in") : "Off")
+                }
+            }
             Section("Household") {
                 NavigationLink { ProfilesSettingsView() } label: {
                     row("Profiles", icon: "person.2", value: ProfileStore.shared.activeProfile.name)
@@ -780,9 +786,13 @@ struct PlayerSettingsView: View {
             ConnectionSpeedSection()
             #if os(iOS)
             Section {
-                Toggle("Autoplay trailers on detail pages", isOn: $settings.values.trailerAutoplay)
-            } header: { Text("Detail pages") } footer: {
-                Text("Plays a muted trailer behind the artwork. Never on cellular or in Low Data Mode.")
+                Toggle("Autoplay trailers", isOn: $settings.values.trailerAutoplay)
+                TextField("Invidious instance (optional)", text: $settings.values.invidiousInstance)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+            } header: { Text("Trailers") } footer: {
+                Text("Plays a muted trailer on detail pages and the home billboard, like Netflix. Never on cellular or in Low Data Mode. An Invidious instance gives cleaner trailers without YouTube's player.")
             }
             #else
             Section {

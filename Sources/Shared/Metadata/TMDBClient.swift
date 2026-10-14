@@ -10,9 +10,12 @@ struct TMDBClient {
 
     var isConfigured: Bool { !key.isEmpty }
 
+    /// `https://image.tmdb.org/t/p/{size}/{file}`. Tolerates paths without the leading slash and
+    /// values that are already absolute URLs (some addons hand those back).
     static func image(_ path: String?, size: String = "w500") -> URL? {
-        guard let path, !path.isEmpty else { return nil }
-        return URL(string: imageBase + size + path)
+        guard let raw = path?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty, raw != "null" else { return nil }
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") { return URL(string: raw) }
+        return URL(string: imageBase + size + (raw.hasPrefix("/") ? raw : "/" + raw))
     }
 
     private func request<T: Decodable>(_ type: T.Type, _ path: String, _ query: [String: String?] = [:]) async throws -> T {
@@ -77,17 +80,64 @@ struct TMDBClient {
         }
     }
 
+    /// Everything is decoded tolerantly: one odd field (a null name in recommendations, a new
+    /// video type…) must not throw away the whole response — that used to drop TMDB's cast
+    /// (with photos) and leave only the provider's plain names.
     struct Details: Decodable {
         struct Genre: Decodable { var name: String }
         struct Credits: Decodable {
-            struct Cast: Decodable { var id: Int; var name: String; var character: String?; var profile_path: String? }
-            struct Crew: Decodable { var id: Int; var name: String; var job: String? }
+            struct Cast: Decodable {
+                var id: Int
+                var name: String
+                var character: String?
+                var profile_path: String?
+                enum CodingKeys: String, CodingKey { case id, name, character, profile_path, roles }
+                private struct Role: Decodable { var character: String? }
+                init(from decoder: Decoder) throws {
+                    let c = try decoder.container(keyedBy: CodingKeys.self)
+                    guard let id = c.flexInt(.id), let name = c.flexString(.name)?.trimmed, !name.isEmpty else {
+                        throw DecodingError.dataCorruptedError(forKey: .name, in: c, debugDescription: "Cast entry without id or name")
+                    }
+                    self.id = id
+                    self.name = name
+                    // /aggregate_credits (TV) lists characters under "roles".
+                    character = c.flexString(.character)
+                        ?? (try? c.decodeIfPresent(LossyArray<Role>.self, forKey: .roles))?.elements.compactMap(\.character).first { !$0.isEmpty }
+                    profile_path = c.flexString(.profile_path)
+                }
+            }
+            struct Crew: Decodable {
+                var id: Int
+                var name: String
+                var job: String?
+                enum CodingKeys: String, CodingKey { case id, name, job }
+                init(from decoder: Decoder) throws {
+                    let c = try decoder.container(keyedBy: CodingKeys.self)
+                    guard let id = c.flexInt(.id), let name = c.flexString(.name) else {
+                        throw DecodingError.dataCorruptedError(forKey: .name, in: c, debugDescription: "Crew entry without id or name")
+                    }
+                    self.id = id
+                    self.name = name
+                    job = c.flexString(.job)
+                }
+            }
             var cast: [Cast]?
             var crew: [Crew]?
+            enum CodingKeys: String, CodingKey { case cast, crew }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                cast = (try? c.decodeIfPresent(LossyArray<Cast>.self, forKey: .cast))?.elements
+                crew = (try? c.decodeIfPresent(LossyArray<Crew>.self, forKey: .crew))?.elements
+            }
         }
         struct Videos: Decodable {
             struct Video: Decodable { var key: String; var site: String; var type: String; var official: Bool? }
             var results: [Video]
+            enum CodingKeys: String, CodingKey { case results }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                results = (try? c.decodeIfPresent(LossyArray<Video>.self, forKey: .results))?.elements ?? []
+            }
         }
         struct Images: Decodable {
             struct Image: Decodable { var file_path: String; var iso_639_1: String?; var vote_average: Double? }
@@ -137,6 +187,65 @@ struct TMDBClient {
         var release_dates: ReleaseDates?
         var content_ratings: ContentRatings?
         var belongs_to_collection: CollectionRef?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, name, overview, tagline, poster_path, backdrop_path, release_date, first_air_date, vote_average
+            case runtime, episode_run_time, genres, status, imdb_id, credits, videos, images, external_ids, seasons, networks
+            case recommendations, release_dates, content_ratings, belongs_to_collection
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            guard let id = c.flexInt(.id) else {
+                throw DecodingError.dataCorruptedError(forKey: .id, in: c, debugDescription: "TMDB details without an id")
+            }
+            self.id = id
+            title = c.flexString(.title)
+            name = c.flexString(.name)
+            overview = c.flexString(.overview)
+            tagline = c.flexString(.tagline)
+            poster_path = c.flexString(.poster_path)
+            backdrop_path = c.flexString(.backdrop_path)
+            release_date = c.flexString(.release_date)
+            first_air_date = c.flexString(.first_air_date)
+            vote_average = c.flexDouble(.vote_average)
+            runtime = c.flexInt(.runtime).flatMap { $0 > 0 ? $0 : nil }
+            episode_run_time = try? c.decodeIfPresent([Int].self, forKey: .episode_run_time)
+            genres = (try? c.decodeIfPresent(LossyArray<Genre>.self, forKey: .genres))?.elements
+            status = c.flexString(.status)
+            imdb_id = c.flexString(.imdb_id)
+            credits = try? c.decodeIfPresent(Credits.self, forKey: .credits)
+            videos = try? c.decodeIfPresent(Videos.self, forKey: .videos)
+            images = try? c.decodeIfPresent(Images.self, forKey: .images)
+            external_ids = try? c.decodeIfPresent(ExternalIDs.self, forKey: .external_ids)
+            seasons = (try? c.decodeIfPresent(LossyArray<Season>.self, forKey: .seasons))?.elements
+            networks = (try? c.decodeIfPresent(LossyArray<Network>.self, forKey: .networks))?.elements
+            recommendations = try? c.decodeIfPresent(Recommendations.self, forKey: .recommendations)
+            release_dates = try? c.decodeIfPresent(ReleaseDates.self, forKey: .release_dates)
+            content_ratings = try? c.decodeIfPresent(ContentRatings.self, forKey: .content_ratings)
+            belongs_to_collection = try? c.decodeIfPresent(CollectionRef.self, forKey: .belongs_to_collection)
+        }
+    }
+
+    /// YouTube trailer ids from a videos list: official trailers, other trailers, then teasers.
+    static func trailerKeys(_ videos: [Details.Videos.Video]) -> [String] {
+        let yt = videos.filter { $0.site.caseInsensitiveCompare("YouTube") == .orderedSame && !$0.key.isEmpty }
+        func rank(_ v: Details.Videos.Video) -> Int? {
+            switch (v.type, v.official == true) {
+            case ("Trailer", true): return 0
+            case ("Trailer", false): return 1
+            case ("Teaser", true): return 2
+            case ("Teaser", false): return 3
+            default: return nil
+            }
+        }
+        let ranked = yt.enumerated().compactMap { pair -> (Int, Int, String)? in
+            rank(pair.element).map { ($0, pair.offset, pair.element.key) }
+        }
+        .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
+        .map(\.2)
+        var seen = Set<String>()
+        return ranked.filter { seen.insert($0).inserted }
     }
 
     struct CollectionRef: Decodable, Hashable {
@@ -307,6 +416,24 @@ struct TMDBClient {
             if let bio = try? await en.request(PersonDetails.self, "person/\(id)").biography, !bio.isEmpty { p.biography = bio }
         }
         return p
+    }
+
+    /// Just the credits of a title (cheap; used to put faces on cast lists from other sources).
+    /// Series use /aggregate_credits, which covers every season rather than only the latest.
+    func credits(id: Int, type: MediaType) async throws -> Details.Credits {
+        let isTV = type == .series || type == .episode
+        if isTV, let all = try? await request(Details.Credits.self, "tv/\(id)/aggregate_credits"), !(all.cast ?? []).isEmpty {
+            return all
+        }
+        return try await request(Details.Credits.self, (isTV ? "tv/" : "movie/") + String(id) + "/credits")
+    }
+
+    /// Ranked YouTube trailer ids for a title (cheap; used by the home billboard).
+    func trailerKeys(id: Int, type: MediaType) async throws -> [String] {
+        let isTV = type == .series || type == .episode
+        let videos = try await request(Details.Videos.self, (isTV ? "tv/" : "movie/") + String(id) + "/videos",
+                                       ["include_video_language": "\(language),en,null"])
+        return Self.trailerKeys(videos.results)
     }
 
     func searchPerson(_ name: String) async throws -> [PersonSummary] {

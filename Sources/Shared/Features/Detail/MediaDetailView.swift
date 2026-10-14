@@ -17,6 +17,8 @@ final class DetailModel {
         let d = await MetadataService.shared.details(for: details.item)
         details = d
         loading = false
+        // Faces for cast lists that came as plain names; runs alongside sources/episodes.
+        Task { await resolveCastPhotos() }
         if d.item.type == .series {
             let lib = LibraryStore.shared
             let resumeSeason = lib.latestEpisodeProgress(for: d.item)?.episode?.season
@@ -27,6 +29,13 @@ final class DetailModel {
             sources = s
             await s.load()
         }
+    }
+
+    func resolveCastPhotos() async {
+        let snapshot = details
+        let resolved = await MetadataService.shared.castWithPhotos(for: snapshot)
+        guard resolved != details.cast, details.item.id == snapshot.item.id else { return }
+        details.cast = resolved
     }
 
     func selectSeason(_ number: Int) async {
@@ -58,10 +67,15 @@ struct MediaDetailView: View {
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppRouter.self) private var router
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model: DetailModel
     @State private var sourceSheet: SourceSheetContext?
     @State private var downloadSheet: DownloadSheetContext?
     @State private var expandedOverview = false
+    @State private var trailer = TrailerController()
+    @State private var heroVisible = true
+    @State private var pageVisible = false
+    @State private var appearedAt = Date()
 
     init(item: MediaItem) {
         _model = State(initialValue: DetailModel(item: item))
@@ -96,6 +110,15 @@ struct MediaDetailView: View {
             NewEpisodeTracker.shared.markSeen(item)
             await model.load()
         }
+        // Trailer: backdrop first, video ~2.5 s after the page appeared; paused whenever the hero
+        // is scrolled away, the app is in the background, a player/sheet covers it or the page is left.
+        .onAppear { pageVisible = true; appearedAt = Date() }
+        .onDisappear { pageVisible = false }
+        .onChange(of: trailerActive, initial: true) { _, active in trailer.setActive(active) }
+        .onChange(of: model.details.trailerKeys, initial: true) { _, keys in
+            let remaining = TrailerPolicy.startDelay - Date().timeIntervalSince(appearedAt)
+            trailer.setKeys(keys, delay: max(0.4, remaining))
+        }
         .sheet(item: $sourceSheet) { ctx in
             SourcesSheet(context: ctx)
         }
@@ -116,19 +139,26 @@ struct MediaDetailView: View {
         #endif
     }
 
+    private var trailerActive: Bool {
+        pageVisible && heroVisible && scenePhase == .active
+            && player.current == nil && player.multiview == nil && player.sourcePickerRequest == nil
+            && sourceSheet == nil && downloadSheet == nil
+            && TrailerPolicy.allowsAutoplay
+    }
+
     private var header: some View {
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(maxWidth: .infinity)
                 .frame(height: headerHeight)
                 .overlay {
-                    // Muted trailer over the artwork (setting: Player → Autoplay trailers).
-                    TrailerLayer(youtubeKey: model.details.trailerYouTubeKey,
-                                 visible: player.current == nil && player.multiview == nil && sourceSheet == nil)
+                    // Muted trailer over the artwork, edge to edge (setting: Player → Autoplay trailers).
+                    TrailerSurface(controller: trailer)
                 }
                 .clipped()
                 .overlay(LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
                                         startPoint: .top, endPoint: .bottom))
+                .background(HeroVisibilityReader(height: headerHeight, isVisible: $heroVisible))
             HStack(alignment: .bottom, spacing: 18) {
                 #if !os(tvOS)
                 if UIDevice.current.userInterfaceIdiom == .pad {
@@ -139,12 +169,17 @@ struct MediaDetailView: View {
                 }
                 #endif
                 VStack(alignment: .leading, spacing: 10) {
-                    if let logo = item.logo {
-                        RemoteImage(url: logo, contentMode: .fit)
-                            .frame(maxWidth: logoWidth, maxHeight: logoWidth * 0.38, alignment: .bottomLeading)
-                    } else {
-                        Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(3)
+                    // Like Netflix, the title shrinks a little while the trailer plays.
+                    Group {
+                        if let logo = item.logo {
+                            RemoteImage(url: logo, contentMode: .fit)
+                                .frame(maxWidth: logoWidth, maxHeight: logoWidth * 0.38, alignment: .bottomLeading)
+                        } else {
+                            Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(3)
+                        }
                     }
+                    .scaleEffect(trailer.isRevealed ? 0.8 : 1, anchor: .bottomLeading)
+                    .animation(.easeInOut(duration: TrailerPolicy.fade), value: trailer.isRevealed)
                     metaLine
                     if !model.details.ratings.isEmpty {
                         HStack(spacing: 8) {
@@ -153,8 +188,13 @@ struct MediaDetailView: View {
                     }
                     if let tagline = model.details.tagline {
                         Text(tagline).font(.subheadline.italic()).foregroundStyle(Theme.secondaryText)
+                            .opacity(trailer.isRevealed ? 0 : 1)
+                            .animation(.easeInOut(duration: TrailerPolicy.fade), value: trailer.isRevealed)
                     }
                 }
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+                Spacer(minLength: 0)
+                TrailerControlButton(controller: trailer)
             }
             .padding(.horizontal, Theme.gutter)
         }
@@ -363,14 +403,16 @@ struct MediaDetailView: View {
                 SectionHeader(title: "Cast")
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 14) {
-                        ForEach(model.details.cast) { person in
-                            Button { router.push(.person(id: person.id, name: person.name)) } label: {
+                        ForEach(Array(model.details.cast.enumerated()), id: \.offset) { _, person in
+                            Button {
+                                CastPhotoMemory.remember(person)
+                                router.push(.person(id: person.id, name: person.name))
+                            } label: {
                                 VStack(spacing: 6) {
-                                    RemoteImage(url: person.photo, placeholderSymbol: "person.fill")
-                                        .frame(width: castSize, height: castSize)
-                                        .clipShape(Circle())
+                                    CastAvatar(url: person.photo, name: person.name, size: castSize)
+                                        .animation(.easeInOut(duration: 0.25), value: person.photo)
                                     Text(person.name).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
-                                    if let role = person.role {
+                                    if let role = person.role, !role.isEmpty {
                                         Text(role).font(.caption2).foregroundStyle(Theme.secondaryText).lineLimit(1)
                                     }
                                 }

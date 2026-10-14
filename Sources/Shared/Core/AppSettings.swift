@@ -121,6 +121,7 @@ final class AppSettings {
         didSet {
             FileStore.save(values, "settings.json", mirrorToDefaults: true)
             CloudSync.shared.schedulePush()
+            ServerSync.shared.noteLocalChange()
         }
     }
 
@@ -131,15 +132,24 @@ final class AppSettings {
     // MARK: Secrets
     var tmdbKey: String {
         get { Keychain.get("tmdb.key") ?? "" }
-        set { Keychain.set(newValue.trimmed, for: "tmdb.key") }
+        set {
+            Keychain.set(newValue.trimmed, for: "tmdb.key")
+            ServerSync.shared.noteLocalChange()
+        }
     }
     var omdbKey: String {
         get { Keychain.get("omdb.key") ?? "" }
-        set { Keychain.set(newValue.trimmed, for: "omdb.key") }
+        set {
+            Keychain.set(newValue.trimmed, for: "omdb.key")
+            ServerSync.shared.noteLocalChange()
+        }
     }
     var fanartKey: String {
         get { Keychain.get("fanart.key") ?? "" }
-        set { Keychain.set(newValue.trimmed, for: "fanart.key") }
+        set {
+            Keychain.set(newValue.trimmed, for: "fanart.key")
+            ServerSync.shared.noteLocalChange()
+        }
     }
     var traktClientID: String {
         get { Keychain.get("trakt.client") ?? "" }

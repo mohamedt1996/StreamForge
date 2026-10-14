@@ -68,7 +68,10 @@ final class ProfileStore {
     /// Guards Settings while a kids profile is active, and editing kids profiles.
     var parentPIN: String {
         get { Keychain.get("profiles.parentPIN") ?? "" }
-        set { Keychain.set(newValue, for: "profiles.parentPIN") }
+        set {
+            Keychain.set(newValue, for: "profiles.parentPIN")
+            ServerSync.shared.noteLocalChange()
+        }
     }
 
     var settingsLocked: Bool { isKidsMode && !settingsUnlocked && !parentPIN.isEmpty }
@@ -77,6 +80,7 @@ final class ProfileStore {
         FileStore.save(profiles, "profiles.json", mirrorToDefaults: true)
         UserDefaults.standard.set(activeProfileID.uuidString, forKey: "profiles.active")
         CloudSync.shared.schedulePush()
+        ServerSync.shared.noteLocalChange()
     }
 
     // MARK: Switching
@@ -140,6 +144,28 @@ final class ProfileStore {
             DispatcharrStore.shared.reapplyFilters()
         }
         persist()
+    }
+
+    /// Adds or updates one profile received from the sync server (never switches profiles).
+    func upsertSynced(_ profile: UserProfile) {
+        if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
+            let kidsChanged = profiles[i].isKids != profile.isKids
+            profiles[i] = profile
+            persist()
+            if profile.id == activeProfileID, kidsChanged {
+                DispatcharrStore.shared.reapplyFilters()
+                VODIndex.shared.rebuildIfNeeded()
+            }
+        } else {
+            profiles.append(profile)
+            persist()
+        }
+    }
+
+    /// Removes a profile deleted on another device (the last profile is always kept).
+    func deleteSynced(_ id: UUID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        delete(profile)
     }
 
     /// Replaces profiles from a backup / another device.

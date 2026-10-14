@@ -5,6 +5,21 @@ import UniformTypeIdentifiers
 struct SyncSettingsView: View {
     var body: some View {
         List {
+            Section {
+                NavigationLink { ServerSyncView() } label: {
+                    HStack {
+                        Label("StreamForge Server", systemImage: "arrow.triangle.2.circlepath.circle")
+                        Spacer()
+                        Text(ServerSync.shared.isSignedIn ? ServerSync.shared.statusText : "Off")
+                            .foregroundStyle(Theme.secondaryText)
+                            .lineLimit(1)
+                    }
+                }
+            } header: {
+                Text("Sync server")
+            } footer: {
+                Text("Your own server keeps iPhone, iPad, Apple TV and Android in sync, with accounts and per-device access.")
+            }
             CloudSyncSection()
             Section {
                 NavigationLink { ReceiveSyncView() } label: {
@@ -222,7 +237,7 @@ struct CloudSyncSection: View {
                         if busy { ProgressView() }
                     }
                 }
-                .disabled(!cloud.iCloudAvailable || busy)
+                .disabled(!cloud.iCloudAvailable || busy || ServerSync.shared.isSignedIn)
             }
         } header: {
             Text("iCloud")

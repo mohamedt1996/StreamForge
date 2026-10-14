@@ -136,13 +136,38 @@ struct StremioMetaPreview: Decodable, Hashable, Identifiable {
     var imdbID: String?
     var links: [Link]
     var trailers: [Trailer]
+    /// Legacy `cast: ["Name", …]`.
+    var castNames: [String]
+    /// Cast with faces: Cinemeta's `app_extras.cast` (name, character, photo URL) merged with
+    /// `credits_cast` (TMDB-style: id, name, character, profile_path).
+    var castProfiles: [CastProfile]
 
     struct Link: Decodable, Hashable { var name: String?; var category: String?; var url: String? }
     struct Trailer: Decodable, Hashable { var source: String?; var type: String? }
+    struct CastProfile: Decodable, Hashable {
+        var name: String
+        var character: String?
+        var photo: URL?
+        /// TMDB person id when the addon gives one (`credits_cast`).
+        var tmdbID: Int?
+        enum CodingKeys: String, CodingKey { case name, character, photo, profile_path, id }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            guard let n = c.flexString(.name)?.trimmed, !n.isEmpty else {
+                throw DecodingError.dataCorruptedError(forKey: .name, in: c, debugDescription: "Cast entry without a name")
+            }
+            name = n
+            character = c.flexString(.character)
+            photo = c.flexURL(.photo).flatMap { $0.scheme?.hasPrefix("http") == true ? $0 : nil }
+                ?? TMDBClient.image(c.flexString(.profile_path), size: CastPhotoResolver.profileSize)
+            tmdbID = c.flexInt(.id).flatMap { $0 > 0 ? $0 : nil }
+        }
+    }
+    private struct AppExtras: Decodable { var cast: LossyArray<CastProfile>? }
 
     enum CodingKeys: String, CodingKey {
         case id, type, name, poster, posterShape, background, logo, description, releaseInfo, year, imdbRating
-        case genres, genre, runtime, videos, imdb_id, links, trailers
+        case genres, genre, runtime, videos, imdb_id, links, trailers, cast, app_extras, credits_cast
     }
 
     init(from decoder: Decoder) throws {
@@ -163,6 +188,32 @@ struct StremioMetaPreview: Decodable, Hashable, Identifiable {
         imdbID = c.flexString(.imdb_id) ?? (id.hasPrefix("tt") ? id : nil)
         links = (try? c.decode(LossyArray<Link>.self, forKey: .links))?.elements ?? []
         trailers = (try? c.decode(LossyArray<Trailer>.self, forKey: .trailers))?.elements ?? []
+        castNames = c.flexStringArray(.cast)
+        let extras = (try? c.decodeIfPresent(AppExtras.self, forKey: .app_extras))?.cast?.elements ?? []
+        let credits = (try? c.decodeIfPresent(LossyArray<CastProfile>.self, forKey: .credits_cast))?.elements ?? []
+        castProfiles = Self.mergeProfiles(extras, credits)
+    }
+
+    /// Keeps the first list's order; fills photos/ids/characters from the second by name and
+    /// appends anyone only the second list has.
+    static func mergeProfiles(_ primary: [CastProfile], _ secondary: [CastProfile]) -> [CastProfile] {
+        guard !secondary.isEmpty else { return primary }
+        guard !primary.isEmpty else { return secondary }
+        var byName: [String: CastProfile] = [:]
+        for p in secondary where byName[CastPhotoResolver.normalize(p.name)] == nil { byName[CastPhotoResolver.normalize(p.name)] = p }
+        var used = Set<String>()
+        var result = primary.map { p -> CastProfile in
+            let key = CastPhotoResolver.normalize(p.name)
+            guard let other = byName[key] else { return p }
+            used.insert(key)
+            var p = p
+            p.photo = p.photo ?? other.photo
+            p.tmdbID = p.tmdbID ?? other.tmdbID
+            if (p.character ?? "").isEmpty { p.character = other.character }
+            return p
+        }
+        result += secondary.filter { !used.contains(CastPhotoResolver.normalize($0.name)) }
+        return result
     }
 
     var year: Int? { releaseInfo.flatMap { Int($0.prefix(4)) } }

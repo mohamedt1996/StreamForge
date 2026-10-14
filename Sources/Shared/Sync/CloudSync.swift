@@ -86,8 +86,16 @@ final class CloudSync {
 
     // MARK: Lifecycle
 
+    /// Signed in to a StreamForge sync server: that is the single source of truth.
+    private var deferredToServer: Bool { ServerSync.shared.isSignedIn }
+    static let serverStatusText = "Using your StreamForge server"
+
     func start() {
         guard isEnabled else { status = .off; return }
+        if deferredToServer {
+            pauseForServerSync()
+            return
+        }
         guard iCloudAvailable else {
             status = .unavailable("Sign in to iCloud, and install a build signed with iCloud enabled")
             return
@@ -113,9 +121,21 @@ final class CloudSync {
         status = .off
     }
 
+    /// Called when this device signs in to a sync server.
+    func pauseForServerSync() {
+        if started || observer != nil { stop() }
+        pushTask?.cancel()
+        status = isEnabled ? .unavailable(Self.serverStatusText) : .off
+    }
+
+    /// Called after signing out of the sync server: iCloud sync resumes if it was on.
+    func resumeAfterServerSync() {
+        if isEnabled { start() } else { status = .off }
+    }
+
     /// Debounced upload after local changes (and when the app goes to the background).
     func schedulePush(delay: Double = 20) {
-        guard isEnabled, iCloudAvailable, Date() > suppressUntil else { return }
+        guard isEnabled, !deferredToServer, iCloudAvailable, Date() > suppressUntil else { return }
         pushTask?.cancel()
         pushTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -125,6 +145,7 @@ final class CloudSync {
     }
 
     func syncNow() async {
+        guard !deferredToServer else { return }
         await pull()
         push()
     }
@@ -155,7 +176,7 @@ final class CloudSync {
     }
 
     func push() {
-        guard isEnabled, iCloudAvailable else { return }
+        guard isEnabled, !deferredToServer, iCloudAvailable else { return }
         status = .syncing
         var bundle = SyncService.makeBundle()
         bundle.libraries = LibraryStore.shared.exportLibrariesForCloud(profileIDs: ProfileStore.shared.profiles.map(\.id))
@@ -208,7 +229,7 @@ final class CloudSync {
     // MARK: Download
 
     func pull() async {
-        guard isEnabled, iCloudAvailable else { return }
+        guard isEnabled, !deferredToServer, iCloudAvailable else { return }
         guard let metaData = store.data(forKey: metaKey), let meta = try? JSONDecoder().decode(Meta.self, from: metaData) else { return }
         lastRemoteDevice = meta.deviceName
         guard meta.deviceID != deviceID, meta.updatedAt > lastApplied else {

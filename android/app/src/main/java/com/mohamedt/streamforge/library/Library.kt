@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import com.mohamedt.streamforge.core.Episode
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.Store
+import com.mohamedt.streamforge.sync.RemoteSync
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -35,6 +36,8 @@ private data class LibrarySnapshot(
     val watched: Set<String> = emptySet(),
     val hiddenCategories: Set<String> = emptySet(),
     val introMarkers: Map<String, List<Long>> = emptyMap(),
+    /** Item + time for each watched key, so watched marks can sync (position = duration). */
+    val watchedInfo: Map<String, Progress> = emptyMap(),
 )
 
 /** Favorites, positions, watched marks and channel history. */
@@ -50,6 +53,7 @@ object Library {
     private fun update(transform: (LibrarySnapshot) -> LibrarySnapshot) {
         snap = transform(snap)
         Store.save(LibrarySnapshot.serializer(), snap, "library.json")
+        RemoteSync.changed()
     }
 
     fun key(item: MediaItem, episode: Episode?) = episode?.let { "${item.id}#${it.season}x${it.episode}" } ?: item.id
@@ -76,7 +80,12 @@ object Library {
 
     fun setWatched(item: MediaItem, episode: Episode?, value: Boolean) = update { s ->
         val k = key(item, episode)
-        if (value) s.copy(watched = s.watched + k, progress = s.progress - k) else s.copy(watched = s.watched - k)
+        if (value) {
+            val info = Progress(k, item, episode, 0, 0, System.currentTimeMillis())
+            s.copy(watched = s.watched + k, progress = s.progress - k, watchedInfo = s.watchedInfo + (k to info))
+        } else {
+            s.copy(watched = s.watched - k, watchedInfo = s.watchedInfo - k)
+        }
     }
 
     fun updateProgress(item: MediaItem, episode: Episode?, position: Long, duration: Long) {
@@ -84,7 +93,8 @@ object Library {
         val k = key(item, episode)
         val p = Progress(k, item, episode, position, duration, System.currentTimeMillis())
         update { s ->
-            if (p.finished) s.copy(progress = s.progress - k, watched = s.watched + k) else s.copy(progress = s.progress + (k to p))
+            if (p.finished) s.copy(progress = s.progress - k, watched = s.watched + k, watchedInfo = s.watchedInfo + (k to p))
+            else s.copy(progress = s.progress + (k to p))
         }
     }
 
@@ -102,4 +112,51 @@ object Library {
     /** Per-series manual intro markers [start, end] in ms. */
     fun introMarker(seriesKey: String): Pair<Long, Long>? = snap.introMarkers[seriesKey]?.takeIf { it.size == 2 }?.let { it[0] to it[1] }
     fun setIntroMarker(seriesKey: String, start: Long, end: Long) = update { s -> s.copy(introMarkers = s.introMarkers + (seriesKey to listOf(start, end))) }
+
+    // MARK: Sync (RemoteSync reads and applies through these; every change still goes through update()).
+
+    internal val syncProgress: Map<String, Progress> get() = snap.progress
+    internal val syncWatchedInfo: Map<String, Progress> get() = snap.watchedInfo
+
+    /** Applies a pulled progress record to local key [k]. */
+    internal fun syncPutProgress(k: String, item: MediaItem, episode: Episode?, position: Long, duration: Long, watched: Boolean, at: Long) = update { s ->
+        if (watched) {
+            val info = Progress(k, item, episode, duration, duration, at)
+            s.copy(watched = s.watched + k, progress = s.progress - k, watchedInfo = s.watchedInfo + (k to info))
+        } else {
+            val p = Progress(k, item, episode, position, duration, at)
+            s.copy(progress = s.progress + (k to p), watched = s.watched - k, watchedInfo = s.watchedInfo - k)
+        }
+    }
+
+    internal fun syncRemoveProgress(k: String) = update { s ->
+        s.copy(progress = s.progress - k, watched = s.watched - k, watchedInfo = s.watchedInfo - k)
+    }
+
+    internal fun syncFavorite(item: MediaItem, on: Boolean) = update { s ->
+        val without = s.favorites.filter { it.id != item.id }
+        s.copy(favorites = if (on) listOf(item) + without else without)
+    }
+
+    internal fun syncFavoriteChannel(id: Long, on: Boolean) = update { s ->
+        val without = s.favoriteChannels - id
+        s.copy(favoriteChannels = if (on) without + id else without)
+    }
+
+    /** Sets a pulled position without touching the watched mark (collections sync independently). */
+    internal fun syncSetProgress(k: String, p: Progress) = update { s -> s.copy(progress = s.progress + (k to p)) }
+
+    internal fun syncRemoveProgressOnly(k: String) = update { s -> s.copy(progress = s.progress - k) }
+
+    internal fun syncPutWatched(k: String, info: Progress, dropProgress: Boolean) = update { s ->
+        s.copy(watched = s.watched + k, watchedInfo = s.watchedInfo + (k to info), progress = if (dropProgress) s.progress - k else s.progress)
+    }
+
+    internal fun syncRemoveWatched(k: String) = update { s -> s.copy(watched = s.watched - k, watchedInfo = s.watchedInfo - k) }
+
+    /** Swaps in the favourite channels of another Dispatcharr server (sync keeps them per server). */
+    internal fun syncReplaceFavoriteChannels(ids: List<Long>) {
+        if (ids == snap.favoriteChannels) return
+        update { s -> s.copy(favoriteChannels = ids) }
+    }
 }

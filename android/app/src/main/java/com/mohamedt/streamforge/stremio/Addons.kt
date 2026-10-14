@@ -8,6 +8,9 @@ import com.mohamedt.streamforge.core.Http
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.MediaType
 import com.mohamedt.streamforge.core.Origin
+import com.mohamedt.streamforge.core.Person
+import com.mohamedt.streamforge.core.normalizeName
+import com.mohamedt.streamforge.metadata.Tmdb
 import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.core.arr
 import com.mohamedt.streamforge.core.bool
@@ -21,6 +24,7 @@ import com.mohamedt.streamforge.core.objects
 import com.mohamedt.streamforge.core.parseJson
 import com.mohamedt.streamforge.core.str
 import com.mohamedt.streamforge.core.strings
+import com.mohamedt.streamforge.sync.RemoteSync
 import java.net.URLEncoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +97,10 @@ data class Meta(
     val imdbId: String?,
     val cast: List<String>,
     val trailer: String?,
+    /** Cast with faces: Cinemeta `app_extras.cast` (photo URLs) merged with `credits_cast` (TMDB profile paths/ids). */
+    val people: List<Person> = emptyList(),
+    /** Every trailer id the addon lists, trailers before other clips. */
+    val trailers: List<String> = listOfNotNull(trailer),
 ) {
     val year: Int? get() = releaseInfo?.take(4)?.toIntOrNull()
 
@@ -141,7 +149,16 @@ object Addons {
         }
     }
 
-    private fun save() = Store.save(ListSerializer(Addon.serializer()), addons, "addons.json")
+    private fun save() {
+        Store.save(ListSerializer(Addon.serializer()), addons, "addons.json")
+        RemoteSync.changed()
+    }
+
+    /** Manifest URL, the addon's identity for sync. */
+    fun manifestUrl(addon: Addon): String = addon.baseUrl + "/manifest.json"
+
+    /** Replaces the whole list (sync: reordering after pulled changes). */
+    internal fun replaceAllFromSync(list: List<Addon>) { addons = list; save() }
 
     fun normalize(raw: String): String {
         var s = raw.trim()
@@ -277,16 +294,44 @@ object Addons {
                 still = v.str("thumbnail"), airDate = v.str("released")?.take(10), stremioVideoId = vid,
             )
         }
-        val trailer = o.objects("trailers").firstOrNull()?.str("source")
+        val trailerObjs = o.objects("trailers")
+        val trailers = (trailerObjs.filter { it.str("type") == "Trailer" } + trailerObjs.filter { it.str("type") != "Trailer" })
+            .mapNotNull { it.str("source") }.distinct()
+        val trailer = trailers.firstOrNull()
         return Meta(
             id = id, type = o.str("type") ?: "movie", name = o.str("name") ?: id, poster = o.str("poster"),
             background = o.str("background"), logo = o.str("logo"), description = o.str("description"),
             releaseInfo = o.str("releaseInfo") ?: o.str("year"), imdbRating = o.dbl("imdbRating"),
             genres = o.strings("genres") + o.strings("genre"), runtime = o.str("runtime"), videos = videos,
             imdbId = o.str("imdb_id") ?: id.takeIf { it.startsWith("tt") },
-            cast = o.objects("links").filter { it.str("category") == "Cast" }.mapNotNull { it.str("name") },
+            cast = o.objects("links").filter { it.str("category") == "Cast" }.mapNotNull { it.str("name") }
+                .ifEmpty { o.strings("cast") },
             trailer = trailer,
+            people = parsePeople(o),
+            trailers = trailers,
         )
+    }
+
+    private fun parsePeople(o: JsonObject): List<Person> {
+        fun person(c: JsonObject, i: Int): Person? {
+            val name = c.str("name") ?: return null
+            val photo = c.str("photo")?.takeIf { it.startsWith("http") } ?: Tmdb.image(c.str("profile_path"), Tmdb.PROFILE_SIZE)
+            val id = c.int("id")?.takeIf { it > 0 } ?: (-1000 - i)
+            return Person(id, name, c.str("character"), photo)
+        }
+        val extras = o.child("app_extras")?.objects("cast")?.mapIndexedNotNull { i, c -> person(c, i) } ?: emptyList()
+        val credits = o.objects("credits_cast").mapIndexedNotNull { i, c -> person(c, 500 + i) }
+        if (credits.isEmpty()) return extras
+        if (extras.isEmpty()) return credits
+        val byName = credits.associateBy { normalizeName(it.name) }
+        val used = mutableSetOf<String>()
+        val merged = extras.map { p ->
+            val key = normalizeName(p.name)
+            val other = byName[key] ?: return@map p
+            used.add(key)
+            p.copy(id = if (p.id > 0) p.id else other.id, photo = p.photo ?: other.photo, role = p.role ?: other.role)
+        }
+        return merged + credits.filter { normalizeName(it.name) !in used }
     }
 
     private fun parseStream(o: JsonObject): Stream {

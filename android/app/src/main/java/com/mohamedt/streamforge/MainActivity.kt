@@ -135,7 +135,7 @@ private fun Root() {
                 } else {
                     when (top) {
                         is Screen.Detail -> DetailScreen(top.item)
-                        is Screen.Person -> PersonScreen(top.id, top.name)
+                        is Screen.Person -> PersonScreen(top.id, top.name, top.photo)
                         is Screen.Collection -> CollectionScreen(top.id, top.name)
                         is Screen.Catalog -> CatalogScreen(top.entry)
                         is Screen.Category -> CategoryScreen(top.kind, top.categoryId, top.title)

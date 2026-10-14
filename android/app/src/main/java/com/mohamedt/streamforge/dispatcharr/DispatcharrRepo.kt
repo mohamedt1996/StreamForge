@@ -7,6 +7,7 @@ import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.Settings
 import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.core.TitleCleaner
+import com.mohamedt.streamforge.sync.RemoteSync
 import java.security.SecureRandom
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -124,12 +125,29 @@ object DispatcharrRepo {
     private fun upsert(server: Server) {
         servers = servers.filter { it.id != server.id } + server
         Store.save(ListSerializer(Server.serializer()), servers, "servers.json")
+        RemoteSync.changed()
         activate(server.id)
+    }
+
+    /**
+     * Saves a server pulled from the sync server (secrets are set by the caller). Keeps its place in
+     * the list, activates it when nothing is active, and reloads when the active server's connection changed.
+     */
+    internal fun upsertFromSync(server: Server) {
+        val old = servers.firstOrNull { it.id == server.id }
+        servers = if (old != null) servers.map { if (it.id == server.id) server else it } else servers + server
+        Store.save(ListSerializer(Server.serializer()), servers, "servers.json")
+        RemoteSync.changed()
+        val isActive = active?.id == server.id
+        if (activeId == null && servers.size == 1) activate(server.id)
+        else if (isActive && (old == null || old.baseUrl != server.baseUrl || old.username != server.username || old.authMode != server.authMode)) activate(server.id)
+        else if (isActive) rest = null
     }
 
     fun remove(server: Server) {
         servers = servers.filter { it.id != server.id }
         Store.save(ListSerializer(Server.serializer()), servers, "servers.json")
+        RemoteSync.changed()
         Store.file(cacheName(server.id)).delete()
         if (activeId == server.id) activate(servers.firstOrNull()?.id)
     }

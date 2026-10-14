@@ -223,9 +223,86 @@ jobs:
           name: gradle-log
           path: gradle.log
 
+  sync-server:
+    name: Sync server (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: server
+    env:
+      VERSION: 0.1.${{ github.run_number }}
+      IMAGE: ghcr.io/mohamedt1996/streamforge-sync
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.mod
+      - name: Resolve modules
+        run: |
+          # go.sum is generated here until it is committed.
+          [ -f go.sum ] || go mod tidy
+          go mod download
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Cross-compile binaries
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"; ext=""
+            [ "$os" = "windows" ] && ext=".exe"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/streamforge-sync-${os}-${arch}${ext}" .
+          done
+          ls -lh dist
+          ./dist/streamforge-sync-linux-amd64 -version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StreamForge-Sync-Server
+          path: server/dist/streamforge-sync-*
+      - name: Set up QEMU
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.title=StreamForge Sync
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Publish release
-    needs: [ios, tvos, android]
+    needs: [ios, tvos, android, sync-server]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -238,6 +315,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: StreamForge-Android
+      - uses: actions/download-artifact@v4
+        with:
+          name: StreamForge-Sync-Server
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.1.${{ github.run_number }}
@@ -249,7 +329,9 @@ jobs:
             - `StreamForge-unsigned.ipa`: iPhone and iPad (iOS 17+)
             - `StreamForgeTV-unsigned.ipa`: Apple TV (tvOS 17+)
             - `StreamForge-universal.apk`: Android phones, tablets and Android TV (Android 8+). Per-ABI APKs are smaller: `arm64-v8a` for most modern devices, `armeabi-v7a` for older TV boxes.
+            - `streamforge-sync-*`: self-hosted sync server binaries (Linux amd64/arm64, macOS arm64, Windows amd64). Docker: `ghcr.io/mohamedt1996/streamforge-sync:0.1.${{ github.run_number }}`.
           files: |
             StreamForge-unsigned.ipa
             StreamForgeTV-unsigned.ipa
             StreamForge-*.apk
+            streamforge-sync-*

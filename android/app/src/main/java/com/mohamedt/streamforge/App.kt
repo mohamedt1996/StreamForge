@@ -9,6 +9,7 @@ import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
 import com.mohamedt.streamforge.dispatcharr.GuideRepo
 import com.mohamedt.streamforge.stremio.Addons
+import com.mohamedt.streamforge.sync.ServerSync
 import com.mohamedt.streamforge.torrent.TorrServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,8 @@ class App : Application(), SingletonImageLoader.Factory {
         Addons.init()
         GuideRepo.init()
         DispatcharrRepo.init()
+        // After the stores: diffs their data against the last sync and pulls while the app is in the foreground.
+        ServerSync.init()
         scope.launch {
             delay(2000)
             TorrServer.startEmbeddedIfNeeded()

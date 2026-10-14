@@ -89,6 +89,7 @@ final class DispatcharrStore {
         }
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
         CloudSync.shared.schedulePush()
+        ServerSync.shared.noteLocalChange()
         activate(server.id)
     }
 
@@ -98,6 +99,7 @@ final class DispatcharrStore {
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
         FileStore.remove(cacheName(server.id))
         FileStore.remove("guide-\(server.id.uuidString).json")
+        ServerSync.shared.noteLocalChange()
         if activeServerID == server.id {
             activeServerID = servers.first?.id
             rest = nil
@@ -120,6 +122,42 @@ final class DispatcharrStore {
         }
     }
 
+    /// Adds or updates a server received from the sync server. Secrets arrive separately (they are
+    /// stored by server id, so they may come before or after the server itself). Only activates
+    /// it when this device has no server yet, or when the active server's address changed.
+    func upsertSynced(_ incoming: DispatcharrServer, order: Int?) {
+        var server = incoming
+        var needsActivate = false
+        if let i = servers.firstIndex(where: { $0.id == server.id }) {
+            let old = servers[i]
+            server.channelProfileID = old.channelProfileID
+            if server.id == activeServer?.id,
+               old.baseURL != server.baseURL || old.username != server.username || old.authMode != server.authMode {
+                needsActivate = true
+            }
+            servers[i] = server
+        } else {
+            servers.append(server)
+            if activeServerID == nil || servers.count == 1 { needsActivate = true }
+        }
+        if let order, let i = servers.firstIndex(where: { $0.id == server.id }) {
+            let target = max(0, min(order, servers.count - 1))
+            if target != i {
+                let moved = servers.remove(at: i)
+                servers.insert(moved, at: target)
+            }
+        }
+        FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+        ServerSync.shared.noteLocalChange()
+        if needsActivate { activate(server.id) }
+    }
+
+    /// Removes a server deleted on another device.
+    func removeSynced(_ id: UUID) {
+        guard let server = servers.first(where: { $0.id == id }) else { return }
+        remove(server)
+    }
+
     /// Restores servers (with secrets) from a backup or another device.
     func importServers(_ list: [(server: DispatcharrServer, xcPassword: String, webPassword: String, apiKey: String)], activeID: UUID?) {
         for entry in list {
@@ -133,6 +171,7 @@ final class DispatcharrStore {
             }
         }
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+        ServerSync.shared.noteLocalChange()
         if let id = activeID ?? servers.first?.id, servers.contains(where: { $0.id == id }) { activate(id) }
     }
 

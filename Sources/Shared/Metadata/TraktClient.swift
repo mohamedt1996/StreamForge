@@ -34,6 +34,7 @@ final class TraktService {
             } else {
                 Keychain.set(nil, for: "trakt.token")
             }
+            ServerSync.shared.noteLocalChange()
         }
     }
 

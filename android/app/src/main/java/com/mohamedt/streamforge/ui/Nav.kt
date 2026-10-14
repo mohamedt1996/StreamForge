@@ -10,7 +10,8 @@ enum class Tab(val title: String) { HOME("Home"), LIVE("Live TV"), MOVIES("Movie
 
 sealed interface Screen {
     data class Detail(val item: MediaItem) : Screen
-    data class Person(val id: Int?, val name: String) : Screen
+    /** [photo]: the face already shown on the cast card, shown at once (and when TMDB has none). */
+    data class Person(val id: Int?, val name: String, val photo: String? = null) : Screen
     data class Collection(val id: Int, val name: String) : Screen
     data class Catalog(val entry: Addons.CatalogEntry) : Screen
     data class Category(val kind: MediaType, val categoryId: String, val title: String) : Screen

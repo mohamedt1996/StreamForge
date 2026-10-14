@@ -122,7 +122,9 @@ struct MediaDetails {
     var tagline: String?
     var cast: [Person] = []
     var directors: [String] = []
-    var trailerYouTubeKey: String?
+    /// YouTube ids of trailers/teasers, best first. Players try them in order (a video can be
+    /// removed or region-locked), so every source's trailers are kept, not just the first.
+    var trailerKeys: [String] = []
     var ratings: [RatingBadge] = []
     var seasons: [SeasonInfo] = []
     var episodesBySeason: [Int: [EpisodeRef]] = [:]
@@ -132,6 +134,37 @@ struct MediaDetails {
     var networks: [String] = []
     /// TMDB collection this movie belongs to.
     var collection: CollectionInfo?
+
+    var trailerYouTubeKey: String? { trailerKeys.first }
+
+    /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and junk.
+    mutating func addTrailers(_ raw: [String], atFront: Bool = false) {
+        let incoming = raw.compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
+        var seen = Set<String>()
+        let unique = incoming.filter { seen.insert($0).inserted }
+        trailerKeys = atFront ? unique + trailerKeys : trailerKeys + unique
+    }
+
+    /// "https://youtu.be/abc_DEF-123", "…watch?v=abc_DEF-123" or "abc_DEF-123" → "abc_DEF-123".
+    static func cleanYouTubeKey(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if s.contains("/") || s.contains("=") {
+            if let comps = URLComponents(string: s) {
+                if let v = comps.queryItems?.first(where: { $0.name == "v" })?.value {
+                    s = v
+                } else if let last = comps.path.split(separator: "/").last {
+                    s = String(last)
+                } else {
+                    return nil
+                }
+            } else {
+                return nil
+            }
+        }
+        let allowed = s.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_") }
+        return allowed && (6...20).contains(s.count) ? s : nil
+    }
 }
 
 extension TimeInterval {

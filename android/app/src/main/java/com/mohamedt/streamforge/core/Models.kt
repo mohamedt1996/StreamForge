@@ -86,7 +86,27 @@ data class Details(
     val episodes: Map<Int, List<Episode>> = emptyMap(),
     val similar: List<MediaItem> = emptyList(),
     val certification: String? = null,
+    /** YouTube trailer ids, best first; the hero trailer tries them in order. */
+    val trailerKeys: List<String> = listOfNotNull(trailerKey),
 )
+
+/** "https://youtu.be/abc_DEF-123", "…watch?v=abc_DEF-123" or "abc_DEF-123" → "abc_DEF-123" (null for junk). */
+fun cleanYouTubeKey(raw: String?): String? {
+    var s = raw?.trim().orEmpty()
+    if (s.isEmpty()) return null
+    if (s.contains("/") || s.contains("=")) {
+        s = Regex("""[?&]v=([\w-]+)""").find(s)?.groupValues?.get(1)
+            ?: s.substringBefore('?').trimEnd('/').substringAfterLast('/')
+    }
+    return s.takeIf { k -> k.length in 6..20 && k.all { it.isLetterOrDigit() && it.code < 128 || it == '-' || it == '_' } }
+}
+
+/** "Zoë  Saldaña-Perez" → "zoesaldanaperez" (for matching cast names across sources). */
+fun normalizeName(name: String): String =
+    // NFD splits accents into combining marks, which aren't letters, so they drop out.
+    java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+        .filter { it.isLetterOrDigit() }
+        .lowercase()
 
 fun Long.clockText(): String {
     val total = this / 1000

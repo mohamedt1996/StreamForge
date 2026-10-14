@@ -2,6 +2,8 @@ package com.mohamedt.streamforge.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,10 +47,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mohamedt.streamforge.core.Details
@@ -75,8 +83,16 @@ import com.mohamedt.streamforge.ui.PosterCard
 import com.mohamedt.streamforge.ui.ProgressLine
 import com.mohamedt.streamforge.ui.Screen
 import com.mohamedt.streamforge.ui.Shelf
+import com.mohamedt.streamforge.ui.TrailerButton
+import com.mohamedt.streamforge.ui.TrailerPolicy
+import com.mohamedt.streamforge.ui.TrailerSurface
+import com.mohamedt.streamforge.ui.rememberTrailerController
 import com.mohamedt.streamforge.ui.card
 import com.mohamedt.streamforge.ui.isTv
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
 
 @Composable
@@ -89,9 +105,34 @@ fun DetailScreen(initial: MediaItem) {
     var sources by remember { mutableStateOf<SourcesModel?>(null) }
     var picker by remember { mutableStateOf<Pair<Episode?, List<Episode>>?>(null) }
 
+    // Hero trailer (Netflix-style): backdrop first, muted video ~2.5 s after the page opened,
+    // paused while the hero is scrolled away, the app isn't in front (a player activity is on
+    // top, or it's in the background) or the sources dialog covers it.
+    val listState = rememberLazyListState()
+    val trailer = rememberTrailerController()
+    val shownAt = remember { System.currentTimeMillis() }
+    val heroHeight = if (isTv()) 420.dp else 300.dp
+    val heroPx = with(LocalDensity.current) { heroHeight.toPx() }
+    val heroVisible by remember(heroPx) {
+        derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < heroPx * 0.55f }
+    }
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val trailerActive = heroVisible && picker == null && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    LaunchedEffect(trailerActive) { trailer.updateActive(trailerActive) }
+    LaunchedEffect(details?.trailerKeys) {
+        val keys = details?.trailerKeys ?: return@LaunchedEffect
+        val elapsed = System.currentTimeMillis() - shownAt
+        trailer.updateKeys(keys, (TrailerPolicy.START_DELAY_MS - elapsed).coerceAtLeast(400L))
+    }
+
     LaunchedEffect(initial.id) {
         val d = Metadata.details(initial)
         details = d
+        // Faces for cast lists that came as plain names; runs alongside sources/episodes.
+        launch {
+            val withFaces = Metadata.castWithPhotos(d)
+            if (withFaces !== d && details?.item?.id == d.item.id) details = details?.copy(cast = withFaces.cast)
+        }
         if (d.item.type == MediaType.SERIES) {
             val resume = Library.latestEpisode(d.item)?.episode?.season
             season = resume ?: d.seasons.firstOrNull { it > 0 } ?: d.seasons.firstOrNull() ?: 1
@@ -101,7 +142,8 @@ fun DetailScreen(initial: MediaItem) {
             s.load()
         }
     }
-    LaunchedEffect(season, details) {
+    // Keyed on the title, not the whole Details, so filling in cast photos doesn't refetch episodes.
+    LaunchedEffect(season, details?.item?.id) {
         val d = details ?: return@LaunchedEffect
         val s = season ?: return@LaunchedEffect
         episodes = Metadata.episodes(d, s)
@@ -128,20 +170,32 @@ fun DetailScreen(initial: MediaItem) {
             ?: episodes.firstOrNull { !Library.isWatched(item, it) } ?: episodes.firstOrNull()
     }
 
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), state = listState) {
         item {
-            Box(Modifier.fillMaxWidth().height(if (isTv()) 420.dp else 300.dp)) {
+            Box(Modifier.fillMaxWidth().height(heroHeight)) {
                 Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
+                // Edge-to-edge muted trailer over the artwork (cropped, no controls).
+                TrailerSurface(trailer, Modifier.fillMaxSize())
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.3f), Color.Transparent, Palette.background))))
-                Column(Modifier.align(Alignment.BottomStart).padding(Dims.gutter())) {
-                    if (item.logo != null) {
-                        Artwork(item.logo, Modifier.widthIn(max = 320.dp).height(90.dp), ContentScale.Fit)
-                    } else {
-                        Text(item.title, fontSize = 32.sp, fontWeight = FontWeight.Black, maxLines = 2)
+                Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(Dims.gutter()), verticalAlignment = Alignment.Bottom) {
+                    Column(Modifier.weight(1f)) {
+                        // Like Netflix, the title shrinks a little while the trailer plays.
+                        val logoScale by animateFloatAsState(if (trailer.revealed) 0.8f else 1f, tween(TrailerPolicy.FADE_MS), label = "logo-scale")
+                        val shrink = Modifier.graphicsLayer {
+                            scaleX = logoScale
+                            scaleY = logoScale
+                            transformOrigin = TransformOrigin(0f, 1f)
+                        }
+                        if (item.logo != null) {
+                            Artwork(item.logo, shrink.widthIn(max = 320.dp).height(90.dp), ContentScale.Fit)
+                        } else {
+                            Text(item.title, fontSize = 32.sp, fontWeight = FontWeight.Black, maxLines = 2, modifier = shrink)
+                        }
+                        val meta = listOfNotNull(item.year?.toString(), item.runtimeMinutes?.let { "${it / 60}h ${it % 60}m".removePrefix("0h ") },
+                            item.rating?.let { "★ %.1f".format(it) }, item.genres.take(3).joinToString(" · ").ifEmpty { null })
+                        Text(meta.joinToString("  ·  "), color = Palette.secondary, fontSize = 13.sp)
                     }
-                    val meta = listOfNotNull(item.year?.toString(), item.runtimeMinutes?.let { "${it / 60}h ${it % 60}m".removePrefix("0h ") },
-                        item.rating?.let { "★ %.1f".format(it) }, item.genres.take(3).joinToString(" · ").ifEmpty { null })
-                    Text(meta.joinToString("  ·  "), color = Palette.secondary, fontSize = 13.sp)
+                    TrailerButton(trailer, Modifier.padding(start = 12.dp))
                 }
             }
         }
@@ -208,8 +262,8 @@ fun DetailScreen(initial: MediaItem) {
         }
         if (d.cast.isNotEmpty()) item {
             Shelf("Cast", d.cast, key = { it.id }) { person ->
-                Column(Modifier.width(96.dp).card({ nav.push(Screen.Person(person.id.takeIf { it > 0 }, person.name)) }), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Artwork(person.photo, Modifier.size(76.dp).clip(CircleShape), label = person.name.take(1))
+                Column(Modifier.width(96.dp).card({ nav.push(Screen.Person(person.id.takeIf { it > 0 }, person.name, person.photo)) }), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CastAvatar(person.photo, person.name, 76.dp)
                     Text(person.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
                     person.role?.let { Text(it, fontSize = 11.sp, color = Palette.secondary, maxLines = 1) }
                 }
@@ -325,22 +379,20 @@ fun SourcesDialog(item: MediaItem, ep: Episode?, onDismiss: () -> Unit, onPick: 
 }
 
 @Composable
-fun PersonScreen(id: Int?, name: String) {
+fun PersonScreen(id: Int?, name: String, photo: String? = null) {
     val nav = LocalNav.current
     var info by remember { mutableStateOf<Tmdb.PersonInfo?>(null) }
     var failed by remember { mutableStateOf(false) }
     LaunchedEffect(id, name) {
-        val pid = id ?: runCatching { Tmdb.searchPerson(name) }.getOrNull()
+        val pid = id ?: if (Tmdb.configured) runCatching { Tmdb.searchPerson(name) }.getOrNull() else null
         info = pid?.let { runCatching { Tmdb.person(it) }.getOrNull() }
         failed = info == null
     }
     val i = info
-    if (i == null) {
-        if (failed) com.mohamedt.streamforge.ui.EmptyState(name, if (Tmdb.configured) "No details found." else "Add a TMDB key in Settings to see filmographies.") else Loading()
-        return
-    }
+    if (i == null && !failed) { Loading(); return }
     // What's playable from your own server first.
-    val onServer = i.credits.mapNotNull { c ->
+    val credits = i?.credits ?: emptyList()
+    val onServer = credits.mapNotNull { c ->
         val sid = DispatcharrRepo.active?.id ?: return@mapNotNull null
         if (c.type == MediaType.MOVIE) DispatcharrRepo.matchMovie(c.tmdbId, null, c.title, c.year)?.toItem(sid)
         else DispatcharrRepo.matchSeries(c.tmdbId, null, c.title)?.toItem(sid)
@@ -348,18 +400,65 @@ fun PersonScreen(id: Int?, name: String) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             Row(Modifier.padding(Dims.gutter())) {
-                Artwork(i.photo, Modifier.width(120.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(12.dp)), label = i.name)
+                // TMDB's profile, else the face from the cast card, else initials.
+                val shown = i?.photo ?: photo
+                val shownName = i?.name?.ifEmpty { null } ?: name
+                Box(Modifier.width(120.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(12.dp))) {
+                    if (shown != null) {
+                        Artwork(shown, Modifier.fillMaxSize(), label = shownName)
+                    } else {
+                        Box(Modifier.fillMaxSize().background(Palette.gradient, alpha = 0.35f), contentAlignment = Alignment.Center) {
+                            Text(initials(shownName), fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.8f))
+                        }
+                    }
+                }
                 Spacer(Modifier.width(16.dp))
                 Column {
-                    Text(i.name, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                    i.bio?.let { Text(it, color = Palette.secondary, maxLines = 8, overflow = TextOverflow.Ellipsis, fontSize = 13.sp) }
+                    Text(shownName, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    if (i != null) {
+                        i.bio?.let { Text(it, color = Palette.secondary, maxLines = 8, overflow = TextOverflow.Ellipsis, fontSize = 13.sp) }
+                    } else {
+                        Text(if (Tmdb.configured) "No details found." else "Add a TMDB key in Settings to see filmographies.",
+                            color = Palette.secondary, fontSize = 13.sp)
+                    }
                 }
             }
         }
         item { Shelf("On Your Server", onServer, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
-        item { Shelf("Movies", i.credits.filter { it.type == MediaType.MOVIE }, subtitle = "Streams come from your addons", key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
-        item { Shelf("Series", i.credits.filter { it.type == MediaType.SERIES }, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
+        item { Shelf("Movies", credits.filter { it.type == MediaType.MOVIE }, subtitle = "Streams come from your addons", key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
+        item { Shelf("Series", credits.filter { it.type == MediaType.SERIES }, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
     }
+}
+
+/** Round cast photo (face kept at the top); initials when there's no photo or it fails to load. */
+@Composable
+fun CastAvatar(url: String?, name: String, size: Dp) {
+    var failed by remember(url) { mutableStateOf(false) }
+    Box(
+        Modifier.size(size).clip(CircleShape).background(Brush.verticalGradient(listOf(Palette.surfaceHigh, Palette.surface))),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (url == null || failed) {
+            Box(Modifier.fillMaxSize().background(Palette.gradient, alpha = 0.35f), contentAlignment = Alignment.Center) {
+                Text(initials(name), fontSize = (size.value * 0.34f).sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.8f), maxLines = 1)
+            }
+        } else {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                onError = { failed = true },
+                alignment = Alignment.TopCenter,
+                contentScale = ContentScale.Crop,
+            )
+        }
+    }
+}
+
+private fun initials(name: String): String {
+    val words = name.split(' ', '-', '.').filter { it.firstOrNull()?.isLetter() == true }
+    val letters = if (words.size > 1) listOf(words.first().first(), words.last().first()) else words.firstOrNull()?.take(2)?.toList() ?: emptyList()
+    return letters.joinToString("").uppercase().ifEmpty { "?" }
 }
 
 @Composable

@@ -87,9 +87,21 @@ struct PersonView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 20) {
-            RemoteImage(url: TMDBClient.image(person?.profile_path, size: "h632"), placeholderSymbol: "person.fill")
-                .frame(width: photoSize, height: photoSize * 1.5)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            ZStack {
+                if let url = photoURL {
+                    RemoteImage(url: url, placeholderSymbol: "person.fill")
+                } else {
+                    // Nobody has a photo: a large initials tile instead of an empty frame.
+                    ZStack {
+                        Theme.accentGradient.opacity(0.35)
+                        Text(CastAvatar.initials(person?.name ?? name))
+                            .font(.system(size: photoSize * 0.3, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                }
+            }
+            .frame(width: photoSize, height: photoSize * 1.5)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             VStack(alignment: .leading, spacing: 8) {
                 Text(person?.name ?? name).font(.largeTitle.weight(.heavy)).lineLimit(2)
                 if let dept = person?.known_for_department { Text(dept).font(.headline).foregroundStyle(Theme.accent) }
@@ -107,6 +119,13 @@ struct PersonView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Theme.gutter)
+    }
+
+    /// TMDB profile (or the first of its profile images), else the face from the cast card.
+    private var photoURL: URL? {
+        TMDBClient.image(person?.profile_path, size: "h632")
+            ?? TMDBClient.image(person?.images?.profiles?.first?.file_path, size: "h632")
+            ?? CastPhotoMemory.photo(named: person?.name ?? name)
     }
 
     private var knownFor: [TMDBClient.PersonCredit] {
@@ -164,8 +183,12 @@ struct PersonView: View {
         do {
             var id = personID
             if id <= 0 {
-                // Cast from provider strings has no TMDB id: search by name first.
-                guard let match = try await tmdb.searchPerson(name).first else {
+                // Cast from provider strings has no TMDB id: search by name first (exact name,
+                // actors first, most popular; same rule the cast photos use).
+                let results = try await tmdb.searchPerson(name)
+                guard let match = CastPhotoResolver.pick(results, for: CastPhotoResolver.normalize(name)) ?? results.first.map({
+                    CastPhotoResolver.Match(id: $0.id, name: $0.name, photo: nil)
+                }) else {
                     loading = false
                     error = "Couldn't find \(name) on TMDB."
                     return

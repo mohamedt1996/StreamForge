@@ -81,6 +81,7 @@ struct StreamForgeApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active:
+                        ServerSync.shared.setForeground(true)
                         Task {
                             await guide.refreshIfStale()
                             await trakt.refreshUpNext()
@@ -89,6 +90,7 @@ struct StreamForgeApp: App {
                         library.flush()
                         SnapshotPublisher.publish()
                         CloudSync.shared.push()
+                        ServerSync.shared.setForeground(false)
                     default:
                         break
                     }
@@ -101,6 +103,7 @@ struct StreamForgeApp: App {
         await guide.loadCacheIfNeeded()
         // Channels and the library come from the disk cache at launch, so deep links can run now.
         router.appDidLoad()
+        ServerSync.shared.start()
         CloudSync.shared.start()
         await dispatcharr.refreshAll()
         StreamForgeShortcuts.updateAppShortcutParameters()

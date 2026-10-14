@@ -32,6 +32,7 @@ final class AddonManager {
     private func save() {
         FileStore.save(addons, "addons.json", mirrorToDefaults: true)
         CloudSync.shared.schedulePush()
+        ServerSync.shared.noteLocalChange()
     }
 
     private func installDefaults() async {
