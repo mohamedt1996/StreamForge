@@ -1,0 +1,156 @@
+name: StreamForge
+options:
+  bundleIdPrefix: com.mohamedt.streamforge
+  deploymentTarget:
+    iOS: "17.0"
+    tvOS: "17.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+packages:
+  MPVKit:
+    url: https://github.com/mpvkit/MPVKit
+    exactVersion: 1.1.0-n9.0.2
+  Nuke:
+    url: https://github.com/kean/Nuke
+    from: 12.8.0
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    DEAD_CODE_STRIPPING: YES
+    GCC_OPTIMIZATION_LEVEL[config=Release]: s
+
+targets:
+  StreamForge:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/iOS
+      - path: Resources
+    dependencies:
+      - package: MPVKit
+        product: MPVKit
+      - package: Nuke
+        product: Nuke
+      - package: Nuke
+        product: NukeUI
+      - framework: Frameworks/TorrServerKit.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        OTHER_LDFLAGS: ["$(inherited)", "-lresolv"]
+        SUPPORTS_MACCATALYST: NO
+    info:
+      path: Support/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: StreamForge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIApplicationSupportsIndirectInputEvents: true
+        UIRequiresFullScreen: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes: [audio]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: StreamForge connects to your Dispatcharr and TorrServer on your local network.
+        NSBonjourServices: [_http._tcp]
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoadsForMedia: true
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.mohamedt.streamforge.links
+            CFBundleURLSchemes: [streamforge, stremio, magnet]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: BitTorrent file
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [org.bittorrent.torrent]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.bittorrent.torrent
+            UTTypeDescription: BitTorrent file
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [torrent]
+              public.mime-type: [application/x-bittorrent]
+
+  StreamForgeTV:
+    type: application
+    platform: tvOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/tvOS
+      - path: Resources
+    dependencies:
+      - package: MPVKit
+        product: MPVKit
+      - package: Nuke
+        product: Nuke
+      - package: Nuke
+        product: NukeUI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge.tv
+        TARGETED_DEVICE_FAMILY: "3"
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        OTHER_LDFLAGS: ["$(inherited)", "-lresolv"]
+    info:
+      path: Support/tvOS/Info.plist
+      properties:
+        CFBundleDisplayName: StreamForge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: StreamForge connects to your Dispatcharr and TorrServer on your local network.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoadsForMedia: true
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.mohamedt.streamforge.links
+            CFBundleURLSchemes: [streamforge, stremio]
+
+schemes:
+  StreamForge:
+    build:
+      targets:
+        StreamForge: all
+    run:
+      config: Debug
+      environmentVariables:
+        MTL_DEBUG_LAYER: "0"
+    archive:
+      config: Release
+  StreamForgeTV:
+    build:
+      targets:
+        StreamForgeTV: all
+    run:
+      config: Debug
+    archive:
+      config: Release

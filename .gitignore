@@ -1,0 +1,11 @@
+*.xcodeproj
+xcuserdata/
+DerivedData/
+build/
+.build/
+Frameworks/TorrServerKit.xcframework
+Support/iOS/Info.plist
+Support/tvOS/Info.plist
+*.ipa
+Payload/
+.DS_Store

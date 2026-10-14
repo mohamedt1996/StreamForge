@@ -1,0 +1,124 @@
+import Foundation
+import Observation
+
+enum TorrentMode: String, Codable, CaseIterable, Identifiable {
+    case embedded, remote
+    var id: String { rawValue }
+    var label: String { self == .embedded ? "On this device" : "Remote TorrServer" }
+}
+
+enum MetadataSource: String, Codable, CaseIterable, Identifiable {
+    case provider, tmdb, cinemeta
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .provider: return "IPTV provider"
+        case .tmdb: return "TMDB"
+        case .cinemeta: return "Cinemeta"
+        }
+    }
+}
+
+enum HardwareDecoding: String, Codable, CaseIterable, Identifiable {
+    case videotoolbox, videotoolboxCopy = "videotoolbox-copy", software = "no"
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .videotoolbox: return "Hardware (fastest)"
+        case .videotoolboxCopy: return "Hardware + copy (compatible)"
+        case .software: return "Software"
+        }
+    }
+}
+
+enum StreamSort: String, Codable, CaseIterable, Identifiable {
+    case quality, size, seeders, addon
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
+}
+
+/// Every user-facing preference. Persisted as one JSON document; secrets go to the Keychain.
+@MainActor
+@Observable
+final class AppSettings {
+    static let shared = AppSettings()
+
+    struct Values: Codable {
+        // Torrents
+        var torrentMode: TorrentMode = {
+            #if os(tvOS)
+            return .remote
+            #else
+            return .embedded
+            #endif
+        }()
+        var remoteTorrServerURL: String = ""
+        var torrServerUser: String = ""
+        var embeddedCacheMB: Int = 256
+        var preloadPercent: Int = 5
+
+        // Metadata
+        var metadataPriority: [MetadataSource] = [.tmdb, .provider, .cinemeta]
+        var metadataLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
+        var enrichPosters: Bool = true
+        var hideAdult: Bool = true
+
+        // Player
+        var hwdec: HardwareDecoding = .videotoolbox
+        var hdrPassthrough: Bool = true
+        var preferredAudioLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
+        var preferredSubtitleLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
+        var autoSubtitles: Bool = false
+        var subtitleScale: Double = 1.0
+        var seekStep: Int = 10
+        var longSeekStep: Int = 60
+        var autoplayNext: Bool = true
+        var demuxerCacheMB: Int = 150
+        var liveBufferSeconds: Int = 4
+        var customUserAgent: String = ""
+        var resumePlayback: Bool = true
+
+        // Streams
+        var streamSort: StreamSort = .quality
+        var maxStreamResolution: Int = 2160
+        var excludeCam: Bool = true
+
+        // Live TV
+        var startOnLastChannel: Bool = false
+        var showChannelNumbers: Bool = true
+    }
+
+    var values: Values {
+        didSet { FileStore.save(values, "settings.json", mirrorToDefaults: true) }
+    }
+
+    private init() {
+        values = FileStore.load(Values.self, "settings.json") ?? Values()
+    }
+
+    // MARK: Secrets
+    var tmdbKey: String {
+        get { Keychain.get("tmdb.key") ?? "" }
+        set { Keychain.set(newValue.trimmed, for: "tmdb.key") }
+    }
+    var omdbKey: String {
+        get { Keychain.get("omdb.key") ?? "" }
+        set { Keychain.set(newValue.trimmed, for: "omdb.key") }
+    }
+    var fanartKey: String {
+        get { Keychain.get("fanart.key") ?? "" }
+        set { Keychain.set(newValue.trimmed, for: "fanart.key") }
+    }
+    var traktClientID: String {
+        get { Keychain.get("trakt.client") ?? "" }
+        set { Keychain.set(newValue.trimmed, for: "trakt.client") }
+    }
+    var traktClientSecret: String {
+        get { Keychain.get("trakt.secret") ?? "" }
+        set { Keychain.set(newValue.trimmed, for: "trakt.secret") }
+    }
+    var torrServerPassword: String {
+        get { Keychain.get("torrserver.password") ?? "" }
+        set { Keychain.set(newValue, for: "torrserver.password") }
+    }
+}
