@@ -9,3 +9,4 @@ Support/tvOS/Info.plist
 *.ipa
 Payload/
 .DS_Store
+*.whl
