@@ -86,6 +86,10 @@ jobs:
           ls -lh StreamForge-unsigned.ipa
           SIZE=$(stat -f%z StreamForge-unsigned.ipa)
           if [ "$SIZE" -lt 5000000 ]; then echo "::error::IPA is only $SIZE bytes; the binary is missing"; exit 1; fi
+          BIN=build/Build/Products/Release-iphoneos/StreamForge.app/StreamForge
+          SYMS=$(nm -gU "$BIN" 2>/dev/null; nm "$BIN" 2>/dev/null)
+          echo "$SYMS" | grep -q "mpv_create" && echo "::notice::libmpv linked" || echo "::error::libmpv not linked"
+          echo "$SYMS" | grep -qi "TorrserverkitStartServer" && echo "::notice::Embedded TorrServer linked" || echo "::warning::Embedded TorrServer NOT linked (on-device torrents disabled)"
       - uses: actions/upload-artifact@v4
         with:
           name: StreamForge-iOS-unsigned-ipa
