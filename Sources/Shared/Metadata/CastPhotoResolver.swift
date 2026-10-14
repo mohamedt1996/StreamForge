@@ -51,7 +51,7 @@ actor CastPhotoResolver {
         var titleID = tmdbID
         var titleType = type
         if titleID == nil, let imdb = imdbID, imdb.hasPrefix("tt") {
-            if let found = await tmdbID(forIMDb: imdb, client: client) { titleID = found.0; titleType = found.1 }
+            if let found = await self.tmdbID(forIMDb: imdb, client: client) { titleID = found.0; titleType = found.1 }
         }
         var pending: [Int] = []
         if let titleID {
