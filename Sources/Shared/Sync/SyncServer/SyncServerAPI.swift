@@ -5,13 +5,13 @@ import Foundation
 // MARK: - JSON
 
 /// Any JSON value. Record `data` is collection specific, so it is kept untyped on the wire.
-enum JSONValue: Codable, Hashable, Sendable {
+enum SyncJSON: Codable, Hashable, Sendable {
     case null
     case bool(Bool)
     case number(Double)
     case string(String)
-    case array([JSONValue])
-    case object([String: JSONValue])
+    case array([SyncJSON])
+    case object([String: SyncJSON])
 
     private struct Key: CodingKey {
         var stringValue: String
@@ -23,16 +23,16 @@ enum JSONValue: Codable, Hashable, Sendable {
 
     init(from decoder: Decoder) throws {
         if let c = try? decoder.container(keyedBy: Key.self) {
-            var out: [String: JSONValue] = [:]
+            var out: [String: SyncJSON] = [:]
             for key in c.allKeys {
-                out[key.stringValue] = try c.decode(JSONValue.self, forKey: key)
+                out[key.stringValue] = try c.decode(SyncJSON.self, forKey: key)
             }
             self = .object(out)
             return
         }
         if var c = try? decoder.unkeyedContainer() {
-            var out: [JSONValue] = []
-            while !c.isAtEnd { out.append(try c.decode(JSONValue.self)) }
+            var out: [SyncJSON] = []
+            while !c.isAtEnd { out.append(try c.decode(SyncJSON.self)) }
             self = .array(out)
             return
         }
@@ -74,7 +74,7 @@ enum JSONValue: Codable, Hashable, Sendable {
     }
 
     // Accessors
-    subscript(key: String) -> JSONValue? {
+    subscript(key: String) -> SyncJSON? {
         if case .object(let o) = self { return o[key] }
         return nil
     }
@@ -109,7 +109,7 @@ enum JSONValue: Codable, Hashable, Sendable {
         return false
     }
 
-    static func integer(_ i: Int) -> JSONValue { .number(Double(i)) }
+    static func integer(_ i: Int) -> SyncJSON { .number(Double(i)) }
 
     /// Deterministic text form (sorted keys) used for change fingerprints.
     func canonical(into out: inout String) {
@@ -228,7 +228,7 @@ struct SyncDevice: Codable, Hashable, Identifiable, Sendable {
 struct SyncRecord: Decodable, Sendable {
     var collection: String
     var id: String
-    var data: JSONValue?
+    var data: SyncJSON?
     var deleted: Bool
     var updatedAt: Int64
     var rev: Int64
@@ -239,7 +239,7 @@ struct SyncRecord: Decodable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         collection = try c.decode(String.self, forKey: .collection)
         id = try c.decode(String.self, forKey: .id)
-        let d = try? c.decodeIfPresent(JSONValue.self, forKey: .data)
+        let d = try? c.decodeIfPresent(SyncJSON.self, forKey: .data)
         data = (d?.isNull ?? true) ? nil : d
         deleted = (try? c.decodeIfPresent(Bool.self, forKey: .deleted)) ?? false
         updatedAt = c.lenientInt64(.updatedAt) ?? 0
@@ -251,13 +251,13 @@ struct SyncRecord: Decodable, Sendable {
 struct OutboxEntry: Codable, Sendable {
     var collection: String
     var id: String
-    var data: JSONValue?
+    var data: SyncJSON?
     var deleted: Bool
     var updatedAt: Int64
 
     enum CodingKeys: String, CodingKey { case collection, id, data, deleted, updatedAt }
 
-    init(collection: String, id: String, data: JSONValue?, deleted: Bool, updatedAt: Int64) {
+    init(collection: String, id: String, data: SyncJSON?, deleted: Bool, updatedAt: Int64) {
         self.collection = collection
         self.id = id
         self.data = data
@@ -269,7 +269,7 @@ struct OutboxEntry: Codable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         collection = try c.decode(String.self, forKey: .collection)
         id = try c.decode(String.self, forKey: .id)
-        let d = try? c.decodeIfPresent(JSONValue.self, forKey: .data)
+        let d = try? c.decodeIfPresent(SyncJSON.self, forKey: .data)
         data = (d?.isNull ?? true) ? nil : d
         deleted = (try? c.decodeIfPresent(Bool.self, forKey: .deleted)) ?? false
         updatedAt = c.lenientInt64(.updatedAt) ?? 0

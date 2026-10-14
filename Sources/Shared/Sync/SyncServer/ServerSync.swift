@@ -183,7 +183,7 @@ final class ServerSync {
         return (String(key[..<nl]), String(key[key.index(after: nl)...]))
     }
 
-    static func fingerprint(_ value: JSONValue) -> String {
+    static func fingerprint(_ value: SyncJSON) -> String {
         let digest = SHA256.hash(data: Data(value.canonicalString.utf8))
         return Data(digest.prefix(15)).base64EncodedString()
     }

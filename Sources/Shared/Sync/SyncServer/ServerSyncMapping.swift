@@ -6,7 +6,7 @@ extension ServerSync {
     struct LocalRecord {
         var collection: String
         var id: String
-        var data: JSONValue
+        var data: SyncJSON
         /// The record's own change time (ms) when the store keeps one (watch progress).
         var stamp: Int64?
     }
@@ -54,7 +54,7 @@ extension ServerSync {
 
     func buildLocalRecords() -> [String: LocalRecord] {
         var out: [String: LocalRecord] = [:]
-        func add(_ collection: String, _ id: String, _ data: JSONValue, stamp: Int64? = nil) {
+        func add(_ collection: String, _ id: String, _ data: SyncJSON, stamp: Int64? = nil) {
             out[Self.recordKey(collection, id)] = LocalRecord(collection: collection, id: id, data: data, stamp: stamp)
         }
         let secrets = hasSecretsScope
@@ -188,7 +188,7 @@ extension ServerSync {
                 add("secrets", "key:\(name)", .object(["value": .string(value)]))
             }
             if let raw = TraktService.shared.exportedToken, let data = raw.data(using: .utf8),
-               let token = try? JSONDecoder().decode(JSONValue.self, from: data), case .object = token {
+               let token = try? JSONDecoder().decode(SyncJSON.self, from: data), case .object = token {
                 add("secrets", "trakt", token)
             }
         }
@@ -202,8 +202,8 @@ extension ServerSync {
 
     // MARK: Items
 
-    func itemJSON(_ item: MediaItem, key: String) -> JSONValue {
-        var o: [String: JSONValue] = [
+    func itemJSON(_ item: MediaItem, key: String) -> SyncJSON {
+        var o: [String: SyncJSON] = [
             "key": .string(key),
             "type": .string(key.hasPrefix("series") ? "series" : "movie"),
             "title": .string(item.title),
@@ -215,7 +215,7 @@ extension ServerSync {
         if let i = SyncKeys.imdbID(of: item) { o["imdbId"] = .string(i) }
         if let t = SyncKeys.tmdbID(of: item) { o["tmdbId"] = .integer(t) }
         if let r = item.runtimeMinutes { o["runtimeMinutes"] = .integer(r) }
-        let origin: [String: JSONValue]
+        let origin: [String: SyncJSON]
         switch item.origin {
         case .dispatcharrMovie(let serverID, let streamID, let ext):
             origin = ["kind": .string("dispatcharrMovie"), "serverId": .string(serverID.uuidString.lowercased()),
@@ -235,15 +235,15 @@ extension ServerSync {
         return .object(o)
     }
 
-    private func progressData(_ pk: String, _ p: WatchProgress, itemKey: String) -> JSONValue {
-        var o: [String: JSONValue] = [
+    private func progressData(_ pk: String, _ p: WatchProgress, itemKey: String) -> SyncJSON {
+        var o: [String: SyncJSON] = [
             "profile": .string(pk),
             "item": itemJSON(p.item, key: itemKey),
             "position": .number((p.position * 10).rounded() / 10),
             "duration": .number((p.duration * 10).rounded() / 10),
         ]
         if let ep = p.episode {
-            var e: [String: JSONValue] = [
+            var e: [String: SyncJSON] = [
                 "season": .integer(ep.season),
                 "episode": .integer(ep.episode),
                 "title": .string(ep.title),
@@ -258,7 +258,7 @@ extension ServerSync {
 
     /// Builds a MediaItem for a record from another device. The result always maps back to the
     /// same canonical key. Prefers a copy this device can play from its own Dispatcharr server.
-    func mediaItem(from json: JSONValue?, key: String) -> MediaItem? {
+    func mediaItem(from json: SyncJSON?, key: String) -> MediaItem? {
         guard let parsed = SyncKeys.parse(key) else { return nil }
         let j = json ?? .object([:])
         let type = parsed.type
@@ -342,7 +342,7 @@ extension ServerSync {
         return item
     }
 
-    private func episodeRef(_ j: JSONValue?, season: Int, episode: Int, item: MediaItem, senderOrigin: JSONValue?) -> EpisodeRef {
+    private func episodeRef(_ j: SyncJSON?, season: Int, episode: Int, item: MediaItem, senderOrigin: SyncJSON?) -> EpisodeRef {
         var episodeID: Int?
         // A Dispatcharr episode id only plays on the server it came from.
         if case .dispatcharrSeries(let sid, _) = item.origin,
@@ -361,8 +361,8 @@ extension ServerSync {
 
     // MARK: Settings
 
-    func settingsValues(_ v: AppSettings.Values) -> [String: JSONValue] {
-        var out: [String: JSONValue] = [
+    func settingsValues(_ v: AppSettings.Values) -> [String: SyncJSON] {
+        var out: [String: SyncJSON] = [
             "metadataLanguage": .string(v.metadataLanguage),
             "metadataSource": .string((v.metadataPriority.first ?? .tmdb).rawValue),
             "maxResolution": .integer(v.maxStreamResolution),
@@ -386,7 +386,7 @@ extension ServerSync {
     }
 
     /// Returns true when the value was understood.
-    private func applySetting(_ key: String, _ value: JSONValue, to v: inout AppSettings.Values) -> Bool {
+    private func applySetting(_ key: String, _ value: SyncJSON, to v: inout AppSettings.Values) -> Bool {
         switch key {
         case "metadataLanguage":
             guard let s = value.stringValue, !s.isEmpty else { return false }
@@ -621,7 +621,7 @@ extension ServerSync {
         if !state.pendingAddons.isEmpty { installPendingAddons() }
     }
 
-    private func applyProgress(_ b: LibraryBatch, _ canonical: String, _ r: SyncRecord, _ data: JSONValue) {
+    private func applyProgress(_ b: LibraryBatch, _ canonical: String, _ r: SyncRecord, _ data: SyncJSON) {
         let existing = b.progress[canonical] ?? []
         if r.deleted {
             for k in existing { b.lib.progress[k] = nil }
@@ -670,7 +670,7 @@ extension ServerSync {
         b.dirty = true
     }
 
-    private func applyFavorite(_ b: LibraryBatch, _ itemKey: String, _ r: SyncRecord, _ data: JSONValue) {
+    private func applyFavorite(_ b: LibraryBatch, _ itemKey: String, _ r: SyncRecord, _ data: SyncJSON) {
         let existing = b.favorites[itemKey] ?? []
         if r.deleted {
             guard !existing.isEmpty else { return }
@@ -694,7 +694,7 @@ extension ServerSync {
         b.dirty = true
     }
 
-    private func applyProfile(_ r: SyncRecord, _ data: JSONValue) {
+    private func applyProfile(_ r: SyncRecord, _ data: SyncJSON) {
         let store = ProfileStore.shared
         if r.deleted {
             // The default profile can't be deleted from another device.
@@ -711,7 +711,7 @@ extension ServerSync {
         store.upsertSynced(profile)
     }
 
-    private func applySecret(_ r: SyncRecord, _ data: JSONValue, reactivate: inout Set<UUID>, traktToken: inout String?) {
+    private func applySecret(_ r: SyncRecord, _ data: SyncJSON, reactivate: inout Set<UUID>, traktToken: inout String?) {
         let value = r.deleted ? "" : (data["value"]?.stringValue ?? "")
         let settings = AppSettings.shared
         switch r.id {
