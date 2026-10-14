@@ -43,11 +43,11 @@ object GuideRepo {
     fun init() {
         scope.launch {
             val loaded = withContext(Dispatchers.IO) { Store.load(serializer, "guide-cache.json") }
-            if (loaded != null && programmes.isEmpty()) setProgrammes(loaded)
+            if (loaded != null && programmes.isEmpty()) applyProgrammes(loaded)
         }
     }
 
-    private fun setProgrammes(map: Map<String, List<Programme>>) {
+    private fun applyProgrammes(map: Map<String, List<Programme>>) {
         programmes = map
         programmeCount = map.values.sumOf { it.size }
     }
@@ -96,7 +96,7 @@ object GuideRepo {
                 val parsed = withContext(Dispatchers.Default) { parse(file, prevDays) }
                 file.delete()
                 if (parsed.isNotEmpty()) {
-                    setProgrammes(parsed)
+                    applyProgrammes(parsed)
                     updatedAt = System.currentTimeMillis()
                     Store.prefs.edit().putLong("guide.updated", updatedAt).apply()
                     withContext(Dispatchers.IO) { Store.save(serializer, parsed, "guide-cache.json") }

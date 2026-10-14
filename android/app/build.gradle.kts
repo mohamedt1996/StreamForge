@@ -13,7 +13,8 @@ val buildNumber = (System.getenv("BUILD_NUMBER") ?: "1").toInt()
 
 android {
     namespace = "com.mohamedt.streamforge"
-    compileSdk = 36
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "com.mohamedt.streamforge"
