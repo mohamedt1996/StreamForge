@@ -12,21 +12,33 @@ enum PlayerPanel: Identifiable {
     var id: Self { self }
 }
 
+/// Creates the player model exactly once. SwiftUI may call `init` many times while the
+/// cover is up, and each PlayerModel owns a full mpv instance, so it must not live in `init`.
 struct PlayerView: View {
     let request: PlaybackRequest
+    @State private var model: PlayerModel?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let model { PlayerScreen(request: request, model: model) }
+        }
+        .onAppear {
+            if model == nil { model = PlayerModel(request: request) }
+        }
+    }
+}
+
+struct PlayerScreen: View {
+    let request: PlaybackRequest
+    let model: PlayerModel
     @Environment(\.dismiss) private var dismiss
-    @State private var model: PlayerModel
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
     @State private var panel: PlayerPanel?
     @State private var scrubbing: Double?
     @State private var seekFeedback: String?
     @State private var numberEntry = ""
-
-    init(request: PlaybackRequest) {
-        self.request = request
-        _model = State(initialValue: PlayerModel(request: request))
-    }
 
     var body: some View {
         ZStack {
