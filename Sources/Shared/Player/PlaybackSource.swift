@@ -118,11 +118,21 @@ final class SourcesModel {
         case .quality: return list.sorted { $0.score > $1.score }
         case .size: return list.sorted { ($0.sizeBytes ?? 0) > ($1.sizeBytes ?? 0) }
         case .seeders: return list.sorted { ($0.seeders ?? -1) > ($1.seeders ?? -1) }
+        case .fastest:
+            let est = StartEstimator.shared
+            let keyed = list.map { ($0, est.fastestKey($0, runtimeMinutes: runtimeMinutes, isEpisode: episode != nil)) }
+            return keyed.sorted { $0.1 < $1.1 }.map(\.0)
         case .addon: return list
         }
     }
 
     var bestSource: PlaybackSource? { sorted.first }
+
+    var runtimeMinutes: Int? { episode?.runtimeMinutes ?? item.runtimeMinutes }
+
+    func estimate(_ source: PlaybackSource) -> StartEstimator.Estimate? {
+        StartEstimator.shared.estimate(source, runtimeMinutes: runtimeMinutes, isEpisode: episode != nil)
+    }
 
     func load() async {
         isLoading = true

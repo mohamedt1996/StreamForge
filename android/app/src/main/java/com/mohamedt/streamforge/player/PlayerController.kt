@@ -108,6 +108,18 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     var numberEntry by mutableStateOf(""); private set
 
     private var torrentHash: String? = null
+    /** Real throughput of this session, fed back into StartEstimator so estimates learn this network. */
+    private var throughput = com.mohamedt.streamforge.torrent.ThroughputTracker()
+    private var throughputContext: Pair<Boolean, Int?>? = null
+
+    private fun flushThroughput() {
+        val ctx = throughputContext
+        if (ctx != null && throughput.samples >= 8) {
+            com.mohamedt.streamforge.torrent.StartEstimator.record(throughput.peak, ctx.second, ctx.first)
+        }
+        throughput = com.mohamedt.streamforge.torrent.ThroughputTracker()
+        throughputContext = null
+    }
     private var lastSaved = 0L
     private var previousChannel: Long? = null
     private var autoSkipped = HashSet<String>()
@@ -266,6 +278,7 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     /** A new request while the (singleTask) player is already open, e.g. from PiP. */
     fun open(r: PlaybackRequest) {
         saveProgress(force = true)
+        flushThroughput()
         val old = torrentHash
         val newHash = (r.source.kind as? SourceKind.Torrent)?.source?.infoHash
         if (old != null && old != newHash) {
@@ -404,10 +417,18 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
                 showToast(s.label.replace("Skip", "Skipped"))
             }
         }
-        torrentHash?.let { h ->
-            if (buffering && !started) runCatching { TorrServer.status(h) }.getOrNull()?.let {
-                status = "Buffering · ${it.activePeers} peers · ${(it.downloadSpeed / 1024 / 1024).let { s -> "%.1f".format(s) }} MB/s"
+        val hash = torrentHash
+        if (hash != null) {
+            runCatching { TorrServer.status(hash) }.getOrNull()?.let {
+                if (buffering && !started) status = "Buffering · ${it.activePeers} peers · ${(it.downloadSpeed / 1024 / 1024).let { s -> "%.1f".format(s) }} MB/s"
+                if (!isLive) {
+                    throughputContext = true to (request.source.seeders ?: it.seeders)
+                    throughput.add(it.downloadSpeed)
+                }
             }
+        } else if (!isLive && !paused && request.source.kind is SourceKind.Direct && throughput.samples < 40) {
+            // Only the first seconds count: once mpv's cache is full it stops reading at full speed.
+            mpv.double("cache-speed")?.let { throughputContext = false to null; throughput.add(it) }
         }
         if (isLive) nowProgramme?.let { if (it.end < System.currentTimeMillis()) refreshProgramme() }
     }
@@ -426,6 +447,7 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     fun release() {
         saveProgress(force = true)
+        flushThroughput()
         torrentHash?.let { h -> CoroutineScope(Dispatchers.IO).launch { TorrServer.drop(h) } }
         scope.cancel()
         mpv.destroy()

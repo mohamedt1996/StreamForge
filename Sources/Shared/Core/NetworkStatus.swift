@@ -12,6 +12,8 @@ final class NetworkStatus {
     private(set) var isExpensive = false
     private(set) var isConstrained = false
     private(set) var isOnline = true
+    /// "wifi", "cellular", "wired" or "other" — used to keep separate learned speeds per network type.
+    private(set) var linkType = "wifi"
 
     @ObservationIgnored private let monitor = NWPathMonitor()
 
@@ -23,8 +25,12 @@ final class NetworkStatus {
             let expensive = path.isExpensive
             let constrained = path.isConstrained
             let online = path.status == .satisfied
+            let link = path.usesInterfaceType(.wiredEthernet) ? "wired"
+                : path.usesInterfaceType(.wifi) ? "wifi"
+                : path.usesInterfaceType(.cellular) ? "cellular" : "other"
             Task { @MainActor in
                 NetworkStatus.shared.update(expensive: expensive, constrained: constrained, online: online)
+                if NetworkStatus.shared.linkType != link { NetworkStatus.shared.linkType = link }
             }
         }
         monitor.start(queue: DispatchQueue(label: "streamforge.network-status"))

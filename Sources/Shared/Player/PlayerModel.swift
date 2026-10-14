@@ -220,6 +220,9 @@ final class PlayerModel: MPVPlayerDelegate {
     private var lastSavedPosition: Double = 0
     private var resolvedTorrentHash: String?
     private var didScrobbleStart = false
+    /// Real throughput of this session, fed back into StartEstimator so source estimates learn this network.
+    @ObservationIgnored private var throughput = ThroughputTracker()
+    @ObservationIgnored private var throughputContext: (torrent: Bool, seeders: Int?)?
     var onFinished: (() -> Void)?
 
     var isLive: Bool { request.isLive }
@@ -326,6 +329,7 @@ final class PlayerModel: MPVPlayerDelegate {
         #endif
         saveProgress(force: true)
         if hasStarted { scrobble(.stop) }
+        flushThroughput()
         resolveTask?.cancel()
         tickTask?.cancel()
         digitTask?.cancel()
@@ -371,7 +375,29 @@ final class PlayerModel: MPVPlayerDelegate {
         if req.isLive, let id = req.channelID { Task { await refreshProgramme(id) } }
     }
 
+    private func flushThroughput() {
+        if let ctx = throughputContext, throughput.samples >= 8 {
+            StartEstimator.shared.record(peakSpeed: throughput.peak, seeders: ctx.seeders, torrent: ctx.torrent)
+        }
+        throughput = ThroughputTracker()
+        throughputContext = nil
+    }
+
+    private func sampleThroughput() {
+        guard !isLive else { return }
+        if let t = torrentStatus, resolvedTorrentHash != nil {
+            throughputContext = (true, request.source.seeders ?? t.seeders)
+            throughput.add(t.downloadSpeed)
+        } else if case .direct = request.source.kind, !isPaused, let speed = player.double("cache-speed"),
+                  throughput.samples < 40 {
+            // Only the first seconds count: once mpv's cache is full it stops reading at full speed.
+            throughputContext = (false, nil)
+            throughput.add(speed)
+        }
+    }
+
     private func resetState() {
+        flushThroughput()
         position = 0; duration = 0; cachedUntil = 0; isPaused = false; isBuffering = true
         hasStarted = false; statusText = nil; errorText = nil; ended = false; torrentStatus = nil
         audioTracks = []; subtitleTracks = []; videoTracks = []; chapters = []
@@ -949,6 +975,7 @@ final class PlayerModel: MPVPlayerDelegate {
                 statusText = "Buffering · \(t.activePeers) peers · \(t.speedText)"
             }
         }
+        sampleThroughput()
         if isLive, let p = currentProgramme, p.end < Date(), let id = request.channelID {
             await refreshProgramme(id)
         }

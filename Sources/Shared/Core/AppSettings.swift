@@ -32,9 +32,9 @@ enum HardwareDecoding: String, Codable, CaseIterable, Identifiable {
 }
 
 enum StreamSort: String, Codable, CaseIterable, Identifiable {
-    case quality, size, seeders, addon
+    case quality, fastest, size, seeders, addon
     var id: String { rawValue }
-    var label: String { rawValue.capitalized }
+    var label: String { self == .fastest ? "Fastest start" : rawValue.capitalized }
 }
 
 /// Every user-facing preference. Persisted as one JSON document; secrets go to the Keychain.

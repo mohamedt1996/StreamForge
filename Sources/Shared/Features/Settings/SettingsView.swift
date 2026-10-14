@@ -777,6 +777,7 @@ struct PlayerSettingsView: View {
                 }
                 Toggle("Hide CAM / telesync releases", isOn: $settings.values.excludeCam)
             }
+            ConnectionSpeedSection()
             #if os(iOS)
             Section {
                 Toggle("Autoplay trailers on detail pages", isOn: $settings.values.trailerAutoplay)
@@ -840,5 +841,47 @@ struct LiveSettingsView: View {
 
     private func categoryToggle(_ name: String, key: String) -> some View {
         Toggle(name, isOn: Binding(get: { !library.isHidden(category: key) }, set: { _ in library.toggleHidden(category: key) }))
+    }
+}
+
+
+/// Shows what the start-time estimates are based on, with a manual speed test.
+struct ConnectionSpeedSection: View {
+    @State private var estimator = StartEstimator.shared
+    @State private var testing = false
+    @State private var failed = false
+
+    var body: some View {
+        let key = estimator.profileKey(torrent: false)
+        let profile = estimator.profiles[key]
+        let torrentProfile = estimator.profiles[estimator.profileKey(torrent: true)]
+        Section {
+            LabeledContent("Network", value: key.capitalized)
+            LabeledContent("Connection speed", value: profile?.capacity.map { speedText($0) } ?? "Not measured yet")
+            if let t = torrentProfile, t.sessions > 0 {
+                LabeledContent("Torrent sessions learned", value: "\(t.sessions)")
+            }
+            Button {
+                testing = true; failed = false
+                Task {
+                    failed = await estimator.runSpeedTest() == nil
+                    testing = false
+                }
+            } label: {
+                HStack {
+                    Text(testing ? "Testing…" : "Test connection speed")
+                    if testing { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(testing)
+            if failed { Text("Speed test failed. Check your connection.").font(.footnote).foregroundStyle(.red) }
+            Button("Reset learned speeds", role: .destructive) { estimator.reset() }
+        } header: { Text("Start-time estimates") } footer: {
+            Text("Sources show how fast they should start and warn when they may buffer. Estimates use the seeders and file size, your connection speed and speeds learned from what you play on each network. The test downloads about 27 MB.")
+        }
+    }
+
+    private func speedText(_ bytesPerSecond: Double) -> String {
+        "\(Int((bytesPerSecond * 8 / 1e6).rounded())) Mbps (\(Int64(bytesPerSecond).byteText)/s)"
     }
 }

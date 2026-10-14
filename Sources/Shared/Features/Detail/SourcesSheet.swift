@@ -28,7 +28,7 @@ struct SourcesSheet: View {
                                                message: "None of your addons returned a stream for this title. Install more stream addons in Settings → Addons.")
                             }
                             ForEach(list) { s in
-                                SourceRow(source: s) { start(s) }
+                                SourceRow(source: s, estimate: model.estimate(s)) { start(s) }
                             }
                             if model.isLoading {
                                 HStack(spacing: 10) {
@@ -120,6 +120,7 @@ struct SourcesSheet: View {
 
 struct SourceRow: View {
     var source: PlaybackSource
+    var estimate: StartEstimator.Estimate? = nil
     var onTap: () -> Void
 
     var body: some View {
@@ -137,6 +138,7 @@ struct SourceRow: View {
                     Text(source.provider).font(.caption.weight(.bold)).foregroundStyle(Theme.accent).lineLimit(1)
                     Text(source.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                     if let d = source.detail { Text(d).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
+                    if let e = estimate, e.rating != .instant || !source.isCached { estimateRow(e) }
                     HStack(spacing: 5) {
                         if source.isCached { Pill(text: "INSTANT", color: Color.green.opacity(0.3), icon: "bolt.fill") }
                         ForEach(source.tags.prefix(5), id: \.self) { Pill(text: $0) }
@@ -151,6 +153,22 @@ struct SourceRow: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private func estimateRow(_ e: StartEstimator.Estimate) -> some View {
+        let color: Color = e.mayBuffer ? .red : (e.rating == .slow ? .orange : e.rating == .okay ? .yellow : .green)
+        return HStack(spacing: 6) {
+            Image(systemName: e.mayBuffer ? "exclamationmark.triangle.fill" : "timer")
+            Text(e.rating == .instant ? "Starts instantly" : "Starts in \(e.label)")
+            if e.mayBuffer { Text("· may buffer") }
+            Text("· est. \(Int64(e.expectedSpeed).byteText)/s, file \(Int64(e.bitrate).byteText)/s")
+                .foregroundStyle(Theme.secondaryText)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(color)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .accessibilityElement(children: .combine)
     }
 
     private var icon: String {

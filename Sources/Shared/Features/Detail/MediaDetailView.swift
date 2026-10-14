@@ -347,7 +347,7 @@ struct MediaDetailView: View {
             }
             VStack(spacing: 8) {
                 ForEach(sources.sorted.prefix(5)) { s in
-                    SourceRow(source: s) { player.play(PlaybackRequest(item: item, source: s)) }
+                    SourceRow(source: s, estimate: sources.estimate(s)) { player.play(PlaybackRequest(item: item, source: s)) }
                 }
             }
             .padding(.horizontal, Theme.gutter)

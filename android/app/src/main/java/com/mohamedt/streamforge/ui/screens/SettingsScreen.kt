@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mohamedt.streamforge.core.Settings
+import com.mohamedt.streamforge.core.byteText
 import com.mohamedt.streamforge.core.SettingsValues
 import com.mohamedt.streamforge.dispatcharr.AuthMode
 import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
@@ -137,6 +138,7 @@ fun SettingsScreen() {
                 Field("Custom User-Agent (optional)", s.userAgent) { v -> upd { it.copy(userAgent = v) } }
             }
         }
+        item { SpeedSection() }
         item {
             Section("Subtitle style") {
                 Choice("Size", listOf(0.8f to "Small", 1.0f to "Normal", 1.25f to "Large", 1.5f to "Huge"), s.subtitleScale) { v -> upd { it.copy(subtitleScale = v) } }
@@ -284,5 +286,32 @@ fun RecordingsScreen() {
                 }
             }
         }
+    }
+}
+
+
+/** What the source start-time estimates are based on, with a manual speed test. */
+@Composable
+private fun SpeedSection() {
+    val est = com.mohamedt.streamforge.torrent.StartEstimator
+    @Suppress("UNUSED_VARIABLE") val v = est.version
+    val scope = rememberCoroutineScope()
+    var testing by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    val key = est.profileKey(false)
+    val tKey = est.profileKey(true)
+    Section("Start-time estimates", "Sources show how fast they should start and warn when they may buffer, using seeders, file size, your connection and speeds learned from what you play on each network. The test downloads about 27 MB.") {
+        Text("Network: ${key.replaceFirstChar { it.uppercase() }}", color = Palette.secondary)
+        Text("Connection speed: " + (est.capacity(key)?.let { "${Math.round(it * 8 / 1e6)} Mbps (${it.toLong().byteText()}/s)" } ?: "Not measured yet"),
+            color = Palette.secondary)
+        if (est.sessions(tKey) > 0) Text("Torrent sessions learned: ${est.sessions(tKey)}", color = Palette.secondary)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
+            Button(onClick = {
+                testing = true; failed = false
+                scope.launch { failed = est.runSpeedTest() == null; testing = false }
+            }, enabled = !testing) { Text(if (testing) "Testing…" else "Test connection speed") }
+            TextButton(onClick = { est.reset() }) { Text("Reset learned speeds") }
+        }
+        if (failed) Text("Speed test failed. Check your connection.", color = androidx.compose.ui.graphics.Color(0xFFF87171), fontSize = 12.sp)
     }
 }

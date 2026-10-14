@@ -108,6 +108,14 @@ class SourcesModel(val item: MediaItem, val episode: Episode?) {
                 .sortedByDescending { it.score }
         }
 
+    val runtimeMinutes: Int? get() = episode?.runtimeMinutes ?: item.runtimeMinutes
+
+    fun estimate(src: PlaybackSource) = com.mohamedt.streamforge.torrent.StartEstimator.estimate(src, runtimeMinutes, episode != null)
+
+    /** Quick and smooth sources first. */
+    fun fastest(list: List<PlaybackSource>) =
+        list.sortedBy { com.mohamedt.streamforge.torrent.StartEstimator.fastestKey(it, runtimeMinutes, episode != null) }
+
     suspend fun load() {
         loading = true
         sources.clear()

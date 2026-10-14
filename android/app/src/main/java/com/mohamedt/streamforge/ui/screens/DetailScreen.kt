@@ -200,7 +200,7 @@ fun DetailScreen(initial: MediaItem) {
                 }
             }
             sources?.sorted?.take(8)?.forEach { src ->
-                item(key = "src-${src.id}") { SourceRow(src) { Player.play(context, PlaybackRequest(item, source = src)) } }
+                item(key = "src-${src.id}") { SourceRow(src, sources?.estimate(src)) { Player.play(context, PlaybackRequest(item, source = src)) } }
             }
             if ((sources?.sorted?.size ?: 0) > 8) item {
                 Text("All ${sources?.sorted?.size} sources →", color = Palette.accent, modifier = Modifier.padding(Dims.gutter()).card({ picker = null to emptyList() }).padding(6.dp))
@@ -250,7 +250,7 @@ private fun EpisodeRow(item: MediaItem, ep: Episode, onPlay: () -> Unit) {
 }
 
 @Composable
-fun SourceRow(src: PlaybackSource, onClick: () -> Unit) {
+fun SourceRow(src: PlaybackSource, estimate: com.mohamedt.streamforge.torrent.StartEstimator.Estimate? = null, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 4.dp).card(onClick, shape = RoundedCornerShape(14.dp)).background(Palette.surface).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically) {
         val color = when { src.resolution >= 2160 -> Palette.gold; src.resolution >= 1080 -> Palette.accent; src.resolution >= 720 -> Color(0xFF2DD4BF); else -> Color.Gray }
@@ -269,6 +269,18 @@ fun SourceRow(src: PlaybackSource, onClick: () -> Unit) {
                 src.size?.let { Pill(it.byteText(), Color.Transparent) }
                 src.seeders?.let { Pill("👤 $it", Color.Transparent) }
             }
+            estimate?.takeIf { !(src.cached && it.rating == com.mohamedt.streamforge.torrent.StartEstimator.Estimate.Rating.INSTANT) }?.let { e ->
+                val c = when {
+                    e.mayBuffer -> Color(0xFFF87171)
+                    e.rating == com.mohamedt.streamforge.torrent.StartEstimator.Estimate.Rating.SLOW -> Color(0xFFFB923C)
+                    e.rating == com.mohamedt.streamforge.torrent.StartEstimator.Estimate.Rating.OKAY -> Color(0xFFFACC15)
+                    else -> Color(0xFF4ADE80)
+                }
+                val head = if (e.mayBuffer) "⚠ Starts in ${e.label} · may buffer" else "⏱ Starts in ${e.label}"
+                Text("$head · est. ${e.expectedSpeed.toLong().byteText()}/s, file ${e.bitrate.toLong().byteText()}/s",
+                    color = c, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
         }
     }
 }
@@ -283,12 +295,17 @@ fun SourcesDialog(item: MediaItem, ep: Episode?, onDismiss: () -> Unit, onPick: 
         title = { Text(ep?.let { "${item.title} · ${it.code}" } ?: item.title) },
         text = {
             var quality by remember(item.id, ep?.id) { mutableStateOf<String?>(null) }
+            var fastest by remember { mutableStateOf(false) }
+            @Suppress("UNUSED_VARIABLE") val learned = com.mohamedt.streamforge.torrent.StartEstimator.version
             val qualities = model.sorted.filter { it.resolution > 0 }.sortedByDescending { it.resolution }.map { it.resolutionLabel }.distinct()
-            val list = model.sorted.filter { quality == null || it.resolutionLabel == quality }
+            val filtered = model.sorted.filter { quality == null || it.resolutionLabel == quality }
+            val list = if (fastest) model.fastest(filtered) else filtered
             Column {
-                // Quality chips stay pinned above the scrolling list.
-                if (qualities.size > 1) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
+                // Sort + quality chips stay pinned above the scrolling list.
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
+                    Chip("⏱ Fastest start", fastest) { fastest = !fastest }
+                    Spacer(Modifier.width(8.dp))
+                    if (qualities.size > 1) {
                         Chip("All", quality == null) { quality = null }
                         qualities.forEach { q ->
                             Spacer(Modifier.width(8.dp))
@@ -300,7 +317,7 @@ fun SourcesDialog(item: MediaItem, ep: Episode?, onDismiss: () -> Unit, onPick: 
                     if (list.isEmpty()) item {
                         Text(if (model.loading) "Waiting for ${model.pendingAddons} addon(s)…" else "No sources found. Install stream addons in Settings.", color = Palette.secondary)
                     }
-                    list.forEach { src -> item(key = src.id) { SourceRow(src) { onPick(src) } } }
+                    list.forEach { src -> item(key = src.id) { SourceRow(src, model.estimate(src)) { onPick(src) } } }
                 }
             }
         },
