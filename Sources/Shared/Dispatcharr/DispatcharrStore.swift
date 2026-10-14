@@ -206,7 +206,7 @@ final class DispatcharrStore {
         var counts: [String: Int] = [:]
         for g in raw {
             for part in g.split(whereSeparator: { ",/|&".contains($0) }) {
-                let name = part.trimmed.capitalized
+                let name = String(part).trimmed.capitalized
                 if name.count > 1, name.count < 24 { counts[name, default: 0] += 1 }
             }
         }

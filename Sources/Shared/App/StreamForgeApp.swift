@@ -122,6 +122,7 @@ final class AppRouter {
         case "magnet":
             PlayerCoordinator.shared.playMagnet(url.absoluteString)
         case "file":
+            guard url.isFileURL else { return }
             #if os(iOS)
             guard url.pathExtension.lowercased() == "torrent" else { return }
             let access = url.startAccessingSecurityScopedResource()

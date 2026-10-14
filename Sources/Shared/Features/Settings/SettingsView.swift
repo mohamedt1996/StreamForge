@@ -287,8 +287,10 @@ struct AddonsSettingsView: View {
                         Button(role: .destructive) { addons.remove(addon) } label: { Label("Remove", systemImage: "trash") }
                     }
                 }
-                .onDelete { idx in idx.map { addons.addons[$0] }.forEach(addons.remove) }
+                #if os(iOS)
+                .onDelete { idx in idx.map { addons.addons[$0] }.forEach { addons.remove($0) } }
                 .onMove { addons.move(from: $0, to: $1) }
+                #endif
             }
             Section {
                 Button { Task { await addons.refreshManifests() } } label: { Label("Update All Manifests", systemImage: "arrow.clockwise") }
@@ -355,8 +357,17 @@ struct TorrentSettingsView: View {
                 }
             } else {
                 Section("On-device cache") {
+                    #if os(tvOS)
+                    Picker("RAM cache", selection: $settings.values.embeddedCacheMB) {
+                        ForEach(Array(stride(from: 64, through: 1024, by: 64)), id: \.self) { Text("\($0) MB").tag($0) }
+                    }
+                    Picker("Preload before play", selection: $settings.values.preloadPercent) {
+                        ForEach(Array(stride(from: 0, through: 50, by: 5)), id: \.self) { Text("\($0)%").tag($0) }
+                    }
+                    #else
                     Stepper("RAM cache: \(settings.values.embeddedCacheMB) MB", value: $settings.values.embeddedCacheMB, in: 64...1024, step: 64)
                     Stepper("Preload before play: \(settings.values.preloadPercent)%", value: $settings.values.preloadPercent, in: 0...50, step: 5)
+                    #endif
                 }
             }
 
@@ -396,7 +407,9 @@ struct MetadataSettingsView: View {
                 ForEach(settings.values.metadataPriority) { source in
                     Label(source.label, systemImage: icon(source))
                 }
+                #if os(iOS)
                 .onMove { settings.values.metadataPriority.move(fromOffsets: $0, toOffset: $1) }
+                #endif
                 #if os(tvOS)
                 Picker("First choice", selection: Binding(get: { settings.values.metadataPriority.first ?? .tmdb }, set: { first in
                     settings.values.metadataPriority = [first] + MetadataSource.allCases.filter { $0 != first }
@@ -523,7 +536,13 @@ struct PlayerSettingsView: View {
                     ForEach(HardwareDecoding.allCases) { Text($0.label).tag($0) }
                 }
                 Toggle("HDR / Dolby Vision output", isOn: $settings.values.hdrPassthrough)
+                #if os(tvOS)
+                Picker("Cache", selection: $settings.values.demuxerCacheMB) {
+                    ForEach(Array(stride(from: 50, through: 800, by: 50)), id: \.self) { Text("\($0) MB").tag($0) }
+                }
+                #else
                 Stepper("Cache: \(settings.values.demuxerCacheMB) MB", value: $settings.values.demuxerCacheMB, in: 50...800, step: 50)
+                #endif
             } header: { Text("Video") } footer: {
                 Text("mpv renders through Metal with VideoToolbox hardware decoding, libplacebo tone-mapping and full HDR10/HLG/Dolby Vision support. Try “compatible” decoding if a file shows artifacts.")
             }
@@ -531,7 +550,15 @@ struct PlayerSettingsView: View {
                 TextField("Preferred audio language", text: $settings.values.preferredAudioLanguage)
                 TextField("Preferred subtitle language", text: $settings.values.preferredSubtitleLanguage)
                 Toggle("Turn on subtitles automatically", isOn: $settings.values.autoSubtitles)
+                #if os(tvOS)
+                Picker("Subtitle size", selection: $settings.values.subtitleScale) {
+                    ForEach(Array(stride(from: 5, through: 25, by: 1)), id: \.self) { (tenths: Int) in
+                        Text(String(format: "%.1f×", Double(tenths) / 10)).tag(Double(tenths) / 10)
+                    }
+                }
+                #else
                 Stepper(String(format: "Subtitle size: %.1f×", settings.values.subtitleScale), value: $settings.values.subtitleScale, in: 0.5...2.5, step: 0.1)
+                #endif
             }
             Section("Controls") {
                 Picker("Skip interval", selection: $settings.values.seekStep) {
@@ -571,7 +598,13 @@ struct LiveSettingsView: View {
         Form {
             Section("Live TV") {
                 Toggle("Show channel numbers", isOn: $settings.values.showChannelNumbers)
+                #if os(tvOS)
+                Picker("Live buffer", selection: $settings.values.liveBufferSeconds) {
+                    ForEach(1...20, id: \.self) { Text("\($0)s").tag($0) }
+                }
+                #else
                 Stepper("Live buffer: \(settings.values.liveBufferSeconds)s", value: $settings.values.liveBufferSeconds, in: 1...20)
+                #endif
             }
             Section {
                 ForEach(store.liveCategories) { cat in

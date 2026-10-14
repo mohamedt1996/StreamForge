@@ -195,6 +195,7 @@ final class MPVPlayer {
 
     // MARK: Commands
 
+    @MainActor
     func load(_ url: URL, start: Double? = nil, headers: [String: String] = [:], title: String? = nil, live: Bool = false) {
         guard let mpv = handle else { return }
         let headerValue = headers.map { "\($0.key): \($0.value)" }.joined(separator: ",")
@@ -334,6 +335,7 @@ final class MPVPlayer {
                 }
             }
         case MPV_EVENT_LOG_MESSAGE:
+            guard event.data != nil else { break }
             #if DEBUG
             if let msg = event.data?.assumingMemoryBound(to: mpv_event_log_message.self).pointee {
                 print("[mpv] \(String(cString: msg.prefix)): \(String(cString: msg.text))", terminator: "")
