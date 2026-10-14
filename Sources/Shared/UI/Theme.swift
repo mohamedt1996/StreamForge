@@ -39,7 +39,15 @@ struct RemoteImage: View {
     var body: some View {
         LazyImage(url: url) { state in
             if let image = state.image {
-                image.resizable().aspectRatio(contentMode: contentMode)
+                if contentMode == .fill {
+                    // A filled image reports its own (wider) size and would stretch its parent past
+                    // the screen; Color.clear takes exactly the offered size and the image only overlays it.
+                    Color.clear
+                        .overlay { image.resizable().aspectRatio(contentMode: .fill) }
+                        .clipped()
+                } else {
+                    image.resizable().aspectRatio(contentMode: contentMode)
+                }
             } else {
                 ZStack {
                     LinearGradient(colors: [Theme.surfaceHigh, Theme.surface], startPoint: .top, endPoint: .bottom)

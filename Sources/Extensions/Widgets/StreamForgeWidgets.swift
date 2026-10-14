@@ -49,7 +49,7 @@ private struct Artwork: View {
 
     var body: some View {
         if let image {
-            Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            Color.clear.overlay { Image(uiImage: image).resizable().aspectRatio(contentMode: .fill) }.clipped()
         } else {
             ZStack {
                 LinearGradient(colors: [WidgetTheme.accent.opacity(0.45), WidgetTheme.accent2.opacity(0.25)],
