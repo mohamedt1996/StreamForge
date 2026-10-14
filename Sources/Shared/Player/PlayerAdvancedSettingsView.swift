@@ -55,6 +55,7 @@ struct PlayerAdvancedSettingsView: View {
                 Toggle("Show Skip Intro / Recap buttons", isOn: $prefs.values.showSkipButtons)
                 Toggle("Skip intros automatically", isOn: $prefs.values.autoSkipIntro)
                 Toggle("Learn intros when I skip them", isOn: $prefs.values.learnIntros)
+                Toggle("Online markers (TheIntroDB)", isOn: $prefs.values.useIntroDB)
                 Toggle("Anime timestamps (AniSkip)", isOn: $prefs.values.useAniSkip)
                 Toggle("Show next episode when credits start", isOn: $prefs.values.nextEpisodeAtCredits)
                 if memory.count > 0 {
@@ -62,10 +63,15 @@ struct PlayerAdvancedSettingsView: View {
                         Text("Forget learned intros (\(memory.count))")
                     }
                 }
+                if memory.manualCount > 0 {
+                    Button(role: .destructive) { memory.forgetAllManual() } label: {
+                        Text("Clear manual markers (\(memory.manualCount) series)")
+                    }
+                }
             } header: {
                 Text("Intros & credits")
             } footer: {
-                Text("Markers come from chapter names, AniSkip (for anime with Kitsu/MAL ids) and from your own skips: jump 30 s–3 min forward early in an episode and the next episodes of that season will offer Skip Intro at the same spot.")
+                Text("Markers come from TheIntroDB (by TMDB id), chapter names, AniSkip (for anime with Kitsu/MAL ids), markers you set yourself (player → Playback → Skip markers for this series) and from your own skips: jump 30 s–3 min forward early in an episode and the next episodes of that season will offer Skip Intro at the same spot.")
             }
 
             Section {

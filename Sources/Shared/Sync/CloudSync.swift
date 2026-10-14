@@ -78,7 +78,9 @@ final class CloudSync {
         set { UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: "cloud.lastApplied") }
     }
 
-    var iCloudAvailable: Bool { FileManager.default.ubiquityIdentityToken != nil }
+    /// `ubiquityIdentityToken` is only set for apps with an iCloud container; a key-value-store-only
+    /// app relies on `synchronize()`, which returns false when the entitlement or account is missing.
+    var iCloudAvailable: Bool { FileManager.default.ubiquityIdentityToken != nil || store.synchronize() }
 
     private init() {}
 

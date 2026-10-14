@@ -4,7 +4,7 @@ import Observation
 /// A range the player can offer to skip (intro, recap, credits…).
 struct SkipSegment: Identifiable, Hashable {
     enum Kind: String, Hashable { case intro, recap, credits, preview }
-    enum Source: String, Hashable { case chapter, aniskip, learned }
+    enum Source: String, Hashable { case chapter, aniskip, learned, introdb, manual }
 
     var kind: Kind
     var start: Double
@@ -23,6 +23,8 @@ struct SkipSegment: Identifiable, Hashable {
     }
 
     func contains(_ t: Double) -> Bool { t >= start && t < end - 1 }
+
+    func overlaps(_ other: SkipSegment) -> Bool { start < other.end && other.start < end }
 }
 
 // MARK: - Chapters
@@ -95,17 +97,64 @@ final class IntroMemory {
         var updated: Date
     }
 
+    /// Markers the user set by hand for a whole series (keyed by the series item id).
+    struct Manual: Codable, Hashable {
+        var introStart: Double?
+        var introEnd: Double?
+        /// Credits start, stored as seconds before the end so it fits episodes of any length.
+        var creditsFromEnd: Double?
+        var updated: Date
+    }
+
     private(set) var entries: [String: Entry] = [:]
+    private(set) var manualEntries: [String: Manual] = [:]
 
     private init() {
         entries = FileStore.load([String: Entry].self, "intro-markers.json") ?? [:]
+        manualEntries = FileStore.load([String: Manual].self, "intro-manual.json") ?? [:]
     }
 
     static func key(item: MediaItem, season: Int) -> String { "\(item.id)#s\(season)" }
 
     var count: Int { entries.count }
+    var manualCount: Int { manualEntries.count }
 
     func entry(_ key: String) -> Entry? { entries[key] }
+
+    // MARK: Manual (per-series) markers
+
+    func manual(_ seriesID: String) -> Manual? { manualEntries[seriesID] }
+
+    func setManualIntro(_ seriesID: String, start: Double, end: Double) {
+        var m = manualEntries[seriesID] ?? Manual(updated: Date())
+        m.introStart = max(0, start)
+        m.introEnd = end
+        m.updated = Date()
+        manualEntries[seriesID] = m
+        saveManual()
+    }
+
+    func setManualCredits(_ seriesID: String, fromEnd: Double) {
+        var m = manualEntries[seriesID] ?? Manual(updated: Date())
+        m.creditsFromEnd = max(1, fromEnd)
+        m.updated = Date()
+        manualEntries[seriesID] = m
+        saveManual()
+    }
+
+    func forgetManual(_ seriesID: String) {
+        manualEntries[seriesID] = nil
+        saveManual()
+    }
+
+    func forgetAllManual() {
+        manualEntries = [:]
+        saveManual()
+    }
+
+    private func saveManual() {
+        FileStore.save(manualEntries, "intro-manual.json", mirrorToDefaults: true)
+    }
 
     func record(_ key: String, start: Double, end: Double) {
         guard end - start >= 20 else { return }
@@ -231,5 +280,89 @@ actor AniSkipClient {
         guard let result = try? await URLSession.shared.data(for: req),
               let http = result.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return result.0
+    }
+}
+
+// MARK: - TheIntroDB
+
+/// Crowd-sourced intro / recap / credits / preview timestamps from TheIntroDB, keyed by TMDB id
+/// (plus season and episode for series). `GET https://api.theintrodb.org/v3/media` returns
+/// `{ intro: [{start_ms, end_ms}], recap: […], credits: […], preview: […] }`; a missing `start_ms`
+/// means "from the start", a missing `end_ms` means "to the end of the file".
+actor TheIntroDBClient {
+    static let shared = TheIntroDBClient()
+
+    private var cache: [String: [SkipSegment]] = [:]
+
+    private struct Span: Decodable {
+        var start_ms: Double?
+        var end_ms: Double?
+    }
+
+    private struct Response: Decodable {
+        var intro: [Span]
+        var recap: [Span]
+        var credits: [Span]
+        var preview: [Span]
+
+        enum CodingKeys: String, CodingKey { case intro, recap, credits, preview }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            func list(_ key: CodingKeys) -> [Span] {
+                if let many = try? c.decode([Span].self, forKey: key) { return many }
+                if let one = try? c.decode(Span.self, forKey: key) { return [one] }
+                return []
+            }
+            intro = list(.intro)
+            recap = list(.recap)
+            credits = list(.credits)
+            preview = list(.preview)
+        }
+    }
+
+    /// `season`/`episode` are nil for movies. `duration` is in seconds (0 when unknown).
+    func segments(tmdbID: Int, season: Int?, episode: Int?, duration: Double) async -> [SkipSegment] {
+        guard tmdbID > 0 else { return [] }
+        let durationMS = duration > 0 ? Int(duration * 1000) : 0
+        // Durations differ by a few hundred ms between releases; bucket them for the cache.
+        let cacheKey = "\(tmdbID):\(season ?? -1):\(episode ?? -1):\(durationMS / 5000)"
+        if let hit = cache[cacheKey] { return hit }
+        guard var comps = URLComponents(string: "https://api.theintrodb.org/v3/media") else { return [] }
+        var items = [URLQueryItem(name: "tmdb_id", value: String(tmdbID))]
+        if let season, let episode {
+            items.append(URLQueryItem(name: "season", value: String(season)))
+            items.append(URLQueryItem(name: "episode", value: String(episode)))
+        }
+        if durationMS > 0 { items.append(URLQueryItem(name: "duration_ms", value: String(durationMS))) }
+        comps.queryItems = items
+        guard let url = comps.url else { return [] }
+
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("StreamForge/1.0", forHTTPHeaderField: "User-Agent")
+        guard let result = try? await URLSession.shared.data(for: req),
+              let http = result.1 as? HTTPURLResponse else { return [] }
+        if http.statusCode == 404 {
+            // Not in the database: remember that, so every episode load doesn't ask again.
+            cache[cacheKey] = []
+            return []
+        }
+        guard (200..<300).contains(http.statusCode),
+              let res = try? JSONDecoder().decode(Response.self, from: result.0) else { return [] }
+
+        func convert(_ ranges: [Span], _ kind: SkipSegment.Kind) -> [SkipSegment] {
+            ranges.compactMap { r in
+                let start = max(0, (r.start_ms ?? 0) / 1000)
+                var end: Double
+                if let e = r.end_ms { end = e / 1000 } else if duration > 0 { end = duration } else { return nil }
+                if duration > 0 { end = min(end, duration) }
+                guard end > start + 3 else { return nil }
+                return SkipSegment(kind: kind, start: start, end: end, source: .introdb)
+            }
+        }
+        let list = convert(res.intro, .intro) + convert(res.recap, .recap) + convert(res.credits, .credits) + convert(res.preview, .preview)
+        cache[cacheKey] = list
+        return list
     }
 }

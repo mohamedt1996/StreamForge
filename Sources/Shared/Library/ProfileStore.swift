@@ -76,6 +76,7 @@ final class ProfileStore {
     private func persist() {
         FileStore.save(profiles, "profiles.json", mirrorToDefaults: true)
         UserDefaults.standard.set(activeProfileID.uuidString, forKey: "profiles.active")
+        CloudSync.shared.schedulePush()
     }
 
     // MARK: Switching

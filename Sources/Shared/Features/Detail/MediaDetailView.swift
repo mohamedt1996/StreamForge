@@ -60,6 +60,7 @@ struct MediaDetailView: View {
     @Environment(\.openURL) private var openURL
     @State private var model: DetailModel
     @State private var sourceSheet: SourceSheetContext?
+    @State private var downloadSheet: DownloadSheetContext?
     @State private var expandedOverview = false
 
     init(item: MediaItem) {
@@ -76,6 +77,9 @@ struct MediaDetailView: View {
                 if let overview = item.overview, !overview.isEmpty { overviewView(overview) }
                 if item.type == .series { seasonsAndEpisodes }
                 if item.type == .movie, let sources = model.sources { inlineSources(sources) }
+                if item.type == .movie, let collection = model.details.collection {
+                    CollectionRow(collection: collection, currentItem: item)
+                }
                 castRow
                 similarRow
                 infoSection
@@ -88,10 +92,18 @@ struct MediaDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         #endif
-        .task { await model.load() }
+        .task {
+            NewEpisodeTracker.shared.markSeen(item)
+            await model.load()
+        }
         .sheet(item: $sourceSheet) { ctx in
             SourcesSheet(context: ctx)
         }
+        #if os(iOS)
+        .sheet(item: $downloadSheet) { ctx in
+            DownloadSourceSheet(context: ctx)
+        }
+        #endif
     }
 
     // MARK: Header
@@ -109,6 +121,11 @@ struct MediaDetailView: View {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(maxWidth: .infinity)
                 .frame(height: headerHeight)
+                .overlay {
+                    // Muted trailer over the artwork (setting: Player → Autoplay trailers).
+                    TrailerLayer(youtubeKey: model.details.trailerYouTubeKey,
+                                 visible: player.current == nil && player.multiview == nil && sourceSheet == nil)
+                }
                 .clipped()
                 .overlay(LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
                                         startPoint: .top, endPoint: .bottom))
@@ -186,10 +203,17 @@ struct MediaDetailView: View {
                 }
                 .buttonStyle(.bordered)
             }
+            #if os(iOS)
+            // tvOS has no browser to open YouTube links in.
             if let key = model.details.trailerYouTubeKey, let url = URL(string: "https://www.youtube.com/watch?v=\(key)") {
                 Button { openURL(url) } label: { Image(systemName: "film").font(.headline).padding(.vertical, 6) }
                     .buttonStyle(.bordered)
             }
+            if item.type == .movie, DownloadManager.isSupported {
+                DownloadButton(item: item, episode: nil) { downloadSheet = DownloadSheetContext(item: item, episode: nil) }
+                    .buttonStyle(.bordered)
+            }
+            #endif
             Button { library.toggleFavorite(item) } label: {
                 Image(systemName: library.isFavorite(item) ? "checkmark" : "plus").font(.headline).padding(.vertical, 6)
             }
@@ -301,7 +325,8 @@ struct MediaDetailView: View {
             } else {
                 LazyVStack(spacing: 10) {
                     ForEach(model.episodes) { ep in
-                        EpisodeRow(item: item, episode: ep) { play(episode: ep) }
+                        EpisodeRow(item: item, episode: ep, onPlay: { play(episode: ep) },
+                                   onDownload: { downloadSheet = DownloadSheetContext(item: item, episode: ep) })
                     }
                 }
                 .padding(.horizontal, Theme.gutter)
@@ -339,19 +364,21 @@ struct MediaDetailView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 14) {
                         ForEach(model.details.cast) { person in
-                            VStack(spacing: 6) {
-                                RemoteImage(url: person.photo, placeholderSymbol: "person.fill")
-                                    .frame(width: castSize, height: castSize)
-                                    .clipShape(Circle())
-                                Text(person.name).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
-                                if let role = person.role {
-                                    Text(role).font(.caption2).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                            Button { router.push(.person(id: person.id, name: person.name)) } label: {
+                                VStack(spacing: 6) {
+                                    RemoteImage(url: person.photo, placeholderSymbol: "person.fill")
+                                        .frame(width: castSize, height: castSize)
+                                        .clipShape(Circle())
+                                    Text(person.name).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
+                                    if let role = person.role {
+                                        Text(role).font(.caption2).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                                    }
                                 }
+                                .frame(width: castSize + 14)
+                                .contentShape(Rectangle())
                             }
-                            .frame(width: castSize + 14)
-                            #if os(tvOS)
-                            .focusable()
-                            #endif
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Shows \(person.name)'s films on your server and in your addons")
                         }
                     }
                     .padding(.horizontal, Theme.gutter)
@@ -438,6 +465,8 @@ struct EpisodeRow: View {
     var item: MediaItem
     var episode: EpisodeRef
     var onPlay: () -> Void
+    /// iOS: offers "Download Episode" in the context menu.
+    var onDownload: (() -> Void)? = nil
     @Environment(LibraryStore.self) private var library
 
     var body: some View {
@@ -478,6 +507,14 @@ struct EpisodeRow: View {
         .contextMenu {
             Button { library.setWatched(item, episode: episode, !watched) } label: {
                 Label(watched ? "Mark as Unwatched" : "Mark as Watched", systemImage: watched ? "eye.slash" : "eye")
+            }
+            if DownloadManager.isSupported, let onDownload {
+                let record = DownloadManager.shared.record(for: item, episode: episode)
+                if let record, record.state == .completed {
+                    Button { DownloadManager.shared.play(record) } label: { Label("Play Download", systemImage: "arrow.down.circle.fill") }
+                } else if record == nil || record?.state == .failed {
+                    Button(action: onDownload) { Label("Download Episode", systemImage: "arrow.down.circle") }
+                }
             }
         }
     }

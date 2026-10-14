@@ -166,6 +166,10 @@ struct VODBrowserView: View {
               seeAll: { showGrid = true; filter.sort = .added }) { poster($0) }
         Shelf(title: "Top Rated", items: Array(all.filter { ($0.rating ?? 0) >= 7 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }.prefix(30)),
               seeAll: { showGrid = true; filter.sort = .rating }) { poster($0) }
+        if kind == .movie {
+            // TMDB franchises found in the server library (needs a TMDB key).
+            CollectionsShelf()
+        }
         Shelf(title: "My List", items: myList) { poster($0) }
 
         // Section picker for providers that prefix categories by language/source (EN | …, FR | …).

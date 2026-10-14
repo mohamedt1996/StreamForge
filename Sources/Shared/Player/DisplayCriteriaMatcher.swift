@@ -65,6 +65,12 @@ enum DisplayCriteriaMatcher {
         return manager
     }
 
+    /// Fallback when the mpv view isn't in a window yet.
+    static var keyWindow: UIWindow? {
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
+        return windows.first { $0.isKeyWindow } ?? windows.first
+    }
+
     static func reset(_ manager: AVDisplayManager?) {
         manager?.preferredDisplayCriteria = nil
     }
@@ -82,7 +88,8 @@ extension PlayerModel {
                 if let info = DisplayCriteriaMatcher.videoInfo(from: self.player) {
                     // container-fps can arrive a moment after the first frame.
                     if info.fps <= 1 && attempt < 24 { continue }
-                    if let manager = DisplayCriteriaMatcher.apply(info, window: self.player.view.window) {
+                    let window = self.player.view.window ?? DisplayCriteriaMatcher.keyWindow
+                    if let manager = DisplayCriteriaMatcher.apply(info, window: window) {
                         self.displayCriteriaStorage = manager
                     }
                     return

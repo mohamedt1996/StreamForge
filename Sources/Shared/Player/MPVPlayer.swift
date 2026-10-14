@@ -186,6 +186,18 @@ final class MPVPlayer {
 
         for (name, format) in Self.observed { mpv_observe_property(mpv, 0, name, format) }
 
+        // Metal work is not allowed in the background: drop the video output there (audio keeps
+        // playing) and bring it back in the foreground.
+        let center = NotificationCenter.default
+        lifecycleObservers = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.enterBackground()
+            },
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.enterForeground()
+            },
+        ]
+
         mpv_set_wakeup_callback(mpv, { ctx in
             guard let ctx else { return }
             let player = Unmanaged<MPVPlayer>.fromOpaque(ctx).takeUnretainedValue()
@@ -195,7 +207,24 @@ final class MPVPlayer {
 
     deinit { shutdown() }
 
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private var savedVideoTrack: String?
+
+    private func enterBackground() {
+        guard handle != nil, savedVideoTrack == nil else { return }
+        savedVideoTrack = string("vid") ?? "auto"
+        set("vid", "no")
+    }
+
+    private func enterForeground() {
+        guard handle != nil, let saved = savedVideoTrack else { return }
+        savedVideoTrack = nil
+        set("vid", saved == "no" ? "auto" : saved)
+    }
+
     func shutdown() {
+        for o in lifecycleObservers { NotificationCenter.default.removeObserver(o) }
+        lifecycleObservers = []
         guard let mpv = handle else { return }
         handle = nil
         mpv_set_wakeup_callback(mpv, nil, nil)

@@ -68,6 +68,7 @@ final class PlayerPreferences {
         var autoSkipIntro = false
         var learnIntros = true
         var useAniSkip = true
+        var useIntroDB = true
         var nextEpisodeAtCredits = true
 
         // Subtitle style
@@ -116,7 +117,7 @@ final class PlayerPreferences {
 
         // Tolerant decoding: new keys added later never wipe the user's existing preferences.
         private enum CodingKeys: String, CodingKey {
-            case showSkipButtons, autoSkipIntro, learnIntros, useAniSkip, nextEpisodeAtCredits
+            case showSkipButtons, autoSkipIntro, learnIntros, useAniSkip, useIntroDB, nextEpisodeAtCredits
             case subFont, subBold, subColor, subBorderColor, subBorderSize, subShadow, subBackground, subBackColor, subBackOpacity
             case subPosition, overrideASS
             case volume, nightMode, dialogueBoost
@@ -133,6 +134,7 @@ final class PlayerPreferences {
             autoSkipIntro = v(.autoSkipIntro, autoSkipIntro)
             learnIntros = v(.learnIntros, learnIntros)
             useAniSkip = v(.useAniSkip, useAniSkip)
+            useIntroDB = v(.useIntroDB, useIntroDB)
             nextEpisodeAtCredits = v(.nextEpisodeAtCredits, nextEpisodeAtCredits)
             subFont = v(.subFont, subFont)
             subBold = v(.subBold, subBold)
@@ -161,6 +163,7 @@ final class PlayerPreferences {
             try c.encode(autoSkipIntro, forKey: .autoSkipIntro)
             try c.encode(learnIntros, forKey: .learnIntros)
             try c.encode(useAniSkip, forKey: .useAniSkip)
+            try c.encode(useIntroDB, forKey: .useIntroDB)
             try c.encode(nextEpisodeAtCredits, forKey: .nextEpisodeAtCredits)
             try c.encode(subFont, forKey: .subFont)
             try c.encode(subBold, forKey: .subBold)

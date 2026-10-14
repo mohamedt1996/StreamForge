@@ -65,6 +65,9 @@ struct RootView: View {
             while !Task.isCancelled {
                 await TorrentEngine.shared.refreshListIfRunning()
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // Cheap unless the bulk guide is older than its refresh interval (6 h). Runs after the
+                // first sleep so it never races the launch-time cache load.
+                if !Task.isCancelled { await GuideStore.shared.refreshIfStale() }
             }
         }
     }

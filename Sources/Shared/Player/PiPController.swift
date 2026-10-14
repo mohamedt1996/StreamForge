@@ -46,8 +46,9 @@ struct PiPHostSurface: UIViewRepresentable {
 /// mpv draws into a CAMetalLayer, which AVKit can't use. Two strategies:
 /// - **Hand-off** (MP4/MOV/HLS): an AVPlayer takes over at the current position and PiP uses its
 ///   AVPlayerLayer. mpv pauses; when PiP ends, mpv resumes where AVPlayer stopped.
-/// - **Frames** (MKV/TS/live): mpv keeps playing (and keeps the audio); its decoded frames are copied
-///   with `screenshot-raw` into an AVSampleBufferDisplayLayer at a reduced frame rate.
+/// - **Software** (MKV/TS/live): a second mpv instance using mpv's software render API takes over
+///   at the current position and renders PiP-sized frames into an AVSampleBufferDisplayLayer. It
+///   never touches the GPU, so it keeps playing while the app is in the background.
 @MainActor
 @Observable
 final class PiPController {
@@ -62,8 +63,7 @@ final class PiPController {
     @ObservationIgnored private var pip: AVPictureInPictureController?
     @ObservationIgnored private var proxy: PiPDelegateProxy?
     @ObservationIgnored private var avPlayer: AVPlayer?
-    @ObservationIgnored private var frameTimer: DispatchSourceTimer?
-    @ObservationIgnored private var timebase: CMTimebase?
+    @ObservationIgnored private var renderer: MPVSoftwareRenderer?
     @ObservationIgnored private var startTask: Task<Void, Never>?
 
     static var isSupported: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
@@ -103,25 +103,29 @@ final class PiPController {
             avPlayer = player
             controller = AVPictureInPictureController(contentSource: .init(playerLayer: hostView.playerLayer))
         } else {
+            guard let url = model.resolvedURL,
+                  let renderer = MPVSoftwareRenderer(layer: hostView.sampleLayer, userAgent: AppSettings.shared.values.customUserAgent) else {
+                isStarting = false
+                model.showToast("Picture in Picture isn't available for this stream")
+                return
+            }
             mode = .frames
             hostView.playerLayer.isHidden = true
             hostView.sampleLayer.isHidden = false
             hostView.sampleLayer.flush()
-            var tb: CMTimebase?
-            CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &tb)
-            if let tb {
-                CMTimebaseSetTime(tb, time: CMTime(seconds: max(0, model.position), preferredTimescale: 600))
-                CMTimebaseSetRate(tb, rate: model.isPaused ? 0 : 1)
-                hostView.sampleLayer.controlTimebase = tb
-            }
-            timebase = tb
-            syncProxy()
+            hostView.sampleLayer.controlTimebase = nil
+            let wasPlaying = !model.isPaused
+            renderer.load(url, start: model.isLive ? nil : model.position, headers: model.resolvedHeaders, live: model.isLive)
+            renderer.setPaused(!wasPlaying)
+            model.pauseForHandoff()
+            self.renderer = renderer
+            proxy.paused = !wasPlaying
+            proxy.live = model.isLive
+            proxy.duration = model.duration
+            proxy.position = model.position
             let source = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: hostView.sampleLayer, playbackDelegate: proxy)
             controller = AVPictureInPictureController(contentSource: source)
-            controller.requiresLinearPlayback = model.isLive && !model.canSeek
-            let fps = max(8, min(30, PlayerPreferences.shared.values.pipFrameRate))
-            frameTimer = Self.makeFrameTimer(player: model.player, layer: hostView.sampleLayer, timebase: tb, fps: fps)
-            model.pipSync = { [weak self] in self?.syncFromModel() }
+            controller.requiresLinearPlayback = model.isLive
         }
         controller.delegate = proxy
         controller.canStartPictureInPictureAutomaticallyFromInline = false
@@ -152,8 +156,6 @@ final class PiPController {
     }
 
     private func finish(restored: Bool) {
-        frameTimer?.cancel()
-        frameTimer = nil
         if mode == .handoff, let player = avPlayer {
             let t = player.currentTime().seconds
             let playing = player.rate > 0
@@ -161,13 +163,22 @@ final class PiPController {
             hostView.playerLayer.player = nil
             model?.resumeAfterHandoff(at: t.isFinite ? t : nil, play: playing || (restored && isActive))
         }
-        if mode == .frames {
-            model?.pipSync = nil
+        if mode == .frames, let renderer {
+            let t = renderer.position
+            let playing = !renderer.isPaused
+            renderer.destroy()
             hostView.sampleLayer.flush()
-            hostView.sampleLayer.controlTimebase = nil
+            if let model {
+                if model.isLive {
+                    model.resumeAfterHandoff(at: nil, play: playing || restored)
+                    model.goLive()
+                } else {
+                    model.resumeAfterHandoff(at: t, play: playing || (restored && isActive))
+                }
+            }
         }
+        renderer = nil
         avPlayer = nil
-        timebase = nil
         pip?.delegate = nil
         pip = nil
         proxy = nil
@@ -194,75 +205,33 @@ final class PiPController {
     }
 
     fileprivate func setPlaying(_ playing: Bool) {
-        model?.player.setFlag("pause", !playing)
-        if let timebase { CMTimebaseSetRate(timebase, rate: playing ? 1 : 0) }
+        if let renderer {
+            renderer.setPaused(!playing)
+        } else {
+            model?.player.setFlag("pause", !playing)
+        }
         proxy?.paused = !playing
         pip?.invalidatePlaybackState()
     }
 
     fileprivate func skip(by seconds: Double) {
+        if let renderer {
+            renderer.seek(by: seconds)
+            refreshProxyFromRenderer()
+            return
+        }
         guard let model, model.canSeek else { return }
         model.seek(by: seconds)
     }
 
-    private func syncFromModel() {
-        guard let model else { return }
-        if let timebase {
-            CMTimebaseSetTime(timebase, time: CMTime(seconds: max(0, model.position), preferredTimescale: 600))
-            CMTimebaseSetRate(timebase, rate: model.isPaused ? 0 : 1)
-        }
-        syncProxy()
+    private func refreshProxyFromRenderer() {
+        guard let renderer, let proxy else { return }
+        if let p = renderer.position { proxy.position = p }
+        if let d = renderer.duration, d > 0 { proxy.duration = d }
+        proxy.paused = renderer.isPaused
         pip?.invalidatePlaybackState()
     }
 
-    private func syncProxy() {
-        guard let model, let proxy else { return }
-        proxy.paused = model.isPaused
-        proxy.live = model.isLive
-        proxy.duration = model.duration
-        proxy.position = model.position
-    }
-
-    // MARK: Frame pump (runs off the main actor)
-
-    nonisolated private static func makeFrameTimer(player: MPVPlayer, layer: AVSampleBufferDisplayLayer,
-                                                   timebase: CMTimebase?, fps: Int) -> DispatchSourceTimer {
-        let queue = DispatchQueue(label: "streamforge.pip.frames", qos: .userInteractive)
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(1000 / fps), leeway: .milliseconds(5))
-        timer.setEventHandler {
-            guard let buffer = player.copyVideoFrame() else { return }
-            let time = timebase.map { CMTimebaseGetTime($0) } ?? CMClockGetTime(CMClockGetHostTimeClock())
-            guard let sample = makeSampleBuffer(buffer, time: time) else { return }
-            DispatchQueue.main.async {
-                if layer.status == .failed { layer.flush() }
-                layer.enqueue(sample)
-            }
-        }
-        timer.resume()
-        return timer
-    }
-
-    nonisolated private static func makeSampleBuffer(_ buffer: CVPixelBuffer, time: CMTime) -> CMSampleBuffer? {
-        var format: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: buffer,
-                                                           formatDescriptionOut: &format) == noErr,
-              let format else { return nil }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: time, decodeTimeStamp: .invalid)
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: buffer,
-                                                       formatDescription: format, sampleTiming: &timing,
-                                                       sampleBufferOut: &sample) == noErr,
-              let sample else { return nil }
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-           CFArrayGetCount(attachments) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        return sample
-    }
 }
 
 /// Non-isolated delegate object for AVKit. Queries answer from a state snapshot; actions hop to the main actor.

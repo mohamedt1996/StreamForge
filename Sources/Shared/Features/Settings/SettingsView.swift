@@ -783,6 +783,13 @@ struct PlayerSettingsView: View {
             } header: { Text("Detail pages") } footer: {
                 Text("Plays a muted trailer behind the artwork. Never on cellular or in Low Data Mode.")
             }
+            #else
+            Section {
+                Toggle("Autoplay trailers on detail pages", isOn: $settings.values.trailerAutoplay)
+                TextField("Invidious instance, e.g. https://yewtu.be", text: $settings.values.invidiousInstance)
+            } header: { Text("Detail pages") } footer: {
+                Text("Apple TV can't embed YouTube, so trailers stream through an Invidious instance you choose. Leave it empty to keep trailers off.")
+            }
             #endif
             Section {
                 TextField("Custom User-Agent", text: $settings.values.customUserAgent)

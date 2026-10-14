@@ -88,6 +88,7 @@ final class DispatcharrStore {
             servers.append(server)
         }
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+        CloudSync.shared.schedulePush()
         activate(server.id)
     }
 

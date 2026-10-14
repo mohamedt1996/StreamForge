@@ -93,6 +93,7 @@ final class AppSettings {
         var guideDaysStored: Int?
         var trailerAutoplayStored: Bool?
         var refreshGuideAutomaticallyStored: Bool?
+        var invidiousInstanceStored: String?
 
         /// Days of programme guide to download from Dispatcharr's XMLTV (1–14).
         var guideDays: Int {
@@ -103,6 +104,11 @@ final class AppSettings {
         var trailerAutoplay: Bool {
             get { trailerAutoplayStored ?? true }
             set { trailerAutoplayStored = newValue }
+        }
+        /// tvOS (no WebKit): an Invidious instance used to stream trailers as MP4. Empty = off.
+        var invidiousInstance: String {
+            get { invidiousInstanceStored ?? "" }
+            set { invidiousInstanceStored = newValue.trimmingCharacters(in: .whitespacesAndNewlines) }
         }
         /// Re-download the bulk guide every 6 hours.
         var refreshGuideAutomatically: Bool {

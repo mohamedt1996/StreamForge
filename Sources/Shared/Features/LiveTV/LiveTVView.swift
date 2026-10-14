@@ -34,6 +34,7 @@ struct LiveTVView: View {
             await store.refreshAll(force: true)
             await GuideStore.shared.refresh(force: true)
         }
+        #if os(iOS)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { router.push(.guide) } label: { Label("Guide", systemImage: "calendar.day.timeline.left") }
@@ -43,6 +44,7 @@ struct LiveTVView: View {
                     .disabled(store.channels.isEmpty)
             }
         }
+        #endif
         .sheet(item: $programmeChannel) { ChannelProgrammeSheet(channel: $0) }
         .onAppear {
             if filter == .all, !library.favoriteChannelIDs.isEmpty { filter = .favorites }
@@ -54,8 +56,17 @@ struct LiveTVView: View {
         #if os(tvOS)
         HStack(alignment: .top, spacing: 40) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) { filterButtons(vertical: true) }
-                    .padding(.vertical, 20)
+                VStack(alignment: .leading, spacing: 6) {
+                    // tvOS shows no navigation-bar toolbar inside the tab view, so these live here.
+                    HStack(spacing: 12) {
+                        Button { router.push(.guide) } label: { Label("Guide", systemImage: "calendar.day.timeline.left") }
+                        Button { openMultiview() } label: { Label("Multiview", systemImage: "rectangle.split.2x2") }
+                    }
+                    .font(.callout.weight(.semibold))
+                    .padding(.bottom, 10)
+                    filterButtons(vertical: true)
+                }
+                .padding(.vertical, 20)
             }
             .frame(width: 420)
             channelList

@@ -177,18 +177,20 @@ final class SourcesModel {
         let ep = episode
         let poster = item.poster
         let itemTitle = item.title
+        let itemID = item.id
         await AddonManager.shared.streams(type: type, id: id) { [weak self] addon, streams in
             guard let self else { return }
             self.loadingAddons.remove(addon.id)
             self.sources.append(contentsOf: streams.enumerated().compactMap { i, s in
-                Self.makeSource(s, index: i, addon: addon, episode: ep, poster: poster, itemTitle: itemTitle)
+                Self.makeSource(s, index: i, addon: addon, episode: ep, poster: poster, itemTitle: itemTitle, itemID: itemID)
             })
             for s in streams { self.subtitles.append(contentsOf: s.subtitles) }
         }
         loadingAddons = []
     }
 
-    static func makeSource(_ s: StremioStream, index: Int, addon: InstalledAddon, episode: EpisodeRef?, poster: URL?, itemTitle: String) -> PlaybackSource? {
+    static func makeSource(_ s: StremioStream, index: Int, addon: InstalledAddon, episode: EpisodeRef?, poster: URL?, itemTitle: String,
+                           itemID: String? = nil) -> PlaybackSource? {
         let name = s.name ?? addon.manifest.name
         let text = [s.name, s.title, s.description, s.hints?.filename].compactMap { $0 }.joined(separator: " ")
         let parsed = StreamTextParser.parse(text)
@@ -201,7 +203,8 @@ final class SourcesModel {
                 src.hasPrefix("tracker:") ? String(src.dropFirst("tracker:".count)) : nil
             }
             kind = .torrent(TorrentSource(infoHash: hash, fileIdx: s.fileIdx, filename: s.hints?.filename, trackers: trackers,
-                                          title: itemTitle, poster: poster, season: episode?.season, episode: episode?.episode))
+                                          title: itemTitle, poster: poster, season: episode?.season, episode: episode?.episode,
+                                          addonName: addon.manifest.name, itemID: itemID))
         } else if let ext = s.externalURL {
             kind = .external(ext)
         } else if let yt = s.ytID, let url = URL(string: "https://www.youtube.com/watch?v=\(yt)") {

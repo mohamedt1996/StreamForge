@@ -54,9 +54,12 @@ struct ChannelQuery: EntityStringQuery {
             let library = LibraryStore.shared
             var ids = library.favoriteChannelIDs
             for id in library.recentChannelIDs where !ids.contains(id) { ids.append(id) }
+            // Siri only matches spoken channel names ("Play BBC One") against these suggestions, so
+            // favorites and recents come first, then the rest of the lineup.
             var list = ids.compactMap { store.channel($0) }
-            if list.isEmpty { list = Array(store.channels.prefix(30)) }
-            return list.prefix(40).map { ChannelEntity(id: $0.id, name: $0.name, number: $0.number) }
+            let chosen = Set(list.map(\.id))
+            list += store.channels.filter { !chosen.contains($0.id) }
+            return list.prefix(150).map { ChannelEntity(id: $0.id, name: $0.name, number: $0.number) }
         }
     }
 }

@@ -133,6 +133,10 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         if capturing { text += string }
     }
 
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if capturing, let string = String(data: CDATABlock, encoding: .utf8) { text += string }
+    }
+
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         guard current != nil else { return }
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -226,6 +230,9 @@ final class GuideStore {
     private var listingsByKey: [String: [XCEPGListing]] = [:]
     private var serverID: UUID?
     @ObservationIgnored private var cacheLoadedFor: UUID?
+    /// When the last automatic download started; failed downloads aren't retried for 10 minutes.
+    @ObservationIgnored private var lastAutoAttempt: Date?
+    @ObservationIgnored private var cacheLoadTask: Task<Void, Never>?
     @ObservationIgnored private var sportsCache: (date: Date, revision: Int, channelCount: Int, entries: [LiveProgrammeEntry])?
 
     static let refreshInterval: TimeInterval = 6 * 3600
@@ -252,9 +259,19 @@ final class GuideStore {
     // MARK: Lookups
 
     /// Bulk programmes for a channel, sorted by start; nil when the guide doesn't cover it.
+    /// Dispatcharr's xmltv.php uses the channel number as the XMLTV channel id, which is also what
+    /// its XC API reports as `epg_channel_id`. Fall back to the number when the id is missing.
     func listings(for channel: XCChannel) -> [XCEPGListing]? {
-        guard let key = channel.epgChannelID, let list = listingsByKey[key], !list.isEmpty else { return nil }
-        return list
+        if let key = channel.epgChannelID?.trimmingCharacters(in: .whitespaces), !key.isEmpty,
+           let list = listingsByKey[key], !list.isEmpty {
+            return list
+        }
+        if let n = channel.number {
+            for key in [String(n), "\(n).0"] {
+                if let list = listingsByKey[key], !list.isEmpty { return list }
+            }
+        }
+        return nil
     }
 
     /// Binary search for the programme airing at `date`.
@@ -301,8 +318,18 @@ final class GuideStore {
     /// Loads the on-disk guide for the active server (once per server).
     func loadCacheIfNeeded() async {
         guard let server = DispatcharrStore.shared.activeServer else { return }
-        guard cacheLoadedFor != server.id else { return }
+        guard cacheLoadedFor != server.id else {
+            // Another caller is (or was) loading it: wait, so nobody mistakes "still decoding" for "stale".
+            await cacheLoadTask?.value
+            return
+        }
         cacheLoadedFor = server.id
+        let task = Task { await self.loadCache(server) }
+        cacheLoadTask = task
+        await task.value
+    }
+
+    private func loadCache(_ server: DispatcharrServer) async {
         if serverID != server.id { clear() }
         let url = FileStore.url(cacheName(server.id))
         let result: (GuideCacheFile, [String: [XCEPGListing]])? = await Task.detached(priority: .utility) {
@@ -324,6 +351,7 @@ final class GuideStore {
         earliest = nil
         latest = nil
         serverID = nil
+        lastAutoAttempt = nil
         revision += 1
         if !phase.isBusy { phase = .idle }
     }
@@ -343,6 +371,9 @@ final class GuideStore {
     func refreshIfStale() async {
         await loadCacheIfNeeded()
         guard AppSettings.shared.values.refreshGuideAutomatically || !hasData, isStale else { return }
+        if let lastAutoAttempt, Date().timeIntervalSince(lastAutoAttempt) < 600 { return }
+        guard DispatcharrStore.shared.activeServer != nil, !phase.isBusy else { return }
+        lastAutoAttempt = Date()
         await refresh(force: true)
     }
 

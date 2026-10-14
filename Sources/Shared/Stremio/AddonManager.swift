@@ -29,7 +29,10 @@ final class AddonManager {
         }
     }
 
-    private func save() { FileStore.save(addons, "addons.json", mirrorToDefaults: true) }
+    private func save() {
+        FileStore.save(addons, "addons.json", mirrorToDefaults: true)
+        CloudSync.shared.schedulePush()
+    }
 
     private func installDefaults() async {
         for url in [Self.cinemetaURL, Self.openSubtitlesURL] {

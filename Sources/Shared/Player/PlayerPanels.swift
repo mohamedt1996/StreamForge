@@ -179,6 +179,22 @@ extension PlayerScreen {
                 PlayerPreferences.shared.values.autoSkipIntro.toggle()
             }
         }
+        if model.markerSeriesID != nil {
+            let manual = model.manualMarkers
+            let introSubtitle: String? = markerIntroSubtitle(pending: model.pendingIntroStart, manual: manual)
+            sectionLabel("Skip markers for this series")
+            optionRow(model.pendingIntroStart == nil ? "Mark intro start here" : "Re-mark intro start here",
+                      subtitle: introSubtitle, selected: false) { model.markIntroStart() }
+            optionRow("Mark intro end here",
+                      subtitle: model.pendingIntroStart == nil ? "Uses 0:00 as the start if none is marked" : "At \(model.position.clockText)",
+                      selected: false) { model.markIntroEnd() }
+            optionRow("Mark credits start here",
+                      subtitle: manual?.creditsFromEnd.map { "Saved: \($0.clockText) before the end" },
+                      selected: false) { model.markCreditsStart() }
+            if manual != nil {
+                optionRow("Clear this series' markers", selected: false) { model.clearManualMarkers() }
+            }
+        }
         if model.isLive && model.timeshiftActive {
             sectionLabel("Live")
             optionRow("Jump to live", subtitle: model.behindLive > 3 ? "−\(model.behindLive.clockText) behind" : "You're live",
@@ -187,6 +203,12 @@ extension PlayerScreen {
         sectionLabel("Info")
         optionRow("Show statistics", selected: model.showStats) { model.showStats.toggle() }
         optionRow("Source: \(request.source.provider)", subtitle: request.source.title, selected: false) {}
+    }
+
+    func markerIntroSubtitle(pending: Double?, manual: IntroMemory.Manual?) -> String? {
+        if let pending { return "Start set at \(pending.clockText)" }
+        guard let start = manual?.introStart, let end = manual?.introEnd else { return nil }
+        return "Saved: \(start.clockText)–\(end.clockText)"
     }
 
     // MARK: Channels

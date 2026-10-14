@@ -179,6 +179,10 @@ final class PlayerModel: MPVPlayerDelegate {
     @ObservationIgnored private var seekChainTarget: Double = 0
     @ObservationIgnored private var seekChainAt = Date.distantPast
     @ObservationIgnored private var aniSkipTask: Task<Void, Never>?
+    @ObservationIgnored private var introDBSegments: [SkipSegment] = []
+    @ObservationIgnored private var introDBTask: Task<Void, Never>?
+    /// "Mark intro start" was pressed at this position; "Mark intro end" completes the range.
+    private(set) var pendingIntroStart: Double?
 
     // Audio (session values start from PlayerPreferences)
     var volume: Int = 100 { didSet { player.setDouble("volume", Double(max(0, min(200, volume)))) } }
@@ -326,6 +330,7 @@ final class PlayerModel: MPVPlayerDelegate {
         tickTask?.cancel()
         digitTask?.cancel()
         aniSkipTask?.cancel()
+        introDBTask?.cancel()
         toastTask?.cancel()
         pipSync = nil
         player.command("stop")
@@ -375,6 +380,7 @@ final class PlayerModel: MPVPlayerDelegate {
         resolvedURL = nil; resolvedHeaders = [:]
         skipSegments = []; aniSkipSegments = []; autoSkipped = []; seekChainOrigin = nil
         aniSkipTask?.cancel()
+        introDBSegments = []; introDBTask?.cancel(); pendingIntroStart = nil
         timeshiftActive = false; liveRangeStart = 0; liveRangeEnd = 0
     }
 
@@ -500,9 +506,21 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     func rebuildSkipSegments() {
-        var segs = ChapterSkipDetector.segments(from: chapters, duration: duration)
-        for a in aniSkipSegments where !segs.contains(where: { $0.kind == a.kind && abs($0.start - a.start) < 15 }) {
+        // Priority: manual (per series) > TheIntroDB > chapter names > AniSkip > learned.
+        var segs = introDBSegments
+        let others = ChapterSkipDetector.segments(from: chapters, duration: duration) + aniSkipSegments
+        for a in others where !segs.contains(where: { $0.kind == a.kind && ($0.overlaps(a) || abs($0.start - a.start) < 15) }) {
             segs.append(a)
+        }
+        if let manual = manualMarkers {
+            if let start = manual.introStart, let end = manual.introEnd, end > start, duration <= 0 || end < duration {
+                segs.removeAll { $0.kind == .intro }
+                segs.append(SkipSegment(kind: .intro, start: start, end: end, source: .manual))
+            }
+            if let fromEnd = manual.creditsFromEnd, duration > fromEnd + 60 {
+                segs.removeAll { $0.kind == .credits }
+                segs.append(SkipSegment(kind: .credits, start: duration - fromEnd, end: duration, source: .manual))
+            }
         }
         if !segs.contains(where: { $0.kind == .intro }), let key = introKey, let e = IntroMemory.shared.entry(key),
            duration <= 0 || e.end < duration * 0.5 {
@@ -510,6 +528,74 @@ final class PlayerModel: MPVPlayerDelegate {
             segs.append(SkipSegment(kind: .intro, start: max(0, e.start - 10), end: e.end, source: .learned))
         }
         skipSegments = segs.sorted { $0.start < $1.start }
+    }
+
+    // MARK: TheIntroDB
+
+    private func loadIntroDB() {
+        guard PlayerPreferences.shared.values.useIntroDB, !isLive, request.catchup == nil, duration > 0,
+              request.item.type == .movie || request.item.type == .series else { return }
+        let item = request.item
+        let ep = request.episode
+        let length = duration
+        let tmdb = MetadataService.shared.tmdb
+        introDBTask?.cancel()
+        introDBTask = Task { [weak self] in
+            var tmdbID = item.tmdbID
+            if tmdbID == nil, let imdb = item.imdbID, tmdb.isConfigured {
+                let found = try? await tmdb.find(imdbID: imdb)
+                tmdbID = found?.tmdbID
+            }
+            guard let id = tmdbID, id > 0 else { return }
+            let segs = await TheIntroDBClient.shared.segments(tmdbID: id, season: ep?.season, episode: ep?.episode, duration: length)
+            guard let self, !Task.isCancelled, self.request.episode == ep, self.request.item.id == item.id, !segs.isEmpty else { return }
+            self.introDBSegments = segs
+            self.rebuildSkipSegments()
+        }
+    }
+
+    // MARK: Manual markers (per series)
+
+    /// Series whose markers the user can set (episodes only).
+    var markerSeriesID: String? {
+        guard request.episode != nil, !isLive, request.catchup == nil else { return nil }
+        return request.item.id
+    }
+
+    var manualMarkers: IntroMemory.Manual? { markerSeriesID.flatMap { IntroMemory.shared.manual($0) } }
+
+    func markIntroStart() {
+        guard markerSeriesID != nil, hasStarted else { return }
+        pendingIntroStart = position
+        showToast("Intro start set at \(position.clockText). Now mark its end.")
+    }
+
+    func markIntroEnd() {
+        guard let id = markerSeriesID, hasStarted else { return }
+        let start = pendingIntroStart ?? 0
+        guard position > start + 5 else {
+            showToast("Play to the end of the intro first")
+            return
+        }
+        IntroMemory.shared.setManualIntro(id, start: start, end: position)
+        pendingIntroStart = nil
+        rebuildSkipSegments()
+        showToast("Intro marked \(start.clockText)–\(position.clockText) for this series")
+    }
+
+    func markCreditsStart() {
+        guard let id = markerSeriesID, hasStarted, duration > 0, position < duration - 5 else { return }
+        IntroMemory.shared.setManualCredits(id, fromEnd: duration - position)
+        rebuildSkipSegments()
+        showToast("Credits marked at \(position.clockText) for this series")
+    }
+
+    func clearManualMarkers() {
+        guard let id = markerSeriesID else { return }
+        IntroMemory.shared.forgetManual(id)
+        pendingIntroStart = nil
+        rebuildSkipSegments()
+        showToast("Markers cleared for this series")
     }
 
     private func loadAniSkip() {
@@ -771,7 +857,11 @@ final class PlayerModel: MPVPlayerDelegate {
         case "duration":
             let old = duration
             duration = (value as? Double) ?? 0
-            if old <= 0 && duration > 0 && !isLive { rebuildSkipSegments(); if aniSkipSegments.isEmpty { loadAniSkip() } }
+            if old <= 0 && duration > 0 && !isLive {
+                rebuildSkipSegments()
+                if aniSkipSegments.isEmpty { loadAniSkip() }
+                if introDBSegments.isEmpty { loadIntroDB() }
+            }
         case "pause":
             isPaused = (value as? Bool) ?? false
             updateNowPlaying()
@@ -807,6 +897,7 @@ final class PlayerModel: MPVPlayerDelegate {
         if fit != .fit { setFit(fit) }
         rebuildSkipSegments()
         loadAniSkip()
+        loadIntroDB()
         if timeshiftActive { refreshLiveWindow() }
         #if os(tvOS)
         scheduleDisplayCriteriaMatch()
