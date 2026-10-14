@@ -102,11 +102,6 @@ jobs:
         with:
           name: xcodebuild-ios-log
           path: xcodebuild-ios.log
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: StreamForge-unsigned.ipa
 
   tvos:
     name: tvOS
@@ -138,8 +133,29 @@ jobs:
         with:
           name: xcodebuild-tvos-log
           path: xcodebuild-tvos.log
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+
+  release:
+    name: Publish release
+    needs: [ios, tvos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: StreamForgeTV-unsigned.ipa
+          name: StreamForge-iOS-unsigned-ipa
+      - uses: actions/download-artifact@v4
+        with:
+          name: StreamForge-tvOS-unsigned-ipa
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: StreamForge 0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            Unsigned builds of ${{ github.sha }}. Sign and sideload with AltStore, SideStore, Sideloadly or similar.
+            - `StreamForge-unsigned.ipa`: iPhone and iPad (iOS 17+)
+            - `StreamForgeTV-unsigned.ipa`: Apple TV (tvOS 17+)
+          files: |
+            StreamForge-unsigned.ipa
+            StreamForgeTV-unsigned.ipa
