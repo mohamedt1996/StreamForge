@@ -250,3 +250,59 @@ extension PlayerScreen {
         #endif
     }
 }
+
+/// Stremio-style start screen: the title's artwork drifts and zooms slowly behind its logo or
+/// name while the stream (often a torrent) connects and buffers.
+struct LoadingArtworkView: View {
+    let request: PlaybackRequest
+    var status: String?
+    @State private var drift = false
+    @State private var pulse = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                RemoteImage(url: request.episode?.still ?? request.item.backdrop ?? request.item.poster)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .scaleEffect(drift ? 1.18 : 1.02)
+                    .offset(x: drift ? -geo.size.width * 0.04 : geo.size.width * 0.03,
+                            y: drift ? -geo.size.height * 0.02 : geo.size.height * 0.02)
+                    .clipped()
+                    .opacity(0.55)
+                LinearGradient(colors: [.black.opacity(0.2), .black.opacity(0.45), .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+                VStack(spacing: 18) {
+                    Spacer()
+                    if let logo = request.item.logo {
+                        RemoteImage(url: logo, contentMode: .fit)
+                            .frame(maxWidth: min(geo.size.width * 0.6, 520), maxHeight: 140)
+                            .opacity(pulse ? 1 : 0.75)
+                    } else {
+                        Text(request.item.title)
+                            .font(.system(size: 34, weight: .heavy))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(3)
+                            .opacity(pulse ? 1 : 0.8)
+                    }
+                    if let ep = request.episode {
+                        Text("\(ep.code) · \(ep.title)").font(.headline).foregroundStyle(.white.opacity(0.8))
+                    }
+                    Spacer()
+                    HStack(spacing: 10) {
+                        ProgressView().tint(.white)
+                        Text(status ?? "Starting…").font(.footnote.weight(.medium)).foregroundStyle(.white.opacity(0.8))
+                            .contentTransition(.opacity)
+                    }
+                    .padding(.bottom, 48)
+                }
+                .padding(.horizontal, 32)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 18).repeatForever(autoreverses: true)) { drift = true }
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
+        }
+    }
+}

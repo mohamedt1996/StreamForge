@@ -63,7 +63,10 @@ struct PlayerScreen: View {
                 .ignoresSafeArea()
                 .accessibilityHidden(true)
 
-            if model.isBuffering || !model.hasStarted { bufferingOverlay }
+            if !model.hasStarted && !model.isLive && model.errorText == nil {
+                LoadingArtworkView(request: model.request, status: model.statusText ?? model.bufferPercent.flatMap { $0 > 0 && $0 < 100 ? "Buffering \($0)%" : nil })
+                    .transition(.opacity)
+            } else if model.isBuffering || !model.hasStarted { bufferingOverlay }
             if let error = model.errorText { errorOverlay(error) }
 
             gestureLayer

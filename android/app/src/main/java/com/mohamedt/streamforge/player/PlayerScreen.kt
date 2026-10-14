@@ -56,6 +56,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
@@ -154,7 +156,9 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
             })
         }
 
-        if ((c.buffering || !c.started) && c.error == null) {
+        if (!c.started && !c.isLive && c.error == null) {
+            LoadingArtwork(c)
+        } else if ((c.buffering || !c.started) && c.error == null) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Color.White)
                 c.status?.let { Spacer(Modifier.height(10.dp)); Text(it, color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp) }
@@ -389,3 +393,44 @@ private fun Option(text: String, selected: Boolean, modifier: Modifier = Modifie
 
 @Suppress("unused")
 private val listIcon = Icons.Filled.List
+
+
+/** Stremio-style start screen: the artwork drifts and zooms slowly behind the title while the stream connects. */
+@Composable
+private fun LoadingArtwork(c: PlayerController) {
+    val r = c.request
+    val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "loading")
+    val drift by t.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(
+        androidx.compose.animation.core.tween(18_000, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        androidx.compose.animation.core.RepeatMode.Reverse), label = "drift")
+    val pulse by t.animateFloat(0.75f, 1f, androidx.compose.animation.core.infiniteRepeatable(
+        androidx.compose.animation.core.tween(1600), androidx.compose.animation.core.RepeatMode.Reverse), label = "pulse")
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        com.mohamedt.streamforge.ui.Artwork(
+            r.episode?.still ?: r.item.backdrop ?: r.item.poster,
+            Modifier.fillMaxSize().graphicsLayer {
+                val s = 1.02f + 0.16f * drift
+                scaleX = s; scaleY = s
+                translationX = size.width * (0.03f - 0.07f * drift)
+                translationY = size.height * (0.02f - 0.04f * drift)
+                alpha = 0.55f
+            },
+        )
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.2f), Color.Black.copy(alpha = 0.45f), Color.Black.copy(alpha = 0.9f)))))
+        Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (r.item.logo != null) {
+                com.mohamedt.streamforge.ui.Artwork(r.item.logo, Modifier.width(360.dp).height(130.dp).graphicsLayer { alpha = pulse },
+                    androidx.compose.ui.layout.ContentScale.Fit)
+            } else {
+                Text(r.item.title, fontSize = 34.sp, fontWeight = FontWeight.Black, maxLines = 3,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.graphicsLayer { alpha = pulse })
+            }
+            r.episode?.let { Spacer(Modifier.height(8.dp)); Text("${it.code} · ${it.title}", color = Color.White.copy(alpha = 0.8f), fontWeight = FontWeight.SemiBold) }
+        }
+        Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(10.dp))
+            Text(c.status ?: "Starting…", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+        }
+    }
+}
