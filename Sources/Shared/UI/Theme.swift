@@ -217,6 +217,15 @@ extension View {
         #endif
     }
 
+    /// Lets the app background show through lists (tvOS lists have no background to hide).
+    @ViewBuilder func hiddenListBackground() -> some View {
+        #if os(tvOS)
+        self
+        #else
+        self.scrollContentBackground(.hidden)
+        #endif
+    }
+
     func screenBackground() -> some View {
         background(Theme.background.ignoresSafeArea())
     }

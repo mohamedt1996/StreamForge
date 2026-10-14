@@ -43,7 +43,7 @@ struct SettingsView: View {
                 Text("StreamForge plays content from servers and addons you configure. It doesn't host or provide any content.")
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Settings")
     }
@@ -103,7 +103,7 @@ struct DispatcharrSettingsView: View {
                 }
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Dispatcharr")
         .sheet(isPresented: $adding) { DispatcharrServerForm(server: nil) }
@@ -296,7 +296,7 @@ struct AddonsSettingsView: View {
                 Button { Task { await addons.refreshManifests() } } label: { Label("Update All Manifests", systemImage: "arrow.clockwise") }
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Addons")
         #if os(iOS)
@@ -386,7 +386,7 @@ struct TorrentSettingsView: View {
                 if let status { Text(status).font(.footnote).foregroundStyle(Theme.secondaryText) }
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Torrents")
     }
@@ -439,7 +439,7 @@ struct MetadataSettingsView: View {
                 Toggle("Hide adult content", isOn: $settings.values.hideAdult)
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Metadata")
         #if os(iOS)
@@ -500,7 +500,7 @@ struct TraktSettingsView: View {
                 }
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Trakt")
         .onDisappear { task?.cancel() }
@@ -582,7 +582,7 @@ struct PlayerSettingsView: View {
                 Text("Some providers require a specific player User-Agent. Leave empty for the default.")
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Player")
     }
@@ -618,7 +618,7 @@ struct LiveSettingsView: View {
                 ForEach(store.seriesCategories) { cat in categoryToggle(cat.name, key: "series:\(cat.id)") }
             } header: { Text("Visible series categories") }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Live TV & Library")
     }

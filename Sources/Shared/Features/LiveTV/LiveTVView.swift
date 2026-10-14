@@ -60,7 +60,7 @@ struct LiveTVView: View {
                     filterButtons(vertical: true)
                 }
                 .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
+                .hiddenListBackground()
                 .frame(width: 290)
                 Divider()
                 channelList

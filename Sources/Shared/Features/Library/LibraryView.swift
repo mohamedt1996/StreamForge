@@ -132,7 +132,7 @@ struct TorrentsView: View {
                 }
             }
         }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Torrents")
         .toolbar {
@@ -184,7 +184,7 @@ struct RecordingsView: View {
             }
         }
         .overlay { if loading { ProgressView() } }
-        .scrollContentBackground(.hidden)
+        .hiddenListBackground()
         .screenBackground()
         .navigationTitle("Recordings")
         .refreshable { await load() }
