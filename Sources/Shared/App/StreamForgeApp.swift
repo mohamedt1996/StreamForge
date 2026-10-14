@@ -73,6 +73,7 @@ struct StreamForgeApp: App {
                     case .background:
                         library.flush()
                         SnapshotPublisher.publish()
+                        CloudSync.shared.push()
                     default:
                         break
                     }
@@ -85,6 +86,7 @@ struct StreamForgeApp: App {
         await guide.loadCacheIfNeeded()
         // Channels and the library come from the disk cache at launch, so deep links can run now.
         router.appDidLoad()
+        CloudSync.shared.start()
         await dispatcharr.refreshAll()
         StreamForgeShortcuts.updateAppShortcutParameters()
         async let watchlist: Void = trakt.refreshWatchlist()

@@ -112,7 +112,10 @@ final class AppSettings {
     }
 
     var values: Values {
-        didSet { FileStore.save(values, "settings.json", mirrorToDefaults: true) }
+        didSet {
+            FileStore.save(values, "settings.json", mirrorToDefaults: true)
+            CloudSync.shared.schedulePush()
+        }
     }
 
     private init() {

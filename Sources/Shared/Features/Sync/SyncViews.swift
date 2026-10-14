@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SyncSettingsView: View {
     var body: some View {
         List {
+            CloudSyncSection()
             Section {
                 NavigationLink { ReceiveSyncView() } label: {
                     Label(receiveTitle, systemImage: "square.and.arrow.down.on.square")
@@ -191,3 +192,42 @@ struct BackupSection: View {
     }
 }
 #endif
+
+
+/// iCloud: automatic sync between every device signed in to the same Apple ID.
+struct CloudSyncSection: View {
+    private var cloud: CloudSync { .shared }
+    @State private var busy = false
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(get: { cloud.isEnabled }, set: { cloud.isEnabled = $0 })) {
+                Label("iCloud Sync", systemImage: "icloud")
+            }
+            if cloud.isEnabled {
+                LabeledContent("Status", value: cloud.status.text)
+                if let device = cloud.lastRemoteDevice {
+                    LabeledContent("Last change from", value: device)
+                }
+                Button {
+                    busy = true
+                    Task {
+                        await cloud.syncNow()
+                        busy = false
+                    }
+                } label: {
+                    HStack {
+                        Label("Sync Now", systemImage: "arrow.triangle.2.circlepath.icloud")
+                        Spacer()
+                        if busy { ProgressView() }
+                    }
+                }
+                .disabled(!cloud.iCloudAvailable || busy)
+            }
+        } header: {
+            Text("iCloud")
+        } footer: {
+            Text("Keeps servers, addons, settings, profiles, favorites and watch progress the same on every iPhone, iPad and Apple TV signed in to your Apple ID. Passwords and PINs travel through iCloud Keychain. Requires a build signed with an Apple Developer account that has iCloud enabled; otherwise use local-network sync below.")
+        }
+    }
+}

@@ -43,6 +43,12 @@ targets:
         product: NukeUI
       - framework: Frameworks/TorrServerKit.xcframework
         embed: false
+      - target: StreamForgeWidgets
+    entitlements:
+      path: Support/iOS/StreamForge.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mohamedt.streamforge]
+        com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)com.mohamedt.streamforge
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge
@@ -75,7 +81,7 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: StreamForge connects to your Dispatcharr and TorrServer on your local network.
-        NSBonjourServices: [_http._tcp]
+        NSBonjourServices: [_http._tcp, _streamforge._tcp]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsArbitraryLoadsForMedia: true
@@ -110,6 +116,12 @@ targets:
         product: Nuke
       - package: Nuke
         product: NukeUI
+      - target: StreamForgeTopShelf
+    entitlements:
+      path: Support/tvOS/StreamForgeTV.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mohamedt.streamforge]
+        com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)com.mohamedt.streamforge
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge.tv
@@ -127,6 +139,7 @@ targets:
         UIUserInterfaceStyle: Dark
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: StreamForge connects to your Dispatcharr and TorrServer on your local network.
+        NSBonjourServices: [_http._tcp, _streamforge._tcp]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsArbitraryLoadsForMedia: true
@@ -134,6 +147,59 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: com.mohamedt.streamforge.links
             CFBundleURLSchemes: [streamforge, stremio]
+
+  StreamForgeWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/Extensions/Widgets
+      - path: Sources/Shared/Core/SharedSnapshot.swift
+    entitlements:
+      path: Support/Widgets/StreamForgeWidgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mohamedt.streamforge]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge.widgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES
+    info:
+      path: Support/Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: StreamForge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  StreamForgeTopShelf:
+    type: app-extension
+    platform: tvOS
+    sources:
+      - path: Sources/Extensions/TopShelf
+      - path: Sources/Shared/Core/SharedSnapshot.swift
+    entitlements:
+      path: Support/TopShelf/StreamForgeTopShelf.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mohamedt.streamforge]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge.tv.topshelf
+        TARGETED_DEVICE_FAMILY: "3"
+        SKIP_INSTALL: YES
+    info:
+      path: Support/TopShelf/Info.plist
+      properties:
+        CFBundleDisplayName: StreamForge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.tv-top-shelf
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ContentProvider
 
 schemes:
   StreamForge:

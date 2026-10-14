@@ -10,3 +10,5 @@ Support/tvOS/Info.plist
 Payload/
 .DS_Store
 *.whl
+Support/*/Info.plist
+Support/*/*.entitlements

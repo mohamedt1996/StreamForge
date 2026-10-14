@@ -119,11 +119,11 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         case "icon":
             if current != nil, current?.icon == nil, let src = attributeDict["src"] { current?.icon = src }
         case "new":
-            if current != nil { current?.flags = (current?.flags ?? 0) | 1 }
+            if var p = current { p.flags = (p.flags ?? 0) | 1; current = p }
         case "live":
-            if current != nil { current?.flags = (current?.flags ?? 0) | 2 }
+            if var p = current { p.flags = (p.flags ?? 0) | 2; current = p }
         case "premiere":
-            if current != nil { current?.flags = (current?.flags ?? 0) | 4 }
+            if var p = current { p.flags = (p.flags ?? 0) | 4; current = p }
         default:
             break
         }

@@ -97,6 +97,7 @@ final class LibraryStore {
             guard !Task.isCancelled else { return }
             FileStore.save(snapshot, name, mirrorToDefaults: true)
             SnapshotPublisher.schedule()
+            CloudSync.shared.schedulePush()
         }
     }
 
@@ -145,6 +146,45 @@ final class LibraryStore {
             FileStore.save(snap, Self.fileName(id), mirrorToDefaults: true)
         }
         reloadActiveProfile()
+    }
+
+    /// iCloud merge: positions keep the newest per title, watched marks are combined, and lists
+    /// (favorites, channels, hidden categories) come from the remote copy only when it is newer
+    /// than this device's last upload.
+    func mergeLibraries(_ map: [String: Data], remoteIsNewer: Bool) {
+        flush()
+        for (key, data) in map {
+            guard let id = UUID(uuidString: key), let remote = try? JSONDecoder().decode(Snapshot.self, from: data) else { continue }
+            var local = id == profileID ? currentSnapshot() : (FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot())
+            for (k, p) in remote.progress {
+                if let mine = local.progress[k], mine.updatedAt >= p.updatedAt { continue }
+                local.progress[k] = p
+            }
+            local.watched.formUnion(remote.watched)
+            for k in local.watched { local.progress[k] = nil }
+            if remoteIsNewer {
+                local.favorites = remote.favorites
+                local.favoriteChannelIDs = remote.favoriteChannelIDs
+                local.hiddenCategoryIDs = remote.hiddenCategoryIDs
+            }
+            FileStore.save(local, Self.fileName(id), mirrorToDefaults: true)
+        }
+        reloadActiveProfile()
+    }
+
+    /// Library documents trimmed to fit iCloud's key-value store (1 MB in total).
+    func exportLibrariesForCloud(profileIDs: [UUID]) -> [String: Data] {
+        flush()
+        var out: [String: Data] = [:]
+        for id in profileIDs {
+            var snap = id == profileID ? currentSnapshot() : (FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot())
+            let newest = snap.progress.values.sorted { $0.updatedAt > $1.updatedAt }.prefix(150)
+            snap.progress = Dictionary(uniqueKeysWithValues: newest.map { ($0.key, $0) })
+            snap.favorites = Array(snap.favorites.prefix(300))
+            if snap.watched.count > 4000 { snap.watched = Set(snap.watched.prefix(4000)) }
+            if let data = try? JSONEncoder().encode(snap) { out[id.uuidString] = data }
+        }
+        return out
     }
 
     /// Merges a position from another device / Trakt when it is newer than what we have.
