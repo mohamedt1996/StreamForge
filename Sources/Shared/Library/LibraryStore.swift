@@ -20,6 +20,8 @@ struct WatchProgress: Codable, Hashable, Identifiable {
 }
 
 /// Favorites, watch progress, history and channel preferences, persisted locally.
+/// Each profile has its own file ("library-<profileID>.json"); this store always reflects the
+/// active profile, so its API is the same as before profiles existed.
 @MainActor
 @Observable
 final class LibraryStore {
@@ -43,10 +45,40 @@ final class LibraryStore {
     private(set) var lastChannelID: Int?
     private(set) var hiddenCategoryIDs: Set<String> = []
 
-    private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// The profile whose library is loaded.
+    private(set) var profileID: UUID
+
+    static func fileName(_ profileID: UUID) -> String { "library-\(profileID.uuidString).json" }
 
     private init() {
-        let s = FileStore.load(Snapshot.self, "library.json") ?? Snapshot()
+        let pid = ProfileStore.shared.activeProfileID
+        profileID = pid
+        var loaded = FileStore.load(Snapshot.self, Self.fileName(pid))
+        // One-time migration of the pre-profiles library into the first profile.
+        if !UserDefaults.standard.bool(forKey: "library.migratedToProfiles") {
+            if loaded == nil, let legacy = FileStore.load(Snapshot.self, "library.json") {
+                loaded = legacy
+                FileStore.save(legacy, Self.fileName(pid), mirrorToDefaults: true)
+            }
+            UserDefaults.standard.set(true, forKey: "library.migratedToProfiles")
+        }
+        let s = loaded ?? Snapshot()
+        favorites = s.favorites
+        favoriteChannelIDs = s.favoriteChannelIDs
+        recentChannelIDs = s.recentChannelIDs
+        progress = s.progress
+        watched = s.watched
+        lastChannelID = s.lastChannelID
+        hiddenCategoryIDs = s.hiddenCategoryIDs
+    }
+
+    private func currentSnapshot() -> Snapshot {
+        Snapshot(favorites: favorites, favoriteChannelIDs: favoriteChannelIDs, recentChannelIDs: recentChannelIDs,
+                 progress: progress, watched: watched, lastChannelID: lastChannelID, hiddenCategoryIDs: hiddenCategoryIDs)
+    }
+
+    private func apply(_ s: Snapshot) {
         favorites = s.favorites
         favoriteChannelIDs = s.favoriteChannelIDs
         recentChannelIDs = s.recentChannelIDs
@@ -58,13 +90,71 @@ final class LibraryStore {
 
     private func scheduleSave() {
         saveTask?.cancel()
-        let snapshot = Snapshot(favorites: favorites, favoriteChannelIDs: favoriteChannelIDs, recentChannelIDs: recentChannelIDs,
-                                progress: progress, watched: watched, lastChannelID: lastChannelID, hiddenCategoryIDs: hiddenCategoryIDs)
+        let snapshot = currentSnapshot()
+        let name = Self.fileName(profileID)
         saveTask = Task {
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard !Task.isCancelled else { return }
-            FileStore.save(snapshot, "library.json", mirrorToDefaults: true)
+            FileStore.save(snapshot, name, mirrorToDefaults: true)
+            SnapshotPublisher.schedule()
         }
+    }
+
+    /// Writes pending changes immediately (before switching profiles or going to background).
+    func flush() {
+        guard saveTask != nil else { return }
+        saveTask?.cancel()
+        saveTask = nil
+        FileStore.save(currentSnapshot(), Self.fileName(profileID), mirrorToDefaults: true)
+    }
+
+    // MARK: Profiles
+
+    func switchProfile(to id: UUID) {
+        guard id != profileID else { return }
+        flush()
+        profileID = id
+        apply(FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot())
+    }
+
+    func reloadActiveProfile() {
+        saveTask?.cancel()
+        saveTask = nil
+        apply(FileStore.load(Snapshot.self, Self.fileName(profileID)) ?? Snapshot())
+    }
+
+    func deleteLibrary(profileID id: UUID) {
+        guard id != profileID else { return }
+        FileStore.remove(Self.fileName(id))
+    }
+
+    /// Raw library documents per profile id, for backups and device-to-device sync.
+    func exportLibraries(profileIDs: [UUID]) -> [String: Data] {
+        flush()
+        var out: [String: Data] = [:]
+        for id in profileIDs {
+            let snap = id == profileID ? currentSnapshot() : (FileStore.load(Snapshot.self, Self.fileName(id)) ?? Snapshot())
+            if let data = try? JSONEncoder().encode(snap) { out[id.uuidString] = data }
+        }
+        return out
+    }
+
+    func importLibraries(_ map: [String: Data]) {
+        for (key, data) in map {
+            guard let id = UUID(uuidString: key), let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { continue }
+            FileStore.save(snap, Self.fileName(id), mirrorToDefaults: true)
+        }
+        reloadActiveProfile()
+    }
+
+    /// Merges a position from another device / Trakt when it is newer than what we have.
+    func mergeRemoteProgress(item: MediaItem, episode: EpisodeRef?, fraction: Double, duration: Double, updatedAt: Date) {
+        let key = Self.key(item, episode)
+        guard !watched.contains(key), duration > 60, fraction > 0.01, fraction < 0.95 else { return }
+        if let local = progress[key], local.updatedAt >= updatedAt { return }
+        progress[key] = WatchProgress(key: key, item: item, episode: episode, position: fraction * duration,
+                                      duration: duration, updatedAt: updatedAt)
+        scheduleSave()
     }
 
     // MARK: Favorites

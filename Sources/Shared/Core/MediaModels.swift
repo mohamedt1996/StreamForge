@@ -87,6 +87,14 @@ struct EpisodeRef: Codable, Hashable, Identifiable {
     var code: String { String(format: "S%02dE%02d", season, episode) }
 }
 
+/// A TMDB movie collection ("franchise"), e.g. "The Lord of the Rings Collection".
+struct CollectionInfo: Hashable, Codable, Identifiable {
+    var id: Int
+    var name: String
+    var poster: URL?
+    var backdrop: URL?
+}
+
 struct Person: Identifiable, Hashable, Codable {
     var id: Int
     var name: String
@@ -122,6 +130,8 @@ struct MediaDetails {
     var certification: String?
     var status: String?
     var networks: [String] = []
+    /// TMDB collection this movie belongs to.
+    var collection: CollectionInfo?
 }
 
 extension TimeInterval {

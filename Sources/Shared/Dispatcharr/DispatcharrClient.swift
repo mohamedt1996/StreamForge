@@ -1,25 +1,90 @@
 import Foundation
 
-/// A configured Dispatcharr server. The XC password is the per-user "XC password" set in
-/// Dispatcharr (Users → edit → XC password). The web password is optional and unlocks DVR.
+/// How the app signs in to a Dispatcharr server.
+enum DispatcharrAuthMode: String, Codable, CaseIterable, Identifiable {
+    /// Dispatcharr username + web password. The app gets a JWT for the REST API and reads the
+    /// user's XC password from /api/accounts/users/me/.
+    case account
+    /// A Dispatcharr API key (X-API-Key). The username and XC password come from /me.
+    case apiKey
+    /// Username + XC password only (Xtream Codes API). An optional web password unlocks DVR.
+    case xc
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .account: return "Account login (recommended)"
+        case .apiKey: return "API key"
+        case .xc: return "XC credentials (advanced)"
+        }
+    }
+    var shortLabel: String {
+        switch self {
+        case .account: return "Account"
+        case .apiKey: return "API key"
+        case .xc: return "XC"
+        }
+    }
+}
+
+/// A configured Dispatcharr server. Streaming always uses the Xtream Codes API with the user's
+/// XC password (Users → edit → XC Password in Dispatcharr); account / API-key servers fetch that
+/// password automatically. Secrets live in the Keychain.
 struct DispatcharrServer: Codable, Hashable, Identifiable {
     var id: UUID = UUID()
     var name: String
     var baseURL: String
     var username: String
+    var authMode: DispatcharrAuthMode = .xc
+    /// Dispatcharr channel profile to show (nil = every channel the account can see).
+    var channelProfileID: Int?
 
     var xcPassword: String {
         get { Keychain.get("dispatcharr.xc.\(id)") ?? "" }
         nonmutating set { Keychain.set(newValue, for: "dispatcharr.xc.\(id)") }
     }
+    /// The Dispatcharr web (login) password: account mode, or DVR in XC mode.
     var webPassword: String {
         get { Keychain.get("dispatcharr.web.\(id)") ?? "" }
         nonmutating set { Keychain.set(newValue, for: "dispatcharr.web.\(id)") }
     }
+    var apiKey: String {
+        get { Keychain.get("dispatcharr.apikey.\(id)") ?? "" }
+        nonmutating set { Keychain.set(newValue.trimmed, for: "dispatcharr.apikey.\(id)") }
+    }
 
     var url: URL? { URL.normalizedBase(baseURL) }
 
-    enum CodingKeys: String, CodingKey { case id, name, baseURL, username }
+    /// Whether the REST API (DVR, profiles, /me) can be used.
+    var hasRESTAccess: Bool {
+        switch authMode {
+        case .apiKey: return !apiKey.isEmpty
+        case .account, .xc: return !webPassword.isEmpty && !username.isEmpty
+        }
+    }
+
+    func clearSecrets() {
+        xcPassword = ""
+        webPassword = ""
+        apiKey = ""
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, baseURL, username, authMode, channelProfileID }
+}
+
+extension DispatcharrServer {
+    // In an extension so the memberwise initializer stays available.
+    // Servers saved by 1.0 have no authMode: they keep working as XC servers (with DVR if a web
+    // password was saved), exactly as before.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        baseURL = (try? c.decodeIfPresent(String.self, forKey: .baseURL)) ?? ""
+        username = (try? c.decodeIfPresent(String.self, forKey: .username)) ?? ""
+        authMode = (try? c.decodeIfPresent(DispatcharrAuthMode.self, forKey: .authMode)) ?? .xc
+        channelProfileID = try? c.decodeIfPresent(Int.self, forKey: .channelProfileID)
+    }
 }
 
 /// Client for Dispatcharr's Xtream Codes API: live channels, EPG, movies, series, catch-up.
@@ -92,6 +157,16 @@ struct XtreamClient {
 
     func seriesInfo(_ id: Int) async throws -> XCSeriesInfo {
         try await http.get(XCSeriesInfo.self, try api("get_series_info", ["series_id": String(id)]))
+    }
+
+    // MARK: Guide
+
+    /// Dispatcharr's XMLTV export for this XC user. `days` / `prev_days` are honoured by Dispatcharr
+    /// (capped server-side at 365 / 30).
+    func xmltvURL(days: Int, prevDays: Int) throws -> URL {
+        var q: [String: String?] = ["username": server.username, "password": server.xcPassword, "days": String(max(1, days))]
+        if prevDays > 0 { q["prev_days"] = String(prevDays) }
+        return try base.appendingRawPath("xmltv.php").appendingQuery(q)
     }
 
     // MARK: Playback URLs
@@ -168,7 +243,97 @@ struct DispatcharrRecording: Decodable, Identifiable, Hashable {
     var isRecording: Bool { let n = Date(); return start <= n && n < end }
 }
 
-/// Optional REST client: logs in with the web password and manages DVR recordings.
+/// The Dispatcharr user returned by /api/accounts/users/me/.
+struct DispatcharrUser: Hashable {
+    var id: Int?
+    var username: String
+    var xcPassword: String?
+    var epgDays: Int?
+    var userLevel: Int?
+    var channelProfileIDs: [Int]
+
+    /// Parsed with JSONSerialization because `custom_properties` is free-form JSON (sometimes
+    /// even a JSON string).
+    static func parse(_ data: Data) throws -> DispatcharrUser {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            throw HTTPError.decoding("users/me: not a JSON object")
+        }
+        var props = obj["custom_properties"] as? [String: Any]
+        if props == nil, let raw = obj["custom_properties"] as? String, let d = raw.data(using: .utf8) {
+            props = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        }
+        let profiles = (obj["channel_profiles"] as? [Any] ?? []).compactMap { JSONValue.int($0) ?? JSONValue.int(($0 as? [String: Any])?["id"]) }
+        return DispatcharrUser(
+            id: JSONValue.int(obj["id"]),
+            username: JSONValue.string(obj["username"]) ?? "",
+            xcPassword: JSONValue.string(props?["xc_password"]),
+            epgDays: JSONValue.int(props?["epg_days"]),
+            userLevel: JSONValue.int(obj["user_level"]),
+            channelProfileIDs: profiles)
+    }
+}
+
+/// A Dispatcharr channel profile. `channelIDs` is nil when the API response didn't expose
+/// membership in a shape we understand (then no client-side filtering happens).
+struct DispatcharrChannelProfile: Hashable, Identifiable {
+    var id: Int
+    var name: String
+    var channelIDs: Set<Int>?
+
+    static func parseList(_ data: Data) -> [DispatcharrChannelProfile] {
+        let root = (try? JSONSerialization.jsonObject(with: data))
+        let items: [[String: Any]]
+        if let list = root as? [[String: Any]] {
+            items = list
+        } else if let page = root as? [String: Any], let list = page["results"] as? [[String: Any]] {
+            items = list
+        } else {
+            return []
+        }
+        return items.compactMap { obj in
+            guard let id = JSONValue.int(obj["id"]) else { return nil }
+            let name = JSONValue.string(obj["name"]) ?? "Profile \(id)"
+            var ids: Set<Int>?
+            if let channels = obj["channels"] as? [Any] {
+                var set = Set<Int>()
+                var understood = true
+                for entry in channels {
+                    if let n = JSONValue.int(entry) {
+                        set.insert(n)
+                    } else if let d = entry as? [String: Any] {
+                        if let enabled = d["enabled"] as? Bool, !enabled { continue }
+                        if let n = JSONValue.int(d["channel_id"]) ?? JSONValue.int(d["channel"]) ?? JSONValue.int(d["id"]) {
+                            set.insert(n)
+                        } else {
+                            understood = false
+                        }
+                    } else {
+                        understood = false
+                    }
+                }
+                ids = understood ? set : nil
+            }
+            return DispatcharrChannelProfile(id: id, name: name, channelIDs: ids)
+        }
+    }
+}
+
+/// Loose JSON value helpers for JSONSerialization output.
+enum JSONValue {
+    static func string(_ v: Any?) -> String? {
+        if let s = v as? String { return s.isEmpty ? nil : s }
+        if let n = v as? NSNumber { return n.stringValue }
+        return nil
+    }
+    static func int(_ v: Any?) -> Int? {
+        if let n = v as? NSNumber { return n.intValue }
+        if let s = v as? String { return Int(s.trimmed) }
+        return nil
+    }
+}
+
+/// Dispatcharr REST API client. Authenticates with an API key (X-API-Key) or with the web
+/// password (JWT access token, refreshed automatically). Used for DVR, /me and channel profiles.
 actor DispatcharrREST {
     let server: DispatcharrServer
     private var access: String?
@@ -184,30 +349,64 @@ actor DispatcharrREST {
         return u
     }
 
+    private var usesAPIKey: Bool { server.authMode == .apiKey }
+
+    /// Gets a JWT pair with the username + web password. A no-op for API-key servers.
     func login() async throws {
+        if usesAPIKey {
+            guard !server.apiKey.isEmpty else { throw HTTPError.transport("No API key saved for this server.") }
+            return
+        }
+        guard !server.webPassword.isEmpty else {
+            throw HTTPError.transport("Add your Dispatcharr password in Settings → Dispatcharr.")
+        }
         let body = ["username": server.username, "password": server.webPassword]
         let pair = try await http.send(TokenPair.self, try base().appendingRawPath("api/accounts/token/"), body: body)
         access = pair.access
-        refresh = pair.refresh
+        if let r = pair.refresh { refresh = r }
     }
 
     private func authorized() async throws -> [String: String] {
+        if usesAPIKey { return ["X-API-Key": server.apiKey] }
         if access == nil { try await login() }
         return ["Authorization": "Bearer \(access ?? "")"]
+    }
+
+    /// Exchanges the refresh token for a new access token; falls back to a full login.
+    private func renew() async {
+        access = nil
+        guard !usesAPIKey else { return }
+        if let refresh,
+           let pair = try? await http.send(TokenPair.self, try base().appendingRawPath("api/accounts/token/refresh/"), body: ["refresh": refresh]) {
+            access = pair.access
+            if let r = pair.refresh { self.refresh = r }
+        }
     }
 
     private func withAuth<T>(_ work: ([String: String]) async throws -> T) async throws -> T {
         do {
             return try await work(try await authorized())
         } catch HTTPError.unauthorized {
-            access = nil
-            if let refresh {
-                if let pair = try? await http.send(TokenPair.self, try base().appendingRawPath("api/accounts/token/refresh/"), body: ["refresh": refresh]) {
-                    access = pair.access
-                }
-            }
+            if usesAPIKey { throw HTTPError.transport("Dispatcharr rejected the API key.") }
+            await renew()
             return try await work(try await authorized())
         }
+    }
+
+    // MARK: Account
+
+    func me() async throws -> DispatcharrUser {
+        let data = try await withAuth { headers in
+            try await http.data(try base().appendingRawPath("api/accounts/users/me/"), headers: headers)
+        }
+        return try DispatcharrUser.parse(data)
+    }
+
+    func channelProfiles() async throws -> [DispatcharrChannelProfile] {
+        let data = try await withAuth { headers in
+            try await http.data(try base().appendingRawPath("api/channels/profiles/"), headers: headers)
+        }
+        return DispatcharrChannelProfile.parseList(data)
     }
 
     var playbackHeaders: [String: String] {

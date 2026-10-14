@@ -24,6 +24,9 @@ final class TraktService {
 
     private(set) var username: String?
     private(set) var watchlist: [MediaItem] = []
+    /// Next unwatched aired episode per show, most recently watched show first.
+    var upNext: [UpNextEntry] = []
+    @ObservationIgnored var upNextLoadedAt: Date?
     private var token: Token? {
         didSet {
             if let token, let data = try? JSONEncoder().encode(token) {
@@ -80,6 +83,8 @@ final class TraktService {
         token = nil
         username = nil
         watchlist = []
+        upNext = []
+        upNextLoadedAt = nil
         UserDefaults.standard.removeObject(forKey: "trakt.username")
     }
 
@@ -145,5 +150,187 @@ final class TraktService {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
         _ = try? await HTTPClient.shared.data(base.appendingRawPath("scrobble/\(action.rawValue)"), method: "POST", headers: headers, body: data)
+    }
+}
+
+// MARK: - Playback sync, Up Next, token transfer
+
+struct TraktIDs: Decodable, Hashable {
+    var trakt: Int?
+    var slug: String?
+    var imdb: String?
+    var tmdb: Int?
+    var tvdb: Int?
+}
+
+/// Next episode to watch for a show the user follows on Trakt.
+struct UpNextEntry: Identifiable, Hashable {
+    var item: MediaItem
+    var episode: EpisodeRef
+    var lastWatchedAt: Date
+    var firstAired: Date?
+    var id: String { item.id }
+
+    /// Aired within the last 7 days.
+    var isNew: Bool {
+        guard let firstAired else { return false }
+        let age = Date().timeIntervalSince(firstAired)
+        return age >= 0 && age < 7 * 86_400
+    }
+}
+
+enum TraktDate {
+    static func parse(_ s: String?) -> Date? {
+        guard let s else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
+    }
+}
+
+extension TraktService {
+    private struct PlaybackEntry: Decodable {
+        struct Movie: Decodable { var title: String; var year: Int?; var ids: TraktIDs; var runtime: Int? }
+        struct Show: Decodable { var title: String; var year: Int?; var ids: TraktIDs; var runtime: Int? }
+        struct Episode: Decodable { var season: Int; var number: Int; var title: String?; var ids: TraktIDs?; var runtime: Int? }
+        var progress: Double
+        var paused_at: String?
+        var type: String
+        var movie: Movie?
+        var show: Show?
+        var episode: Episode?
+    }
+
+    private struct WatchedShow: Decodable {
+        struct Show: Decodable { var title: String; var year: Int?; var ids: TraktIDs }
+        var last_watched_at: String?
+        var show: Show
+    }
+
+    private struct ShowProgress: Decodable {
+        struct Episode: Decodable { var season: Int; var number: Int; var title: String?; var first_aired: String?; var overview: String? }
+        var aired: Int?
+        var completed: Int?
+        var next_episode: Episode?
+    }
+
+    /// Server item when the user's Dispatcharr has it (so playback uses the server), else a
+    /// Cinemeta / TMDB item.
+    func mediaItem(type: MediaType, title: String, year: Int?, ids: TraktIDs) -> MediaItem {
+        let store = DispatcharrStore.shared
+        if let serverID = store.activeServer?.id {
+            if type == .movie, let m = store.matchMovie(tmdbID: ids.tmdb, imdbID: ids.imdb, title: title, year: year) {
+                return m.mediaItem(serverID: serverID)
+            }
+            if type == .series, let s = store.matchSeries(tmdbID: ids.tmdb, imdbID: ids.imdb, title: title) {
+                return s.mediaItem(serverID: serverID)
+            }
+        }
+        let poster: URL? = ids.imdb.flatMap { URL(string: "https://images.metahub.space/poster/medium/\($0)/img") }
+        let backdrop: URL? = ids.imdb.flatMap { URL(string: "https://images.metahub.space/background/medium/\($0)/img") }
+        return MediaItem(id: ids.imdb ?? "tmdb:\(type.rawValue):\(ids.tmdb ?? 0)", type: type, title: title, year: year,
+                         poster: poster, backdrop: backdrop, imdbID: ids.imdb, tmdbID: ids.tmdb,
+                         origin: ids.imdb.map { .stremio(addonID: "com.linvo.cinemeta", metaID: $0) } ?? .tmdb(id: ids.tmdb ?? 0))
+    }
+
+    /// Pulls in-progress positions from Trakt (GET /sync/playback) into the active profile.
+    @discardableResult
+    func syncPlayback() async -> Int {
+        guard isSignedIn else { return 0 }
+        await refreshTokenIfNeeded()
+        let url = base.appendingRawPath("sync/playback").appendingQuery(["extended": "full"])
+        guard let list = try? await HTTPClient.shared.get(LossyArray<PlaybackEntry>.self, url, headers: headers).elements else { return 0 }
+        let library = LibraryStore.shared
+        var merged = 0
+        for e in list {
+            let pausedAt = TraktDate.parse(e.paused_at) ?? Date()
+            let fraction = e.progress / 100
+            if let m = e.movie {
+                let item = mediaItem(type: .movie, title: m.title, year: m.year, ids: m.ids)
+                let runtime = m.runtime ?? 0
+                let duration = Double(runtime > 0 ? runtime * 60 : 6000)
+                library.mergeRemoteProgress(item: item, episode: nil, fraction: fraction, duration: duration, updatedAt: pausedAt)
+                merged += 1
+            } else if let s = e.show, let ep = e.episode {
+                let item = mediaItem(type: .series, title: s.title, year: s.year, ids: s.ids)
+                let episode = EpisodeRef(id: "trakt-\(s.ids.trakt ?? 0)-\(ep.season)-\(ep.number)", season: ep.season, episode: ep.number,
+                                         title: ep.title ?? "Episode \(ep.number)",
+                                         stremioVideoID: s.ids.imdb.map { "\($0):\(ep.season):\(ep.number)" })
+                let runtime = ep.runtime ?? s.runtime ?? 0
+                let duration = Double(runtime > 0 ? runtime * 60 : 2700)
+                library.mergeRemoteProgress(item: item, episode: episode, fraction: fraction, duration: duration, updatedAt: pausedAt)
+                merged += 1
+            }
+        }
+        return merged
+    }
+
+    /// Builds Up Next from GET /sync/watched/shows + /shows/{id}/progress/watched.
+    func refreshUpNext(force: Bool = false) async {
+        guard isSignedIn else {
+            upNext = []
+            return
+        }
+        if !force, let upNextLoadedAt, Date().timeIntervalSince(upNextLoadedAt) < 1800 { return }
+        upNextLoadedAt = Date()
+        await refreshTokenIfNeeded()
+        let headers = self.headers
+        let base = self.base
+        let watchedURL = base.appendingRawPath("sync/watched/shows").appendingQuery(["extended": "noseasons"])
+        guard let watched = try? await HTTPClient.shared.get(LossyArray<WatchedShow>.self, watchedURL, headers: headers).elements else { return }
+        let recent = Array(watched
+            .map { ($0, TraktDate.parse($0.last_watched_at) ?? .distantPast) }
+            .sorted { $0.1 > $1.1 }
+            .prefix(25))
+
+        let requests: [(Int, URL)] = recent.enumerated().compactMap { pair in
+            let show = pair.element.0.show
+            guard let traktID = show.ids.trakt.map({ String($0) }) ?? show.ids.slug else { return nil }
+            let url = base.appendingRawPath("shows/\(traktID)/progress/watched")
+                .appendingQuery(["hidden": "false", "specials": "false", "extended": "full"])
+            return (pair.offset, url)
+        }
+        var episodes: [Int: ShowProgress.Episode] = [:]
+        await withTaskGroup(of: (Int, ShowProgress.Episode?).self) { group in
+            var index = 0
+            while index < min(4, requests.count) {
+                let r = requests[index]
+                index += 1
+                group.addTask { (r.0, (try? await HTTPClient.shared.get(ShowProgress.self, r.1, headers: headers))?.next_episode) }
+            }
+            for await (i, ep) in group {
+                if let ep { episodes[i] = ep }
+                if index < requests.count {
+                    let r = requests[index]
+                    index += 1
+                    group.addTask { (r.0, (try? await HTTPClient.shared.get(ShowProgress.self, r.1, headers: headers))?.next_episode) }
+                }
+            }
+        }
+        var entries: [UpNextEntry] = []
+        for i in episodes.keys.sorted() {
+            guard let ep = episodes[i] else { continue }
+            let show = recent[i].0.show
+            let item = mediaItem(type: .series, title: show.title, year: show.year, ids: show.ids)
+            let episode = EpisodeRef(id: "trakt-\(show.ids.trakt ?? 0)-\(ep.season)-\(ep.number)", season: ep.season,
+                                     episode: ep.number, title: ep.title ?? "Episode \(ep.number)", overview: ep.overview,
+                                     airDate: ep.first_aired.map { String($0.prefix(10)) },
+                                     stremioVideoID: show.ids.imdb.map { "\($0):\(ep.season):\(ep.number)" })
+            entries.append(UpNextEntry(item: item, episode: episode, lastWatchedAt: recent[i].1, firstAired: TraktDate.parse(ep.first_aired)))
+        }
+        upNext = entries
+        NewEpisodeTracker.shared.rebuild()
+    }
+
+    /// The raw token, for moving the Trakt sign-in to another device.
+    var exportedToken: String? { Keychain.get("trakt.token") }
+
+    func importToken(_ raw: String) async {
+        guard let data = raw.data(using: .utf8), let t = try? JSONDecoder().decode(Token.self, from: data) else { return }
+        token = t
+        await loadProfile()
+        await refreshWatchlist()
     }
 }

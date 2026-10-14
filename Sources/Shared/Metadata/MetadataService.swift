@@ -134,6 +134,7 @@ final class MetadataService {
         d.tagline = d.tagline ?? t.tagline.flatMap { $0.isEmpty ? nil : $0 }
         d.status = t.status
         d.networks = t.networks?.map(\.name) ?? []
+        if d.collection == nil { d.collection = t.belongs_to_collection?.info }
         if let v = t.vote_average, v > 0 {
             d.ratings.append(RatingBadge(source: "TMDB", value: String(format: "%.1f", v)))
             if d.item.rating == nil { d.item.rating = v }

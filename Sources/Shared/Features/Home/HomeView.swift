@@ -16,17 +16,24 @@ final class HomeModel {
     private(set) var catalogShelves: [CatalogShelf] = []
     private(set) var hero: [MediaItem] = []
     private var loadedAt: Date?
+    private var loadedProfile: UUID?
 
     func load(force: Bool = false) async {
-        if !force, let loadedAt, Date().timeIntervalSince(loadedAt) < 600 { return }
+        let profile = ProfileStore.shared.activeProfileID
+        if !force, loadedProfile == profile, let loadedAt, Date().timeIntervalSince(loadedAt) < 600 { return }
         loadedAt = Date()
+        loadedProfile = profile
         let tmdb = MetadataService.shared.tmdb
         async let movies: [MediaItem] = tmdb.isConfigured ? ((try? await tmdb.trending(.movie)) ?? []) : []
         async let series: [MediaItem] = tmdb.isConfigured ? ((try? await tmdb.trending(.series)) ?? []) : []
         async let shelves = loadCatalogs()
-        trendingMovies = await movies
-        trendingSeries = await series
-        catalogShelves = await shelves
+        trendingMovies = KidsFilter.filter(await movies)
+        trendingSeries = KidsFilter.filter(await series)
+        catalogShelves = (await shelves).compactMap { shelf -> CatalogShelf? in
+            var s = shelf
+            s.items = KidsFilter.filter(shelf.items)
+            return s.items.isEmpty ? nil : s
+        }
         rebuildHero()
     }
 
@@ -90,6 +97,8 @@ struct HomeView: View {
                     welcomeCard
                 }
                 continueWatching
+                upNext
+                liveSports
                 favoriteChannels
                 recentlyAdded
                 Shelf(title: "Your Trakt Watchlist", items: trakt.watchlist) { item in
@@ -115,17 +124,73 @@ struct HomeView: View {
         .refreshable {
             await store.refreshAll(force: true)
             await model.load(force: true)
+            await trakt.refreshUpNext(force: true)
+            await GuideStore.shared.refreshIfStale()
         }
-        .task { await model.load() }
+        .task(id: ProfileStore.shared.activeProfileID) { await model.load() }
         #if os(iOS)
         .navigationTitle("StreamForge")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { ProfileStore.shared.needsSelection = true } label: {
+                    ProfileAvatar(profile: ProfileStore.shared.activeProfile, size: 30)
+                }
+                .accessibilityLabel("Switch profile")
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { router.push(.torrents) } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .overlay(alignment: .topTrailing) {
+                            let count = TorrentEngine.shared.activeCount + DownloadManager.shared.activeCount
+                            if count > 0 {
+                                Text("\(count)")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(Theme.live, in: Capsule())
+                                    .offset(x: 8, y: -6)
+                            }
+                        }
+                }
+                .accessibilityLabel("Activity")
                 Button { router.push(.library) } label: { Image(systemName: "books.vertical") }
                 Button { router.push(.settings) } label: { Image(systemName: "gearshape") }
             }
         }
+        #else
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { ProfileStore.shared.needsSelection = true } label: {
+                    Label(ProfileStore.shared.activeProfile.name, systemImage: "person.crop.circle")
+                }
+            }
+        }
         #endif
+    }
+
+    @ViewBuilder
+    private var upNext: some View {
+        Shelf(title: "Up Next", subtitle: "Next episodes from Trakt", items: trakt.upNext,
+              seeAll: trakt.upNext.count > 6 ? { router.push(.upNext) } : nil) { entry in
+            Button { router.push(.detail(entry.item)) } label: {
+                LandscapeCard(title: entry.item.title, subtitle: "\(entry.episode.code) · \(entry.episode.title)",
+                              image: entry.item.backdrop, fallbackImage: entry.item.poster,
+                              badge: entry.isNew ? "NEW" : nil)
+            }
+            .cardButtonStyle()
+        }
+    }
+
+    @ViewBuilder
+    private var liveSports: some View {
+        let entries = GuideStore.shared.liveSportsNow(channels: store.channels)
+        Shelf(title: "Live Sports Now", subtitle: "Matches and events on air", items: entries,
+              seeAll: { router.tab = .live }) { entry in
+            Button { player.playChannel(entry.channel, in: entries.map(\.channel)) } label: {
+                SportsTile(entry: entry)
+            }
+            .cardButtonStyle()
+        }
     }
 
     private func posterButton(_ item: MediaItem) -> some View {
@@ -177,18 +242,7 @@ struct HomeView: View {
     }
 
     private func resume(_ entry: WatchProgress) {
-        // Re-resolve sources so expired debrid/torrent links still work; detail view handles the picking.
-        if case .dispatcharrMovie(_, let id, let ext) = entry.item.origin, let url = store.client?.movieURL(id, ext: ext) {
-            player.play(PlaybackRequest(item: entry.item, episode: nil,
-                                        source: PlaybackSource(id: "resume", kind: .direct(url, headers: [:]), title: entry.item.title, provider: "Server"),
-                                        startPosition: entry.position - 5))
-        } else if let ep = entry.episode, let eid = ep.dispatcharrEpisodeID, let url = store.client?.episodeURL(eid, ext: ep.ext ?? "mp4") {
-            player.play(PlaybackRequest(item: entry.item, episode: ep,
-                                        source: PlaybackSource(id: "resume", kind: .direct(url, headers: [:]), title: entry.item.title, provider: "Server"),
-                                        startPosition: entry.position - 5))
-        } else {
-            router.push(.detail(entry.item))
-        }
+        router.resume(entry)
     }
 
     @ViewBuilder
@@ -214,6 +268,51 @@ struct HomeView: View {
             Shelf(title: "Recently Updated Series", subtitle: store.activeServer?.name, items: Array(series),
                   seeAll: { router.tab = .series }) { posterButton($0) }
         }
+    }
+}
+
+/// "Live Sports Now" tile: channel, programme and progress.
+struct SportsTile: View {
+    var entry: LiveProgrammeEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                ChannelLogo(url: entry.channel.icon, name: entry.channel.name, size: logo)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        SportBadge()
+                        Text(entry.channel.name).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                    }
+                    Text(entry.programme.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                }
+            }
+            ProgressLine(fraction: entry.programme.progress, height: 3)
+            Text(entry.programme.timeRangeText).font(.caption2).foregroundStyle(Theme.secondaryText)
+        }
+        .padding(12)
+        .frame(width: Theme.landscapeWidth * 0.95, alignment: .leading)
+        .background(
+            LinearGradient(colors: [Color.green.opacity(0.22), Theme.surface], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var logo: CGFloat {
+        #if os(tvOS)
+        return 70
+        #else
+        return 42
+        #endif
+    }
+}
+
+struct SportBadge: View {
+    var body: some View {
+        Text("SPORT")
+            .font(.system(size: 9, weight: .heavy))
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(Color.green.opacity(0.85), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .foregroundStyle(.black)
     }
 }
 

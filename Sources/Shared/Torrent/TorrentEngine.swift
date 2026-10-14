@@ -82,6 +82,9 @@ struct TorrentSource: Hashable, Codable {
     /// Season/episode hint for picking a file in season packs.
     var season: Int?
     var episode: Int?
+    /// Which addon returned this stream and which MediaItem it plays (shown in Activity).
+    var addonName: String? = nil
+    var itemID: String? = nil
 
     var magnet: String {
         var s = "magnet:?xt=urn:btih:\(infoHash)"
@@ -102,6 +105,25 @@ struct TorrentSource: Hashable, Codable {
     }
 }
 
+/// What started a torrent: recorded when the player resolves it, shown in the Activity screen.
+struct TorrentOrigin: Codable, Hashable {
+    var hash: String
+    var title: String?
+    var poster: URL?
+    var season: Int?
+    var episode: Int?
+    var addonName: String?
+    var itemID: String?
+    var fileName: String?
+    var addedAt: Date
+    var kept: Bool = false
+
+    var episodeCode: String? {
+        guard let season, let episode else { return nil }
+        return String(format: "S%02dE%02d", season, episode)
+    }
+}
+
 /// Talks to TorrServer — either the copy embedded in the app or one on the user's network.
 /// Both expose the same HTTP API, so playback code doesn't care which is active.
 @MainActor
@@ -113,6 +135,10 @@ final class TorrentEngine {
     private(set) var embeddedRunning = false
     private(set) var lastError: String?
     private(set) var torrents: [TorrentStatus] = []
+    /// hash → where the torrent came from.
+    private(set) var origins: [String: TorrentOrigin] = [:]
+    /// hash → last 60 download-speed samples (bytes/s), for sparklines.
+    private(set) var speedHistory: [String: [Double]] = [:]
 
     nonisolated static var embeddedAvailable: Bool {
         #if canImport(TorrServerKit) && os(iOS)
@@ -146,7 +172,39 @@ final class TorrentEngine {
     /// Headers mpv must send when reading from a password-protected remote TorrServer.
     var playbackHeaders: [String: String] { authHeaders }
 
-    private init() {}
+    private init() {
+        origins = FileStore.load([String: TorrentOrigin].self, "torrent-origins.json") ?? [:]
+    }
+
+    /// Torrents that are downloading or preparing (TorrServer stat 0–3).
+    var activeTorrents: [TorrentStatus] { torrents.filter { (0...3).contains($0.stat) } }
+    var activeCount: Int { activeTorrents.count }
+
+    private func saveOrigins() {
+        // Keep the newest 200.
+        if origins.count > 200 {
+            let keep = origins.values.sorted { $0.addedAt > $1.addedAt }.prefix(200)
+            origins = Dictionary(keep.map { ($0.hash, $0) }, uniquingKeysWith: { a, _ in a })
+        }
+        FileStore.save(origins, "torrent-origins.json")
+    }
+
+    private func recordOrigin(_ source: TorrentSource, hash: String, file: TorrentFile?) {
+        let key = hash.lowercased()
+        var o = origins[key] ?? TorrentOrigin(hash: key, addedAt: Date())
+        o.title = source.title ?? o.title
+        o.poster = source.poster ?? o.poster
+        o.season = source.season ?? o.season
+        o.episode = source.episode ?? o.episode
+        o.addonName = source.addonName ?? o.addonName
+        o.itemID = source.itemID ?? o.itemID
+        o.fileName = file?.name ?? o.fileName
+        o.addedAt = Date()
+        origins[key] = o
+        saveOrigins()
+    }
+
+    func origin(for hash: String) -> TorrentOrigin? { origins[hash.lowercased()] }
 
     // MARK: Embedded lifecycle
 
@@ -268,12 +326,46 @@ final class TorrentEngine {
         guard isConfigured else { return }
         if let list = try? await torrentsCall([TorrentStatus].self, ["action": "list"]) {
             torrents = list
+            var history = speedHistory
+            let live = Set(list.map(\.hash))
+            for t in list {
+                var samples = history[t.hash] ?? []
+                samples.append(max(0, t.downloadSpeed))
+                if samples.count > 60 { samples.removeFirst(samples.count - 60) }
+                history[t.hash] = samples
+            }
+            for key in history.keys where !live.contains(key) { history[key] = nil }
+            speedHistory = history
         }
+    }
+
+    /// Polls the list without waking the embedded engine (for badges).
+    func refreshListIfRunning() async {
+        if mode == .embedded && !embeddedRunning { return }
+        await refreshList()
     }
 
     func remove(_ hash: String) async {
         _ = try? await torrentsCall(AnyDecodable.self, ["action": "rem", "hash": hash])
         torrents.removeAll { $0.hash == hash }
+        speedHistory[hash] = nil
+        origins[hash.lowercased()] = nil
+        saveOrigins()
+    }
+
+    /// Saves the torrent in TorrServer's database so it survives restarts ("keep"). TorrServer's
+    /// `add` with save_to_db on an existing hash just persists it.
+    func keep(_ status: TorrentStatus) async throws {
+        var body: [String: Any] = ["action": "add", "link": "magnet:?xt=urn:btih:\(status.hash)", "save_to_db": true]
+        let o = origin(for: status.hash)
+        if let t = o?.title ?? status.title.nilIfEmpty { body["title"] = t }
+        if let p = o?.poster ?? status.poster { body["poster"] = p.absoluteString }
+        _ = try await torrentsCall(AnyDecodable.self, body)
+        let key = status.hash.lowercased()
+        var updated = origins[key] ?? TorrentOrigin(hash: key, title: status.title, poster: status.poster, addedAt: Date())
+        updated.kept = true
+        origins[key] = updated
+        saveOrigins()
     }
 
     func drop(_ hash: String) async {
@@ -298,6 +390,7 @@ final class TorrentEngine {
         guard let file = pickFile(status.files, source: source) else {
             throw HTTPError.transport("No playable video file in this torrent.")
         }
+        recordOrigin(source, hash: hash, file: file)
         guard let base = baseURL else { throw HTTPError.transport("TorrServer not configured") }
         let name = file.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "video"
         let url = base.appendingRawPath("stream/\(name)").appendingQuery(["link": hash, "index": String(file.id), "play": ""])

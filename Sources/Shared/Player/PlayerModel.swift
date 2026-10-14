@@ -39,6 +39,8 @@ final class PlayerCoordinator {
     static let shared = PlayerCoordinator()
     var current: PlaybackRequest?
     var sourcePickerRequest: (item: MediaItem, episode: EpisodeRef?, upcoming: [EpisodeRef])?
+    /// Channels shown in the multiview grid; non-nil while multiview is presented (see `playerPresentation()`).
+    var multiview: [XCChannel]?
     private init() {}
 
     func play(_ request: PlaybackRequest) { current = request }
@@ -75,6 +77,44 @@ final class PlayerCoordinator {
         guard let t = TorrentSource.parse(magnet: magnet) else { return }
         let item = MediaItem(id: "torrent:\(t.infoHash)", type: .other, title: t.title ?? "Torrent", origin: .tmdb(id: 0))
         current = PlaybackRequest(item: item, source: PlaybackSource(id: "magnet:\(t.infoHash)", kind: .torrent(t), title: t.title ?? "Torrent", provider: "Magnet"))
+    }
+
+    /// Opens the multiview grid (2–4 live channels; 2 on iPhone). Extra channels are dropped.
+    func openMultiview(_ channels: [XCChannel]) {
+        var seen = Set<Int>()
+        let unique = channels.filter { seen.insert($0.id).inserted }
+        let list = Array(unique.prefix(MultiviewLimits.maxTiles))
+        if current != nil {
+            // Never stack the grid on top of the full player: close it first, then present.
+            current = nil
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                PlayerCoordinator.shared.multiview = list
+            }
+        } else {
+            multiview = list
+        }
+    }
+
+    /// Leaves multiview and opens one of its channels in the full player.
+    func expandFromMultiview(_ channel: XCChannel, list: [XCChannel]) {
+        multiview = nil
+        Task { @MainActor in
+            // Let the multiview cover finish dismissing before presenting the player cover.
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            PlayerCoordinator.shared.playChannel(channel, in: list)
+        }
+    }
+}
+
+/// How many tiles multiview supports on this device.
+enum MultiviewLimits {
+    @MainActor static var maxTiles: Int {
+        #if os(tvOS)
+        return 4
+        #else
+        return Platform.isPad ? 4 : 2
+        #endif
     }
 }
 
@@ -127,6 +167,46 @@ final class PlayerModel: MPVPlayerDelegate {
     private(set) var currentProgramme: XCEPGListing?
     private(set) var nextProgramme: XCEPGListing?
 
+    // Resolved source (for AirPlay / PiP hand-off)
+    private(set) var resolvedURL: URL?
+    private(set) var resolvedHeaders: [String: String] = [:]
+
+    // Skip intro / credits
+    private(set) var skipSegments: [SkipSegment] = []
+    @ObservationIgnored private var aniSkipSegments: [SkipSegment] = []
+    @ObservationIgnored private var autoSkipped: Set<String> = []
+    @ObservationIgnored private var seekChainOrigin: Double?
+    @ObservationIgnored private var seekChainTarget: Double = 0
+    @ObservationIgnored private var seekChainAt = Date.distantPast
+    @ObservationIgnored private var aniSkipTask: Task<Void, Never>?
+
+    // Audio (session values start from PlayerPreferences)
+    var volume: Int = 100 { didSet { player.setDouble("volume", Double(max(0, min(200, volume)))) } }
+    var nightMode = false { didSet { applyAudioFilters() } }
+    var dialogueBoost = false { didSet { applyAudioFilters() } }
+
+    // Live timeshift
+    private(set) var timeshiftActive = false
+    private(set) var liveRangeStart: Double = 0
+    private(set) var liveRangeEnd: Double = 0
+    @ObservationIgnored private var usedTimeshift = false
+
+    // Channel number entry / last channel
+    private(set) var channelDigits = ""
+    private(set) var previousChannelID: Int?
+    @ObservationIgnored private var digitTask: Task<Void, Never>?
+
+    // Transient message
+    private(set) var toast: String?
+    @ObservationIgnored private var toastTask: Task<Void, Never>?
+
+    // Platform helpers (typed in platform-specific extensions)
+    @ObservationIgnored var pipStorage: AnyObject?
+    @ObservationIgnored var displayCriteriaStorage: AnyObject?
+    @ObservationIgnored var displayCriteriaTask: Task<Void, Never>?
+    /// Called after pause changes and seeks so Picture in Picture can refresh its state.
+    @ObservationIgnored var pipSync: (() -> Void)?
+
     // UI
     var showStats = false
     private(set) var stats: [(String, String)] = []
@@ -146,9 +226,40 @@ final class PlayerModel: MPVPlayerDelegate {
     }
     var remaining: Double { max(0, duration - position) }
     var nextEpisode: EpisodeRef? { request.upcoming.first }
-    var showNextEpisodeCard: Bool {
-        AppSettings.shared.values.autoplayNext && nextEpisode != nil && duration > 300 && remaining < 35 && remaining > 0
+    /// Start of the end credits when known (chapters / AniSkip), used to show the next-episode card early.
+    var creditsStart: Double? {
+        guard PlayerPreferences.shared.values.nextEpisodeAtCredits, duration > 0 else { return nil }
+        return skipSegments.filter { ($0.kind == .credits || $0.kind == .preview) && $0.start > duration * 0.5 }.map(\.start).min()
     }
+    var showNextEpisodeCard: Bool {
+        guard AppSettings.shared.values.autoplayNext, nextEpisode != nil, duration > 300, remaining > 0 else { return false }
+        if let c = creditsStart, position >= c { return true }
+        return remaining < 35
+    }
+
+    /// The skip button to show right now, if any.
+    var activeSkip: SkipSegment? {
+        guard PlayerPreferences.shared.values.showSkipButtons, hasStarted, !isLive, !ended else { return nil }
+        return skipSegments.first { seg in
+            guard seg.contains(position) else { return false }
+            switch seg.kind {
+            case .intro, .recap:
+                return true
+            case .credits, .preview:
+                // With an episode up next, the next-episode card handles credits.
+                if nextEpisode != nil && AppSettings.shared.values.autoplayNext { return false }
+                return seg.end < duration - 10
+            }
+        }
+    }
+
+    /// Seeking is allowed for VOD, catch-up, and live channels with a timeshift buffer.
+    var canSeek: Bool { !isLive || timeshiftActive }
+
+    /// Where "live" is inside the timeshift buffer (the newest data minus the normal live delay).
+    var liveEdge: Double { max(liveRangeStart, liveRangeEnd - Double(AppSettings.shared.values.liveBufferSeconds)) }
+    var behindLive: Double { timeshiftActive && liveRangeEnd > 0 ? max(0, liveEdge - position) : 0 }
+    var liveWindow: Double { max(0, liveRangeEnd - liveRangeStart) }
 
     init(request: PlaybackRequest) {
         self.request = request
@@ -158,8 +269,36 @@ final class PlayerModel: MPVPlayerDelegate {
             audioLanguage: s.preferredAudioLanguage, subtitleLanguage: s.preferredSubtitleLanguage,
             autoSubtitles: s.autoSubtitles, subtitleScale: s.subtitleScale))
         player.delegate = self
+        let prefs = PlayerPreferences.shared.values
+        volume = prefs.volume
+        nightMode = prefs.nightMode
+        dialogueBoost = prefs.dialogueBoost
+        // Apply explicitly too: property observers don't run for assignments made during init.
+        player.setDouble("volume", Double(max(0, min(200, prefs.volume))))
+        applyAudioFilters()
+        applyPreferences()
         configureAudioSession()
         configureRemoteCommands()
+    }
+
+    /// Pushes subtitle styling from PlayerPreferences to mpv (on start and whenever it changes).
+    func applyPreferences() {
+        for (name, value) in PlayerPreferences.shared.values.subtitleProperties { player.set(name, value) }
+    }
+
+    private func applyAudioFilters() {
+        player.set("af", PlayerPreferences.audioFilter(nightMode: nightMode, dialogueBoost: dialogueBoost))
+    }
+
+    static var timeshiftDirectory: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mpv-timeshift", isDirectory: true)
+    }
+
+    private func timeshiftConfig(for req: PlaybackRequest) -> MPVPlayer.Timeshift? {
+        let p = PlayerPreferences.shared.values
+        guard req.isLive, p.timeshiftEnabled else { return nil }
+        return MPVPlayer.Timeshift(megabytes: p.timeshiftMegabytes, seconds: max(60, p.timeshiftMinutes * 60),
+                                   directory: Self.timeshiftDirectory.path)
     }
 
     // MARK: Lifecycle
@@ -175,13 +314,27 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     func stop() {
+        #if os(iOS)
+        stopPictureInPicture()
+        #endif
+        #if os(tvOS)
+        resetDisplayCriteria()
+        #endif
         saveProgress(force: true)
         if hasStarted { scrobble(.stop) }
         resolveTask?.cancel()
         tickTask?.cancel()
+        digitTask?.cancel()
+        aniSkipTask?.cancel()
+        toastTask?.cancel()
+        pipSync = nil
         player.command("stop")
         player.shutdown()
         if let hash = resolvedTorrentHash { Task { await TorrentEngine.shared.drop(hash) } }
+        if usedTimeshift {
+            // mpv unlinks its cache file itself; this removes anything left behind after a crash or kill.
+            try? FileManager.default.removeItem(at: Self.timeshiftDirectory)
+        }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -196,7 +349,12 @@ final class PlayerModel: MPVPlayerDelegate {
                 let (url, headers) = try await self.resolve(req.source)
                 guard !Task.isCancelled else { return }
                 let start = req.startPosition ?? self.resumePosition(for: req)
-                self.player.load(url, start: start, headers: headers, title: req.displayTitle, live: req.isLive)
+                self.resolvedURL = url
+                self.resolvedHeaders = headers
+                let timeshift = self.timeshiftConfig(for: req)
+                self.timeshiftActive = timeshift != nil
+                if timeshift != nil { self.usedTimeshift = true }
+                self.player.load(url, start: start, headers: headers, title: req.displayTitle, live: req.isLive, timeshift: timeshift)
                 self.updateNowPlaying()
                 await self.loadAddonSubtitles(for: req)
             } catch is CancellationError {
@@ -214,6 +372,10 @@ final class PlayerModel: MPVPlayerDelegate {
         audioTracks = []; subtitleTracks = []; videoTracks = []; chapters = []
         addonSubtitles = []; loadedAddonSubtitleIDs = []; lastSavedPosition = 0; didScrobbleStart = false
         currentProgramme = nil; nextProgramme = nil
+        resolvedURL = nil; resolvedHeaders = [:]
+        skipSegments = []; aniSkipSegments = []; autoSkipped = []; seekChainOrigin = nil
+        aniSkipTask?.cancel()
+        timeshiftActive = false; liveRangeStart = 0; liveRangeEnd = 0
     }
 
     private func resumePosition(for req: PlaybackRequest) -> Double? {
@@ -276,16 +438,157 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     func seek(to seconds: Double) {
-        guard !isLive || request.catchup != nil else { return }
-        let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
-        position = target
-        player.command("seek", String(format: "%.3f", target), "absolute+exact")
-        updateNowPlaying()
+        guard canSeek else { return }
+        noteUserSeek(from: position, to: seconds)
+        performSeek(to: seconds)
     }
 
     func seek(by delta: Double) {
-        guard !isLive || request.catchup != nil else { return }
+        guard canSeek else { return }
+        if isLive { refreshLiveWindow() }
         seek(to: position + delta)
+    }
+
+    /// Seeks without treating it as a user gesture (no intro learning).
+    func performSeek(to seconds: Double) {
+        let target: Double
+        if isLive {
+            guard timeshiftActive, liveRangeEnd > liveRangeStart else { return }
+            target = max(liveRangeStart, min(seconds, liveEdge))
+        } else {
+            target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
+        }
+        position = target
+        player.command("seek", String(format: "%.3f", target), isLive ? "absolute" : "absolute+exact")
+        updateNowPlaying()
+        pipSync?()
+    }
+
+    /// Jumps back to the live edge of the timeshift buffer.
+    func goLive() {
+        guard timeshiftActive else { return }
+        refreshLiveWindow()
+        performSeek(to: liveEdge)
+        if isPaused { player.setFlag("pause", false) }
+    }
+
+    func refreshLiveWindow() {
+        guard timeshiftActive, let state = player.node("demuxer-cache-state") as? [String: Any] else { return }
+        let ranges = (state["seekable-ranges"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+        let starts = ranges.compactMap { $0["start"] as? Double }
+        let ends = ranges.compactMap { $0["end"] as? Double }
+        if let s = starts.min(), let e = ends.max(), e > s {
+            liveRangeStart = s
+            liveRangeEnd = e
+        } else if let e = state["cache-end"] as? Double {
+            liveRangeEnd = e
+            if liveRangeStart <= 0 || liveRangeStart > position { liveRangeStart = min(position, e) }
+        }
+    }
+
+    // MARK: Skip intro / credits
+
+    func skip(_ segment: SkipSegment) {
+        autoSkipped.insert(segment.id)
+        seekChainOrigin = nil
+        performSeek(to: segment.end)
+    }
+
+    private var introKey: String? {
+        guard let ep = request.episode, !isLive else { return nil }
+        return IntroMemory.key(item: request.item, season: ep.season)
+    }
+
+    func rebuildSkipSegments() {
+        var segs = ChapterSkipDetector.segments(from: chapters, duration: duration)
+        for a in aniSkipSegments where !segs.contains(where: { $0.kind == a.kind && abs($0.start - a.start) < 15 }) {
+            segs.append(a)
+        }
+        if !segs.contains(where: { $0.kind == .intro }), let key = introKey, let e = IntroMemory.shared.entry(key),
+           duration <= 0 || e.end < duration * 0.5 {
+            // Learned intros drift a little between episodes: offer the button from 10 s early.
+            segs.append(SkipSegment(kind: .intro, start: max(0, e.start - 10), end: e.end, source: .learned))
+        }
+        skipSegments = segs.sorted { $0.start < $1.start }
+    }
+
+    private func loadAniSkip() {
+        guard PlayerPreferences.shared.values.useAniSkip, let ep = request.episode, duration > 0 else { return }
+        let item = request.item
+        let length = duration
+        aniSkipTask?.cancel()
+        aniSkipTask = Task { [weak self] in
+            let segs = await AniSkipClient.shared.segments(item: item, episode: ep, duration: length)
+            guard let self, !Task.isCancelled, self.request.episode == ep, !segs.isEmpty else { return }
+            self.aniSkipSegments = segs
+            self.rebuildSkipSegments()
+        }
+    }
+
+    private func autoSkipIfNeeded(at t: Double) {
+        guard PlayerPreferences.shared.values.autoSkipIntro, hasStarted, !isLive else { return }
+        guard let seg = skipSegments.first(where: { ($0.kind == .intro || $0.kind == .recap) && $0.contains(t) && !autoSkipped.contains($0.id) })
+        else { return }
+        // Learned ranges start 10 s early for the button; only auto-skip once we're really in the intro.
+        if seg.source == .learned && t < seg.start + 8 { return }
+        autoSkipped.insert(seg.id)
+        performSeek(to: seg.end)
+        showToast(seg.kind == .recap ? "Skipped recap" : "Skipped intro")
+    }
+
+    /// Groups quick successive forward seeks into one gesture; committed from `tick` once idle.
+    private func noteUserSeek(from: Double, to: Double) {
+        guard introKey != nil, duration > 0 else { return }
+        let now = Date()
+        if seekChainOrigin != nil, now.timeIntervalSince(seekChainAt) < 3 {
+            seekChainTarget = to
+        } else {
+            seekChainOrigin = from
+            seekChainTarget = to
+        }
+        seekChainAt = now
+    }
+
+    private func commitSeekChain() {
+        guard let origin = seekChainOrigin, Date().timeIntervalSince(seekChainAt) >= 3 else { return }
+        seekChainOrigin = nil
+        guard PlayerPreferences.shared.values.learnIntros, let key = introKey, duration > 0 else { return }
+        let delta = seekChainTarget - origin
+        guard origin < duration * 0.15, delta >= 30, delta <= 180 else { return }
+        if skipSegments.contains(where: { $0.kind == .intro && $0.source != .learned }) { return }
+        IntroMemory.shared.record(key, start: origin, end: seekChainTarget)
+    }
+
+    // MARK: Toast
+
+    func showToast(_ text: String) {
+        toast = text
+        toastTask?.cancel()
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
+        }
+    }
+
+    // MARK: AirPlay / PiP hand-off
+
+    /// AVPlayer can play the current source (used for PiP hand-off).
+    var isAVPlayerCompatible: Bool { resolvedURL.map { AVPlaybackCompatibility.isAVPlayerCompatible($0) } ?? false }
+    /// An AirPlay receiver can fetch the current source itself.
+    var isAirPlayCompatible: Bool { resolvedURL.map { AVPlaybackCompatibility.isAirPlayCompatible($0) } ?? false }
+
+    func pauseForHandoff() { player.setFlag("pause", true) }
+
+    func resumeAfterHandoff(at seconds: Double?, play: Bool) {
+        if let s = seconds, s.isFinite, s > 1, !isLive { performSeek(to: s) }
+        player.setFlag("pause", !play)
+    }
+
+    // MARK: Volume
+
+    func changeVolume(by delta: Int) {
+        volume = max(0, min(200, volume + delta))
     }
 
     func selectAudio(_ track: MPVTrack) { player.set("aid", String(track.id)); refreshTracks() }
@@ -377,16 +680,74 @@ final class PlayerModel: MPVPlayerDelegate {
     func switchChannel(_ channel: XCChannel) {
         let store = DispatcharrStore.shared
         guard let server = store.activeServer, let url = store.client?.liveURL(channel.id) else { return }
+        if let current = request.channelID, current != channel.id { previousChannelID = current }
         var req = request
         req.item = channel.mediaItem(serverID: server.id)
         req.channelID = channel.id
         req.catchup = nil
+        if !req.channelList.contains(where: { $0.id == channel.id }) {
+            req.channelList = store.channels.contains(where: { $0.id == channel.id }) ? store.channels : req.channelList + [channel]
+        }
         req.source = PlaybackSource(id: "live:\(channel.id)", kind: .direct(url, headers: [:]), title: channel.name, provider: server.name)
         LibraryStore.shared.recordChannel(channel.id)
         load(req)
     }
 
     var currentChannel: XCChannel? { request.channelID.flatMap { id in request.channelList.first { $0.id == id } ?? DispatcharrStore.shared.channel(id) } }
+
+    // MARK: Number entry / last channel
+
+    func channel(number: Int) -> XCChannel? {
+        request.channelList.first { $0.number == number } ?? DispatcharrStore.shared.channels.first { $0.number == number }
+    }
+
+    /// The channel the digits typed so far would tune to.
+    var digitPreview: XCChannel? { Int(channelDigits).flatMap { channel(number: $0) } }
+
+    var previousChannel: XCChannel? {
+        previousChannelID.flatMap { id in request.channelList.first { $0.id == id } ?? DispatcharrStore.shared.channel(id) }
+    }
+
+    /// Adds a digit; tunes 1.5 s after the last one.
+    func enterDigit(_ digit: Int) {
+        guard request.channelID != nil, (0...9).contains(digit) else { return }
+        if channelDigits.count >= 5 { channelDigits = "" }
+        channelDigits += String(digit)
+        digitTask?.cancel()
+        digitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.commitDigits()
+        }
+    }
+
+    func deleteDigit() {
+        guard !channelDigits.isEmpty else { return }
+        channelDigits.removeLast()
+        if channelDigits.isEmpty { digitTask?.cancel() }
+    }
+
+    func commitDigits() {
+        digitTask?.cancel()
+        let digits = channelDigits
+        channelDigits = ""
+        guard let n = Int(digits) else { return }
+        if let ch = channel(number: n) {
+            if ch.id != request.channelID { switchChannel(ch) }
+        } else {
+            showToast("No channel \(n)")
+        }
+    }
+
+    func cancelDigits() {
+        digitTask?.cancel()
+        channelDigits = ""
+    }
+
+    func toggleLastChannel() {
+        guard let prev = previousChannel else { showToast("No previous channel"); return }
+        switchChannel(prev)
+    }
 
     private func refreshProgramme(_ channelID: Int) async {
         let store = DispatcharrStore.shared
@@ -402,12 +763,19 @@ final class PlayerModel: MPVPlayerDelegate {
     func mpvPropertyChanged(_ name: String, value: Any?) {
         switch name {
         case "time-pos":
-            if let v = value as? Double { position = v; if v > 0.3 && !hasStarted { didStart() } }
+            if let v = value as? Double {
+                position = v
+                if v > 0.3 && !hasStarted { didStart() }
+                if !skipSegments.isEmpty { autoSkipIfNeeded(at: v) }
+            }
         case "duration":
+            let old = duration
             duration = (value as? Double) ?? 0
+            if old <= 0 && duration > 0 && !isLive { rebuildSkipSegments(); if aniSkipSegments.isEmpty { loadAniSkip() } }
         case "pause":
             isPaused = (value as? Bool) ?? false
             updateNowPlaying()
+            pipSync?()
             if hasStarted { scrobble(isPaused ? .pause : .start) }
         case "paused-for-cache":
             isBuffering = (value as? Bool) ?? false
@@ -425,6 +793,7 @@ final class PlayerModel: MPVPlayerDelegate {
             speed = (value as? Double) ?? 1
         case "chapter-list/count":
             chapters = player.chapters()
+            rebuildSkipSegments()
         default:
             break
         }
@@ -436,6 +805,12 @@ final class PlayerModel: MPVPlayerDelegate {
         duration = player.double("duration") ?? 0
         chapters = player.chapters()
         if fit != .fit { setFit(fit) }
+        rebuildSkipSegments()
+        loadAniSkip()
+        if timeshiftActive { refreshLiveWindow() }
+        #if os(tvOS)
+        scheduleDisplayCriteriaMatch()
+        #endif
     }
 
     func mpvEndFile(error: String?) {
@@ -473,9 +848,12 @@ final class PlayerModel: MPVPlayerDelegate {
 
     private func tick() async {
         saveProgress(force: false)
+        commitSeekChain()
+        if timeshiftActive { refreshLiveWindow() }
         if showStats { refreshStats() }
-        if let hash = resolvedTorrentHash, isBuffering || showStats {
-            torrentStatus = try? await TorrentEngine.shared.status(hash)
+        if let hash = resolvedTorrentHash {
+            // Polled every second while a torrent plays: drives the top-bar chip and the stats overlay.
+            if let status = try? await TorrentEngine.shared.status(hash) { torrentStatus = status }
             if let t = torrentStatus, isBuffering, !hasStarted {
                 statusText = "Buffering · \(t.activePeers) peers · \(t.speedText)"
             }
@@ -511,8 +889,29 @@ final class PlayerModel: MPVPlayerDelegate {
         if let a = s("audio-codec-name") { rows.append(("Audio", a + (s("audio-params/channels").map { " · \($0)" } ?? ""))) }
         if let d = player.int("frame-drop-count") { rows.append(("Dropped frames", "\(d)")) }
         if let c = player.double("demuxer-cache-duration") { rows.append(("Buffer", String(format: "%.1fs", c))) }
-        if let t = torrentStatus { rows.append(("Torrent", "\(t.activePeers)/\(t.totalPeers) peers · \(t.speedText)")) }
+        if let t = torrentStatus {
+            rows.append(("Torrent", t.statText.isEmpty ? "Active" : t.statText))
+            rows.append(("Peers", "\(t.activePeers) active / \(t.totalPeers) total · \(t.seeders) seeders"))
+            rows.append(("Download", t.speedText))
+            rows.append(("Upload", "\(Int64(t.uploadSpeed).byteText)/s"))
+            if t.preloadSize > 0 { rows.append(("Preload", "\(t.preloaded.byteText) / \(t.preloadSize.byteText)")) }
+            if t.size > 0 { rows.append(("Downloaded", "\(t.loaded.byteText) / \(t.size.byteText)")) }
+        }
+        if timeshiftActive {
+            rows.append(("Timeshift", "\(Int(liveWindow / 60)) min buffered · \(Int(behindLive))s behind"))
+        }
+        if volume != 100 || nightMode || dialogueBoost {
+            rows.append(("Audio FX", "vol \(volume)%" + (nightMode ? " · night" : "") + (dialogueBoost ? " · dialogue" : "")))
+        }
         stats = rows
+    }
+
+    /// Torrent fill shown in the top-bar chip: preload buffer while it fills, else overall progress.
+    var torrentBufferPercent: Int? {
+        guard let t = torrentStatus else { return nil }
+        if t.preloadSize > 0 { return min(100, Int(Double(t.preloaded) * 100 / Double(t.preloadSize))) }
+        if t.size > 0 { return min(100, Int(Double(t.loaded) * 100 / Double(t.size))) }
+        return nil
     }
 
     // MARK: System integration

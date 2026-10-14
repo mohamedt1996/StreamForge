@@ -20,7 +20,14 @@ struct PosterCard: View {
                             ProgressLine(fraction: p.fraction).padding(6)
                         }
                     }
-                if library.isWatched(item) {
+                if item.type == .series, NewEpisodeTracker.shared.isNew(item) {
+                    Text("NEW")
+                        .font(.caption2.weight(.heavy))
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(Theme.live, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                } else if library.isWatched(item) {
                     Image(systemName: "checkmark.circle.fill")
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(.white, Theme.accent)

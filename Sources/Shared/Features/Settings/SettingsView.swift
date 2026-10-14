@@ -31,7 +31,21 @@ struct SettingsView: View {
             }
             Section("Playback") {
                 NavigationLink { PlayerSettingsView() } label: { row("Player", icon: "play.rectangle", value: "mpv") }
+                NavigationLink { PlayerAdvancedSettingsView() } label: {
+                    row("Player Appearance & Audio", icon: "slider.horizontal.3", value: nil)
+                }
                 NavigationLink { LiveSettingsView() } label: { row("Live TV & Library", icon: "dot.radiowaves.left.and.right", value: nil) }
+            }
+            Section("Household") {
+                NavigationLink { ProfilesSettingsView() } label: {
+                    row("Profiles", icon: "person.2", value: ProfileStore.shared.activeProfile.name)
+                }
+                NavigationLink { SyncSettingsView() } label: {
+                    row("Sync & Backup", icon: "arrow.triangle.2.circlepath", value: nil)
+                }
+                if ProfileStore.shared.isKidsMode && ProfileStore.shared.settingsUnlocked {
+                    Button { ProfileStore.shared.lockSettings() } label: { Label("Lock Settings", systemImage: "lock") }
+                }
             }
             Section {
                 LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
@@ -72,7 +86,8 @@ struct DispatcharrSettingsView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(server.name).font(.headline)
-                                Text("\(server.username) @ \(server.baseURL)").font(.caption).foregroundStyle(Theme.secondaryText)
+                                Text("\(server.username.isEmpty ? "API key" : server.username) @ \(server.baseURL) · \(server.authMode.shortLabel)")
+                                    .font(.caption).foregroundStyle(Theme.secondaryText)
                             }
                             Spacer()
                             if server.id == store.activeServer?.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent) }
@@ -91,15 +106,39 @@ struct DispatcharrSettingsView: View {
                 }
                 Button { adding = true } label: { Label("Add Server", systemImage: "plus.circle.fill") }
             } footer: {
-                Text("Use your Dispatcharr username and its XC password (Users → edit user → XC Password). Live TV, the guide, catch-up, movies and series all come through Dispatcharr's Xtream Codes API.")
+                Text("Sign in with your Dispatcharr account (or an API key): StreamForge fetches your XC streaming password automatically. Live TV, the guide, catch-up, movies and series come through Dispatcharr's Xtream Codes API; recordings and channel profiles use its REST API.")
+            }
+            if let warning = store.credentialWarning {
+                Section {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.gold).font(.footnote)
+                }
             }
             if store.isConfigured {
+                GuideSettingsSection()
+                if !store.channelProfiles.isEmpty {
+                    Section {
+                        Picker("Channel profile", selection: Binding(get: { store.activeServer?.channelProfileID ?? -1 },
+                                                                     set: { store.setChannelProfile($0 < 0 ? nil : $0) })) {
+                            Text("All channels").tag(-1)
+                            ForEach(store.channelProfiles) { p in Text(p.name).tag(p.id) }
+                        }
+                    } header: {
+                        Text("Channel profile")
+                    } footer: {
+                        Text(store.channelProfileNote ?? "Show only the channels in one of your Dispatcharr channel profiles.")
+                    }
+                }
                 Section("Library") {
                     LabeledContent("Channels", value: "\(store.channels.count)")
                     LabeledContent("Movies", value: "\(store.movies.count)")
                     LabeledContent("Series", value: "\(store.series.count)")
                     if let d = store.lastRefresh { LabeledContent("Updated", value: d.formatted(date: .omitted, time: .shortened)) }
-                    Button { Task { await store.refreshAll(force: true) } } label: { Label("Refresh Now", systemImage: "arrow.clockwise") }
+                    Button {
+                        Task {
+                            await store.refreshAll(force: true)
+                            await store.loadChannelProfiles()
+                        }
+                    } label: { Label("Refresh Now", systemImage: "arrow.clockwise") }
                 }
             }
         }
@@ -115,18 +154,31 @@ struct DispatcharrServerForm: View {
     var server: DispatcharrServer?
     @Environment(DispatcharrStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @State private var mode: DispatcharrAuthMode = .account
     @State private var name = ""
     @State private var url = ""
     @State private var username = ""
+    @State private var password = ""
+    @State private var apiKey = ""
     @State private var xcPassword = ""
     @State private var webPassword = ""
     @State private var testing = false
     @State private var result: String?
     @State private var ok = false
+    /// Account / API-key login worked but the user has no XC password in Dispatcharr.
+    @State private var needsManualXC = false
+    @State private var verified = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Sign in with", selection: $mode) {
+                        ForEach(DispatcharrAuthMode.allCases) { Text($0.label).tag($0) }
+                    }
+                } footer: {
+                    Text(modeFooter)
+                }
                 Section("Server") {
                     TextField("Name (optional)", text: $name)
                     TextField("Address, e.g. http://192.168.1.10:9191", text: $url)
@@ -136,30 +188,34 @@ struct DispatcharrServerForm: View {
                         .autocorrectionDisabled()
                         #endif
                 }
-                Section {
-                    TextField("Username", text: $username)
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        #endif
-                    SecureField("XC password", text: $xcPassword)
-                } header: { Text("Streaming (required)") } footer: {
-                    Text("The XC password is set per user in Dispatcharr. It is not your web login password.")
+                credentialsSection
+                if needsManualXC || mode == .xc {
+                    Section {
+                        SecureField("XC password", text: $xcPassword)
+                    } header: {
+                        Text(mode == .xc ? "Streaming (required)" : "XC password")
+                    } footer: {
+                        Text(mode == .xc
+                             ? "The XC password is set per user in Dispatcharr (Users → edit → XC Password). It is not your web login password."
+                             : "Your Dispatcharr user has no XC password yet. Ask the admin to set one (Users → edit user → XC Password), or enter it here if you know it.")
+                    }
                 }
-                Section {
-                    SecureField("Web password (optional)", text: $webPassword)
-                } header: { Text("DVR (optional)") } footer: {
-                    Text("Your Dispatcharr login password unlocks scheduling and playing recordings.")
+                if mode == .xc {
+                    Section {
+                        SecureField("Web password (optional)", text: $webPassword)
+                    } header: { Text("DVR (optional)") } footer: {
+                        Text("Your Dispatcharr login password unlocks recordings and channel profiles.")
+                    }
                 }
                 Section {
                     Button { Task { await test() } } label: {
                         HStack {
-                            Text("Test Connection")
+                            Text(mode == .xc ? "Test Connection" : "Sign In")
                             Spacer()
                             if testing { ProgressView() }
                         }
                     }
-                    .disabled(url.trimmed.isEmpty || username.trimmed.isEmpty || xcPassword.isEmpty)
+                    .disabled(!canTest || testing)
                     if let result {
                         Label(result, systemImage: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
                             .foregroundStyle(ok ? .green : Theme.live)
@@ -171,16 +227,76 @@ struct DispatcharrServerForm: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }.disabled(url.trimmed.isEmpty || username.trimmed.isEmpty || xcPassword.isEmpty)
+                    Button("Save") { Task { await saveTapped() } }.disabled(!canSave || testing)
                 }
             }
+            .onChange(of: mode) { result = nil; needsManualXC = false; verified = false }
         }
         .onAppear {
             if let server {
+                mode = server.authMode
                 name = server.name; url = server.baseURL; username = server.username
-                xcPassword = server.xcPassword; webPassword = server.webPassword
+                xcPassword = server.xcPassword
+                webPassword = server.webPassword
+                password = server.authMode == .account ? server.webPassword : ""
+                apiKey = server.apiKey
+                verified = true
             }
         }
+    }
+
+    @ViewBuilder
+    private var credentialsSection: some View {
+        switch mode {
+        case .account:
+            Section {
+                TextField("Username", text: $username)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+                SecureField("Password", text: $password)
+            } header: { Text("Dispatcharr account") } footer: {
+                Text("The same username and password you use for Dispatcharr's web interface.")
+            }
+        case .apiKey:
+            Section {
+                SecureField("API key", text: $apiKey)
+            } header: { Text("API key") } footer: {
+                Text("Create a key in Dispatcharr (your user menu → API keys). The username and XC password are read from your account.")
+            }
+        case .xc:
+            Section {
+                TextField("Username", text: $username)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+            } header: { Text("XC username") }
+        }
+    }
+
+    private var modeFooter: String {
+        switch mode {
+        case .account: return "Recommended: one login gives live TV, guide, VOD, DVR and channel profiles."
+        case .apiKey: return "For accounts that use API keys instead of a password."
+        case .xc: return "Only the Xtream Codes credentials. Add a web password for DVR."
+        }
+    }
+
+    private var canTest: Bool {
+        guard !url.trimmed.isEmpty else { return false }
+        switch mode {
+        case .account: return !username.trimmed.isEmpty && !password.isEmpty
+        case .apiKey: return !apiKey.trimmed.isEmpty
+        case .xc: return !username.trimmed.isEmpty && !xcPassword.isEmpty
+        }
+    }
+
+    private var canSave: Bool {
+        guard canTest else { return false }
+        if mode == .xc { return true }
+        return verified || !xcPassword.isEmpty
     }
 
     private func draft() -> DispatcharrServer {
@@ -188,33 +304,59 @@ struct DispatcharrServerForm: View {
         s.name = name.trimmed.isEmpty ? (URL.normalizedBase(url)?.host ?? "Dispatcharr") : name.trimmed
         s.baseURL = url.trimmed
         s.username = username.trimmed
+        s.authMode = mode
         return s
+    }
+
+    /// A copy under a throwaway id so testing never touches saved credentials.
+    private func probe() -> DispatcharrServer {
+        var p = draft()
+        p.id = UUID()
+        p.webPassword = mode == .account ? password : webPassword
+        p.apiKey = mode == .apiKey ? apiKey : ""
+        p.xcPassword = xcPassword
+        return p
     }
 
     private func test() async {
         testing = true
         defer { testing = false }
-        let s = draft()
-        // Test with an unsaved copy: write creds under a throwaway id.
-        var probe = s
-        probe.id = UUID()
-        probe.xcPassword = xcPassword
-        defer { probe.xcPassword = "" }
+        let p = probe()
+        defer { p.clearSecrets() }
         do {
-            let auth = try await XtreamClient(server: probe).authenticate()
-            let info = auth.userInfo
-            var text = "Connected"
-            if let max = info?.maxConnections { text += " · \(max) streams allowed" }
-            if !webPassword.isEmpty {
-                probe.webPassword = webPassword
-                defer { probe.webPassword = "" }
+            var text = ""
+            var probeServer = p
+            if mode != .xc {
+                let me = try await DispatcharrREST(server: p).me()
+                if !me.username.isEmpty {
+                    username = me.username
+                    probeServer.username = me.username
+                }
+                if let xc = me.xcPassword, !xc.isEmpty {
+                    xcPassword = xc
+                    p.xcPassword = xc
+                    needsManualXC = false
+                } else if xcPassword.isEmpty {
+                    needsManualXC = true
+                    verified = true
+                    result = "Signed in as \(me.username), but this user has no XC password. Ask your Dispatcharr admin to set one (Users → edit → XC Password), or enter it below."
+                    ok = false
+                    return
+                }
+                text = "Signed in as \(me.username.isEmpty ? "API key" : me.username)"
+            }
+            let auth = try await XtreamClient(server: probeServer).authenticate()
+            text += text.isEmpty ? "Connected" : " · streaming OK"
+            if let max = auth.userInfo?.maxConnections { text += " · \(max) streams allowed" }
+            if mode == .xc, !webPassword.isEmpty {
                 do {
-                    try await DispatcharrREST(server: probe).login()
+                    try await DispatcharrREST(server: probeServer).login()
                     text += " · DVR enabled"
                 } catch {
                     text += " · DVR login failed"
                 }
             }
+            verified = true
             result = text
             ok = true
         } catch {
@@ -223,9 +365,55 @@ struct DispatcharrServerForm: View {
         }
     }
 
-    private func save() {
-        store.upsert(draft(), xcPassword: xcPassword, webPassword: webPassword)
+    private func saveTapped() async {
+        if mode != .xc, !verified || xcPassword.isEmpty {
+            await test()
+            guard ok, !xcPassword.isEmpty else { return }
+        }
+        switch mode {
+        case .account:
+            store.upsert(draft(), xcPassword: xcPassword, webPassword: password, apiKey: "")
+        case .apiKey:
+            store.upsert(draft(), xcPassword: xcPassword, webPassword: "", apiKey: apiKey.trimmed)
+        case .xc:
+            store.upsert(draft(), xcPassword: xcPassword, webPassword: webPassword, apiKey: "")
+        }
         dismiss()
+    }
+}
+
+/// Settings → Dispatcharr → Guide: bulk XMLTV status and options.
+struct GuideSettingsSection: View {
+    @Environment(AppSettings.self) private var settings
+    private var guide: GuideStore { .shared }
+
+    var body: some View {
+        @Bindable var settings = settings
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(guide.statusText).font(.subheadline)
+                if case .downloading(_, let fraction) = guide.phase {
+                    if let fraction { ProgressView(value: fraction) } else { ProgressView() }
+                } else if case .parsing = guide.phase {
+                    ProgressView()
+                }
+                if guide.channelCount > 0 {
+                    Text("\(guide.channelCount) channels covered").font(.caption).foregroundStyle(Theme.secondaryText)
+                }
+            }
+            Picker("Days to download", selection: $settings.values.guideDays) {
+                ForEach([1, 2, 3, 5, 7, 10, 14], id: \.self) { Text("\($0) day\($0 == 1 ? "" : "s")").tag($0) }
+            }
+            Toggle("Refresh every 6 hours", isOn: $settings.values.refreshGuideAutomatically)
+            Button { Task { await guide.refresh(force: true) } } label: {
+                Label("Refresh Guide Now", systemImage: "arrow.clockwise")
+            }
+            .disabled(guide.phase.isBusy)
+        } header: {
+            Text("TV Guide")
+        } footer: {
+            Text("Downloads Dispatcharr's full XMLTV guide once instead of asking per channel. Channels with catch-up also get yesterday's programmes.")
+        }
     }
 }
 
@@ -466,16 +654,29 @@ struct TraktSettingsView: View {
     @State private var code: TraktService.DeviceCode?
     @State private var error: String?
     @State private var task: Task<Void, Never>?
+    @State private var syncMessage: String?
 
     var body: some View {
         Form {
             if trakt.isSignedIn {
                 Section {
                     LabeledContent("Account", value: trakt.username ?? "Signed in")
-                    Button("Sync Watchlist") { Task { await trakt.refreshWatchlist() } }
+                    Button("Sync Watchlist & Up Next") {
+                        Task {
+                            await trakt.refreshWatchlist()
+                            await trakt.refreshUpNext(force: true)
+                        }
+                    }
+                    Button("Import Playback Progress") {
+                        Task {
+                            let n = await trakt.syncPlayback()
+                            syncMessage = n == 0 ? "No in-progress items on Trakt." : "Merged \(n) in-progress item\(n == 1 ? "" : "s") into \(ProfileStore.shared.activeProfile.name)."
+                        }
+                    }
+                    if let syncMessage { Text(syncMessage).font(.footnote).foregroundStyle(Theme.secondaryText) }
                     Button("Sign Out", role: .destructive) { trakt.signOut() }
                 } footer: {
-                    Text("What you watch is scrobbled to Trakt automatically.")
+                    Text("What you watch is scrobbled to Trakt automatically. Progress from other apps is imported at launch.")
                 }
             } else {
                 Section {
@@ -576,6 +777,13 @@ struct PlayerSettingsView: View {
                 }
                 Toggle("Hide CAM / telesync releases", isOn: $settings.values.excludeCam)
             }
+            #if os(iOS)
+            Section {
+                Toggle("Autoplay trailers on detail pages", isOn: $settings.values.trailerAutoplay)
+            } header: { Text("Detail pages") } footer: {
+                Text("Plays a muted trailer behind the artwork. Never on cellular or in Low Data Mode.")
+            }
+            #endif
             Section {
                 TextField("Custom User-Agent", text: $settings.values.customUserAgent)
             } header: { Text("Network") } footer: {

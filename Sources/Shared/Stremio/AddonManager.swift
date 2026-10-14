@@ -83,6 +83,18 @@ final class AddonManager {
         save()
     }
 
+    /// Adds addons from a backup / another device, keeping the incoming order for new ones.
+    func importAddons(_ incoming: [InstalledAddon]) {
+        for addon in incoming {
+            if let i = addons.firstIndex(where: { $0.id == addon.id }) {
+                addons[i] = addon
+            } else {
+                addons.append(addon)
+            }
+        }
+        save()
+    }
+
     func refreshManifests() async {
         for addon in addons {
             if let m = try? await http.get(StremioManifest.self, addon.manifestURL),

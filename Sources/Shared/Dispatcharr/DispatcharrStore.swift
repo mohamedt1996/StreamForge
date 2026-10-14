@@ -42,9 +42,26 @@ final class DispatcharrStore {
     private(set) var vodState: LoadState = .idle
     private(set) var lastRefresh: Date?
 
+    // Unfiltered server data; the published lists above apply adult / kids / channel-profile filters.
+    @ObservationIgnored private var rawLiveCategories: [XCCategory] = []
+    @ObservationIgnored private var rawChannels: [XCChannel] = []
+    @ObservationIgnored private var rawMovieCategories: [XCCategory] = []
+    @ObservationIgnored private var rawMovies: [XCMovie] = []
+    @ObservationIgnored private var rawSeriesCategories: [XCCategory] = []
+    @ObservationIgnored private var rawSeries: [XCSeries] = []
+    @ObservationIgnored private var channelIndex: [Int: XCChannel] = [:]
+
+    /// Channel profiles from the REST API (empty without REST access).
+    private(set) var channelProfiles: [DispatcharrChannelProfile] = []
+    /// Set when the chosen channel profile's membership couldn't be applied.
+    private(set) var channelProfileNote: String?
+    /// The XC password could not be fetched from /me (account / API-key servers).
+    private(set) var credentialWarning: String?
+
     private var epgCache: [Int: (Date, [XCEPGListing])] = [:]
     private var epgInFlight: [Int: Task<[XCEPGListing], Never>] = [:]
     private var rest: DispatcharrREST?
+    @ObservationIgnored private var credentialsSyncedFor: UUID?
 
     var activeServer: DispatcharrServer? {
         servers.first { $0.id == activeServerID } ?? servers.first
@@ -60,9 +77,11 @@ final class DispatcharrStore {
 
     // MARK: Server management
 
-    func upsert(_ server: DispatcharrServer, xcPassword: String, webPassword: String) {
+    func upsert(_ server: DispatcharrServer, xcPassword: String, webPassword: String, apiKey: String = "") {
         server.xcPassword = xcPassword
         server.webPassword = webPassword
+        server.apiKey = apiKey
+        credentialsSyncedFor = nil
         if let i = servers.firstIndex(where: { $0.id == server.id }) {
             servers[i] = server
         } else {
@@ -74,51 +93,130 @@ final class DispatcharrStore {
 
     func remove(_ server: DispatcharrServer) {
         servers.removeAll { $0.id == server.id }
-        server.xcPassword = ""
-        server.webPassword = ""
+        server.clearSecrets()
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
         FileStore.remove(cacheName(server.id))
+        FileStore.remove("guide-\(server.id.uuidString).json")
         if activeServerID == server.id {
             activeServerID = servers.first?.id
+            rest = nil
             clear()
             loadDiskCache()
+            GuideStore.shared.serverDidChange()
         }
     }
 
     func activate(_ id: UUID) {
         activeServerID = id
         rest = nil
+        channelProfiles = []
         clear()
         loadDiskCache()
-        Task { await refreshAll() }
+        GuideStore.shared.serverDidChange()
+        Task {
+            await refreshAll()
+            await GuideStore.shared.refreshIfStale()
+        }
     }
 
+    /// Restores servers (with secrets) from a backup or another device.
+    func importServers(_ list: [(server: DispatcharrServer, xcPassword: String, webPassword: String, apiKey: String)], activeID: UUID?) {
+        for entry in list {
+            entry.server.xcPassword = entry.xcPassword
+            entry.server.webPassword = entry.webPassword
+            entry.server.apiKey = entry.apiKey
+            if let i = servers.firstIndex(where: { $0.id == entry.server.id }) {
+                servers[i] = entry.server
+            } else {
+                servers.append(entry.server)
+            }
+        }
+        FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+        if let id = activeID ?? servers.first?.id, servers.contains(where: { $0.id == id }) { activate(id) }
+    }
+
+    /// REST client for DVR, /me and channel profiles: needs an API key or the web password.
     func restClient() -> DispatcharrREST? {
-        guard let server = activeServer, !server.webPassword.isEmpty else { return nil }
-        if let rest { return rest }
+        guard let server = activeServer, server.hasRESTAccess else { return nil }
+        if let rest, rest.server == server { return rest }
         let r = DispatcharrREST(server: server)
         rest = r
         return r
+    }
+
+    /// Picks the Dispatcharr channel profile to show (nil = all).
+    func setChannelProfile(_ id: Int?) {
+        guard let server = activeServer, let i = servers.firstIndex(where: { $0.id == server.id }) else { return }
+        servers[i].channelProfileID = id
+        FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+        rest = nil
+        reapplyFilters()
+    }
+
+    func loadChannelProfiles() async {
+        guard let rest = restClient() else { channelProfiles = []; return }
+        channelProfiles = (try? await rest.channelProfiles()) ?? []
+        reapplyFilters()
+    }
+
+    /// Account / API-key servers: re-reads the XC password from /me once per launch, so a
+    /// password changed by the Dispatcharr admin is picked up automatically.
+    func syncCredentials(force: Bool = false) async {
+        guard let server = activeServer, server.authMode != .xc, let rest = restClient() else { return }
+        if !force, credentialsSyncedFor == server.id { return }
+        do {
+            let me = try await rest.me()
+            credentialsSyncedFor = server.id
+            if let xc = me.xcPassword, !xc.isEmpty {
+                if xc != server.xcPassword { server.xcPassword = xc }
+                credentialWarning = nil
+            } else if server.xcPassword.isEmpty {
+                credentialWarning = "Your Dispatcharr user has no XC password. Ask the admin to set one (Users → edit → XC Password), or enter it in the server settings."
+            }
+            if !me.username.isEmpty, me.username != server.username, let i = servers.firstIndex(where: { $0.id == server.id }) {
+                servers[i].username = me.username
+                FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
+            }
+        } catch {
+            // Offline or wrong password: keep using the stored XC password.
+        }
     }
 
     private func clear() {
         liveCategories = []; channels = []; channelsByCategory = [:]
         movieCategories = []; movies = []; seriesCategories = []; series = []
         movieGenres = []; seriesGenres = []; movieSections = []; seriesSections = []
+        rawLiveCategories = []; rawChannels = []; rawMovieCategories = []; rawMovies = []
+        rawSeriesCategories = []; rawSeries = []; channelIndex = [:]
         epgCache = [:]
         liveState = .idle; vodState = .idle
+        channelProfileNote = nil
+        credentialWarning = nil
+    }
+
+    /// Re-runs the adult / kids / channel-profile filters (e.g. after switching profiles).
+    func reapplyFilters() {
+        applyLive(categories: rawLiveCategories, channels: rawChannels)
+        applyVOD(movieCategories: rawMovieCategories, movies: rawMovies, seriesCategories: rawSeriesCategories, series: rawSeries)
     }
 
     // MARK: Loading
 
     func refreshAll(force: Bool = false) async {
-        guard let client else { return }
+        guard activeServer != nil else { return }
         if !force, let lastRefresh, Date().timeIntervalSince(lastRefresh) < 15 * 60, !channels.isEmpty { return }
+        await syncCredentials(force: force)
+        guard let client else { return }
+        if channelProfiles.isEmpty, activeServer?.hasRESTAccess == true {
+            Task { await loadChannelProfiles() }
+        }
         async let live: Void = refreshLive(client)
         async let vod: Void = refreshVOD(client)
         _ = await (live, vod)
         lastRefresh = Date()
         saveDiskCache()
+        if let id = activeServer?.id { NewEpisodeTracker.shared.noteServerSeries(rawSeries, serverID: id) }
+        SnapshotPublisher.schedule()
     }
 
     private func refreshLive(_ client: XtreamClient) async {
@@ -151,11 +249,38 @@ final class DispatcharrStore {
     }
 
     private func applyLive(categories: [XCCategory], channels newChannels: [XCChannel]) {
-        let hideAdult = AppSettings.shared.values.hideAdult
-        let visible = newChannels.filter { !(hideAdult && $0.isAdult) }
+        rawLiveCategories = categories.filter { $0.id != "__other" }
+        rawChannels = newChannels
+        let profiles = ProfileStore.shared
+        let kids = profiles.isKidsMode
+        let hideAdult = AppSettings.shared.values.hideAdult || kids
+        var visible = newChannels.filter { !(hideAdult && $0.isAdult) }
+        // Dispatcharr channel profile membership (REST); skipped when the shape was unclear or
+        // nothing would match (ids from a different numbering scheme).
+        channelProfileNote = nil
+        if let pid = activeServer?.channelProfileID, let profile = channelProfiles.first(where: { $0.id == pid }) {
+            if let ids = profile.channelIDs {
+                let filtered = visible.filter { ids.contains($0.id) }
+                if filtered.isEmpty && !visible.isEmpty && !ids.isEmpty {
+                    channelProfileNote = "The “\(profile.name)” profile couldn't be matched to your channels, so all channels are shown."
+                } else {
+                    visible = filtered
+                }
+            } else {
+                channelProfileNote = "Dispatcharr didn't return the channels of “\(profile.name)”, so all channels are shown."
+            }
+        }
+        if kids {
+            let allowed = profiles.activeProfile.allowedCategoryIDs
+            let names = Dictionary(categories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            visible = visible.filter { ch in
+                allowed.contains(ch.categoryID) || KidsFilter.isKidsCategory(names[ch.categoryID] ?? "") || KidsFilter.isKidsCategory(ch.name)
+            }
+        }
         channels = visible.sorted { ($0.number ?? Int.max, $0.name) < ($1.number ?? Int.max, $1.name) }
+        channelIndex = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         channelsByCategory = Dictionary(grouping: channels, by: \.categoryID)
-        liveCategories = categories.filter { channelsByCategory[$0.id]?.isEmpty == false }
+        liveCategories = categories.filter { $0.id != "__other" && channelsByCategory[$0.id]?.isEmpty == false }
         // Channels whose category is missing still need a home.
         let known = Set(liveCategories.map(\.id))
         if channels.contains(where: { !known.contains($0.categoryID) }) {
@@ -166,9 +291,22 @@ final class DispatcharrStore {
     }
 
     private func applyVOD(movieCategories mc: [XCCategory], movies mv: [XCMovie], seriesCategories sc: [XCCategory], series sv: [XCSeries]) {
-        let hideAdult = AppSettings.shared.values.hideAdult
-        movies = dedupeMovies(mv.filter { !(hideAdult && $0.isAdult) })
-        series = dedupeSeries(sv)
+        rawMovieCategories = mc
+        rawMovies = mv
+        rawSeriesCategories = sc
+        rawSeries = sv
+        let kids = ProfileStore.shared.isKidsMode
+        let hideAdult = AppSettings.shared.values.hideAdult || kids
+        var mvVisible = mv.filter { !(hideAdult && $0.isAdult) }
+        var svVisible = sv
+        if kids {
+            let movieCatNames = Dictionary(mc.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            let seriesCatNames = Dictionary(sc.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            mvVisible = mvVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: movieCatNames[$0.categoryID]) }
+            svVisible = svVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: seriesCatNames[$0.categoryID]) }
+        }
+        movies = dedupeMovies(mvVisible)
+        series = dedupeSeries(svVisible)
         let movieCats = Set(movies.map(\.categoryID))
         let seriesCats = Set(series.map(\.categoryID))
         movieCategories = mc.filter { movieCats.contains($0.id) }
@@ -229,7 +367,16 @@ final class DispatcharrStore {
 
     // MARK: Lookups
 
-    func channel(_ id: Int) -> XCChannel? { channels.first { $0.id == id } }
+    /// Every live category on the server (unfiltered), for the kids-profile editor.
+    var liveCategoriesForKidsPicker: [XCCategory] {
+        _ = liveCategories
+        return rawLiveCategories
+    }
+
+    func channel(_ id: Int) -> XCChannel? {
+        _ = channels
+        return channelIndex[id]
+    }
 
     func movies(in categoryID: String) -> [XCMovie] { movies.filter { $0.categoryID == categoryID } }
     func series(in categoryID: String) -> [XCSeries] { series.filter { $0.categoryID == categoryID } }
@@ -261,22 +408,32 @@ final class DispatcharrStore {
 
     // MARK: EPG
 
+    /// Bulk XMLTV guide when it covers the channel, else the per-channel XC short EPG.
     func epg(for channelID: Int) -> [XCEPGListing] {
-        epgCache[channelID]?.1 ?? []
+        if let ch = channel(channelID), let bulk = GuideStore.shared.listings(for: ch) { return bulk }
+        return epgCache[channelID]?.1 ?? []
     }
 
     func nowPlaying(_ channelID: Int) -> XCEPGListing? {
-        epg(for: channelID).first { $0.isLive }
+        if let ch = channel(channelID), let bulk = GuideStore.shared.listings(for: ch) {
+            return GuideStore.programme(in: bulk, at: Date())
+        }
+        return epg(for: channelID).first { $0.isLive }
     }
 
     func nextUp(_ channelID: Int) -> XCEPGListing? {
         let now = Date()
+        if let ch = channel(channelID), let bulk = GuideStore.shared.listings(for: ch) {
+            return GuideStore.next(in: bulk, after: now)
+        }
         return epg(for: channelID).filter { $0.start > now }.min { $0.start < $1.start }
     }
 
-    /// Loads (and caches for 10 minutes) the programme list for one channel.
+    /// Loads (and caches for 10 minutes) the programme list for one channel. Returns the bulk
+    /// guide immediately when it covers the channel.
     @discardableResult
     func loadEPG(_ channelID: Int, full: Bool = false) async -> [XCEPGListing] {
+        if let ch = channel(channelID), let bulk = GuideStore.shared.listings(for: ch) { return bulk }
         if case let (date, list)? = epgCache[channelID], Date().timeIntervalSince(date) < 600,
            !list.isEmpty, (!full || list.count > 12) {
             return list
@@ -318,9 +475,9 @@ final class DispatcharrStore {
 
     private func saveDiskCache() {
         guard let id = activeServer?.id else { return }
-        let cache = DiskCache(liveCategories: liveCategories.filter { $0.id != "__other" }, channels: channels,
-                              movieCategories: movieCategories, movies: movies,
-                              seriesCategories: seriesCategories, series: series, savedAt: Date())
+        let cache = DiskCache(liveCategories: rawLiveCategories, channels: rawChannels,
+                              movieCategories: rawMovieCategories, movies: rawMovies,
+                              seriesCategories: rawSeriesCategories, series: rawSeries, savedAt: Date())
         let name = cacheName(id)
         Task.detached(priority: .utility) { FileStore.save(cache, name) }
     }

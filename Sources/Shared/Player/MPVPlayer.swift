@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import CoreVideo
 import Libmpv
 
 /// CAMetalLayer with the MoltenVK workarounds from the MPVKit reference player.
@@ -96,7 +97,15 @@ final class MPVPlayer {
         var subtitleScale: Double = 1.0
     }
 
+    /// Disk-backed back buffer for pausing/rewinding live TV.
+    struct Timeshift {
+        var megabytes: Int
+        var seconds: Int
+        var directory: String
+    }
+
     let view = MPVVideoView(frame: .zero)
+    let options: Options
     weak var delegate: MPVPlayerDelegate?
     private(set) var handle: OpaquePointer?
     private let queue = DispatchQueue(label: "streamforge.mpv.events", qos: .userInitiated)
@@ -118,6 +127,7 @@ final class MPVPlayer {
     ]
 
     init(options: Options) {
+        self.options = options
         guard let mpv = mpv_create() else { return }
         handle = mpv
 
@@ -162,6 +172,7 @@ final class MPVPlayer {
             ("sub-shadow-offset", "1"),
             ("sub-ass-override", "scale"),
             ("audio-file-auto", "no"),
+            ("volume-max", "200"),
             ("screenshot-directory", NSTemporaryDirectory()),
             ("user-agent", options.userAgent?.nilIfEmpty ?? "StreamForge/1.0 (mpv)"),
         ]
@@ -196,7 +207,8 @@ final class MPVPlayer {
     // MARK: Commands
 
     @MainActor
-    func load(_ url: URL, start: Double? = nil, headers: [String: String] = [:], title: String? = nil, live: Bool = false) {
+    func load(_ url: URL, start: Double? = nil, headers: [String: String] = [:], title: String? = nil, live: Bool = false,
+              timeshift: Timeshift? = nil) {
         guard let mpv = handle else { return }
         let headerValue = headers.map { "\($0.key): \($0.value)" }.joined(separator: ",")
         mpv_set_property_string(mpv, "http-header-fields", headerValue)
@@ -207,6 +219,23 @@ final class MPVPlayer {
         mpv_set_property_string(mpv, "demuxer-readahead-secs", live ? "\(AppSettings.shared.values.liveBufferSeconds)" : "30")
         mpv_set_property_string(mpv, "cache-pause-initial", live ? "yes" : "no")
         mpv_set_property_string(mpv, "cache-pause-wait", live ? "\(AppSettings.shared.values.liveBufferSeconds)" : "1")
+        if live, let ts = timeshift {
+            // Keep reading while paused and keep what was watched, on disk, so the user can rewind.
+            try? FileManager.default.createDirectory(atPath: ts.directory, withIntermediateDirectories: true)
+            mpv_set_property_string(mpv, "cache", "yes")
+            mpv_set_property_string(mpv, "cache-on-disk", "yes")
+            mpv_set_property_string(mpv, "demuxer-cache-dir", ts.directory)
+            mpv_set_property_string(mpv, "demuxer-seekable-cache", "yes")
+            mpv_set_property_string(mpv, "demuxer-max-bytes", "\(ts.megabytes)MiB")
+            mpv_set_property_string(mpv, "demuxer-max-back-bytes", "\(ts.megabytes)MiB")
+            mpv_set_property_string(mpv, "demuxer-readahead-secs", "\(ts.seconds)")
+            mpv_set_property_string(mpv, "cache-secs", "\(ts.seconds)")
+        } else {
+            mpv_set_property_string(mpv, "cache-on-disk", "no")
+            mpv_set_property_string(mpv, "demuxer-seekable-cache", "auto")
+            mpv_set_property_string(mpv, "demuxer-max-bytes", "\(options.cacheMB)MiB")
+            mpv_set_property_string(mpv, "demuxer-max-back-bytes", "\(max(32, options.cacheMB / 3))MiB")
+        }
         command("loadfile", url.absoluteString, "replace")
     }
 
@@ -269,6 +298,122 @@ final class MPVPlayer {
                             isSelected: flag(p + "selected"), isExternal: flag(p + "external"),
                             channels: int(p + "demux-channel-count"), isDefault: flag(p + "default"))
         }
+    }
+
+    /// Reads a property as a Swift value tree (String, Bool, Int, Double, [Any], [String: Any], Data).
+    func node(_ name: String) -> Any? {
+        guard let mpv = handle else { return nil }
+        var n = mpv_node()
+        guard mpv_get_property(mpv, name, MPV_FORMAT_NODE, &n) >= 0 else { return nil }
+        defer { mpv_free_node_contents(&n) }
+        return Self.convert(n)
+    }
+
+    static func convert(_ n: mpv_node) -> Any? {
+        switch n.format {
+        case MPV_FORMAT_STRING, MPV_FORMAT_OSD_STRING:
+            guard let s = n.u.string else { return nil }
+            return String(cString: s)
+        case MPV_FORMAT_FLAG:
+            return n.u.flag != 0
+        case MPV_FORMAT_INT64:
+            return Int(n.u.int64)
+        case MPV_FORMAT_DOUBLE:
+            return n.u.double_
+        case MPV_FORMAT_NODE_ARRAY:
+            guard let list = n.u.list else { return [Any]() }
+            let count = Int(list.pointee.num)
+            var out: [Any] = []
+            for i in 0..<count {
+                if let v = convert(list.pointee.values[i]) { out.append(v) }
+            }
+            return out
+        case MPV_FORMAT_NODE_MAP:
+            guard let list = n.u.list else { return [String: Any]() }
+            let count = Int(list.pointee.num)
+            var out: [String: Any] = [:]
+            for i in 0..<count {
+                guard let key = list.pointee.keys[i] else { continue }
+                if let v = convert(list.pointee.values[i]) { out[String(cString: key)] = v }
+            }
+            return out
+        case MPV_FORMAT_BYTE_ARRAY:
+            guard let ba = n.u.ba, let bytes = ba.pointee.data else { return nil }
+            return Data(bytes: bytes, count: ba.pointee.size)
+        default:
+            return nil
+        }
+    }
+
+    // MARK: Frame capture (Picture in Picture fallback)
+
+    /// Grabs the current decoded video frame (no subtitles/OSD) as a 32BGRA pixel buffer.
+    /// Blocks the caller; never call it from the main thread or from the mpv event queue.
+    func copyVideoFrame() -> CVPixelBuffer? {
+        queue.sync { () -> CVPixelBuffer? in
+            // Runs on the event queue, so it can't race `mpv_terminate_destroy` (which is queued there too).
+            guard let mpv = self.handle else { return nil }
+            return Self.screenshot(mpv, format: "bgra") ?? Self.screenshot(mpv, format: nil)
+        }
+    }
+
+    private static func screenshot(_ mpv: OpaquePointer, format: String?) -> CVPixelBuffer? {
+        var args = ["screenshot-raw", "video"]
+        if let format { args.append(format) }
+        var cargs: [UnsafePointer<CChar>?] = args.map { UnsafePointer(strdup($0)) }
+        cargs.append(nil)
+        defer { for p in cargs where p != nil { free(UnsafeMutablePointer(mutating: p)) } }
+
+        var result = mpv_node()
+        guard mpv_command_ret(mpv, &cargs, &result) >= 0 else { return nil }
+        defer { mpv_free_node_contents(&result) }
+        guard result.format == MPV_FORMAT_NODE_MAP, let list = result.u.list else { return nil }
+
+        var width = 0, height = 0, rowBytes = 0, size = 0
+        var pixelFormat = "bgr0"
+        var source: UnsafeRawPointer?
+        for i in 0..<Int(list.pointee.num) {
+            guard let keyPtr = list.pointee.keys[i] else { continue }
+            let value = list.pointee.values[i]
+            switch String(cString: keyPtr) {
+            case "w": if value.format == MPV_FORMAT_INT64 { width = Int(value.u.int64) }
+            case "h": if value.format == MPV_FORMAT_INT64 { height = Int(value.u.int64) }
+            case "stride": if value.format == MPV_FORMAT_INT64 { rowBytes = Int(value.u.int64) }
+            case "format":
+                if value.format == MPV_FORMAT_STRING, let s = value.u.string { pixelFormat = String(cString: s) }
+            case "data":
+                if value.format == MPV_FORMAT_BYTE_ARRAY, let ba = value.u.ba, let bytes = ba.pointee.data {
+                    source = UnsafeRawPointer(bytes)
+                    size = ba.pointee.size
+                }
+            default: break
+            }
+        }
+        guard let src = source, width > 0, height > 0, rowBytes >= width * 4, size >= rowBytes * height,
+              pixelFormat == "bgra" || pixelFormat == "bgr0" else { return nil }
+
+        var out: CVPixelBuffer?
+        let attrs = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs, &out) == kCVReturnSuccess,
+              let buffer = out else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let dst = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let dstRowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        let copyLength = min(width * 4, dstRowBytes)
+        for y in 0..<height {
+            memcpy(dst + y * dstRowBytes, src + y * rowBytes, copyLength)
+        }
+        if pixelFormat == "bgr0" {
+            // bgr0 leaves the padding byte at 0; make it an opaque alpha.
+            let bytes = dst.assumingMemoryBound(to: UInt8.self)
+            for y in 0..<height {
+                var i = y * dstRowBytes + 3
+                let end = y * dstRowBytes + width * 4
+                while i < end { bytes[i] = 255; i += 4 }
+            }
+        }
+        return buffer
     }
 
     struct Chapter: Hashable { var title: String; var time: Double }

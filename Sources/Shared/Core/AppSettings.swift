@@ -86,6 +86,29 @@ final class AppSettings {
         // Live TV
         var startOnLastChannel: Bool = false
         var showChannelNumbers: Bool = true
+
+        // Added after 1.0. Stored as optionals so settings files written by older builds still
+        // decode (synthesized Codable ignores default values for missing keys); use the
+        // non-optional accessors below.
+        var guideDaysStored: Int?
+        var trailerAutoplayStored: Bool?
+        var refreshGuideAutomaticallyStored: Bool?
+
+        /// Days of programme guide to download from Dispatcharr's XMLTV (1–14).
+        var guideDays: Int {
+            get { min(14, max(1, guideDaysStored ?? 3)) }
+            set { guideDaysStored = min(14, max(1, newValue)) }
+        }
+        /// iOS: play a muted trailer behind the detail page header (never on cellular / Low Data Mode).
+        var trailerAutoplay: Bool {
+            get { trailerAutoplayStored ?? true }
+            set { trailerAutoplayStored = newValue }
+        }
+        /// Re-download the bulk guide every 6 hours.
+        var refreshGuideAutomatically: Bool {
+            get { refreshGuideAutomaticallyStored ?? true }
+            set { refreshGuideAutomaticallyStored = newValue }
+        }
     }
 
     var values: Values {

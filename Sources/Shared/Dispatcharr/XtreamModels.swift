@@ -399,6 +399,18 @@ struct XCEPGListing: Decodable, Hashable, Identifiable {
     var start: Date
     var end: Date
     var hasArchive: Bool
+    // Filled from the bulk XMLTV guide (the XC short EPG doesn't carry these).
+    var subtitle: String?
+    var categories: [String] = []
+    /// On-screen episode number, e.g. "S02E05".
+    var episodeNumber: String?
+    /// XMLTV <new/>.
+    var isNew = false
+    /// XMLTV <live/>: a live broadcast (not to be confused with `isLive`, "airing now").
+    var isLiveBroadcast = false
+    /// XMLTV <premiere/>.
+    var isPremiere = false
+    var icon: URL?
 
     enum CodingKeys: String, CodingKey {
         case id, title, description, start_timestamp, stop_timestamp, has_archive, start, end
@@ -427,6 +439,8 @@ struct XCEPGListing: Decodable, Hashable, Identifiable {
     }
 
     var isLive: Bool { let now = Date(); return start <= now && now < end }
+    var isUpcoming: Bool { start > Date() }
+    var isSports: Bool { SportsDetector.isSports(self) }
     var progress: Double {
         let total = end.timeIntervalSince(start)
         guard total > 0 else { return 0 }

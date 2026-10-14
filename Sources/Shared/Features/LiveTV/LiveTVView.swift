@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum LiveFilter: Hashable {
-    case favorites, recents, all, category(String)
+    case favorites, recents, sports, all, category(String)
 }
 
 struct LiveTVView: View {
@@ -30,9 +30,17 @@ struct LiveTVView: View {
         }
         .screenBackground()
         .navigationTitle("Live TV")
+        .refreshable {
+            await store.refreshAll(force: true)
+            await GuideStore.shared.refresh(force: true)
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { router.push(.guide) } label: { Label("Guide", systemImage: "calendar.day.timeline.left") }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { openMultiview() } label: { Label("Multiview", systemImage: "rectangle.split.2x2") }
+                    .disabled(store.channels.isEmpty)
             }
         }
         .sheet(item: $programmeChannel) { ChannelProgrammeSheet(channel: $0) }
@@ -84,6 +92,7 @@ struct LiveTVView: View {
     private func filterButtons(vertical: Bool) -> some View {
         filterButton(.favorites, title: "Favorites", icon: "star.fill", count: library.favoriteChannelIDs.count, vertical: vertical)
         filterButton(.recents, title: "Recent", icon: "clock", count: library.recentChannelIDs.count, vertical: vertical)
+        filterButton(.sports, title: "Sports", icon: "sportscourt", count: sportsChannels.count, vertical: vertical)
         filterButton(.all, title: "All Channels", icon: "square.grid.2x2", count: store.channels.count, vertical: vertical)
         ForEach(store.liveCategories.filter { !library.isHidden(category: "live:\($0.id)") }) { cat in
             filterButton(.category(cat.id), title: cat.name, icon: nil, count: store.channelsByCategory[cat.id]?.count ?? 0, vertical: vertical)
@@ -130,6 +139,7 @@ struct LiveTVView: View {
         switch filter {
         case .favorites: list = library.favoriteChannelIDs.compactMap { store.channel($0) }
         case .recents: list = library.recentChannelIDs.compactMap { store.channel($0) }
+        case .sports: list = sportsChannels
         case .all: list = store.channels.filter { !library.isHidden(category: "live:\($0.categoryID)") }
         case .category(let id): list = store.channelsByCategory[id] ?? []
         }
@@ -138,12 +148,30 @@ struct LiveTVView: View {
         return list
     }
 
+    /// Channels airing sport right now (bulk guide), then channels in sports groups.
+    private var sportsChannels: [XCChannel] {
+        let live = GuideStore.shared.liveSportsNow(channels: store.channels, limit: 200).map(\.channel)
+        let liveIDs = Set(live.map(\.id))
+        let sportsCats = Set(store.liveCategories.filter { SportsDetector.isSportsCategory($0.name) }.map(\.id))
+        let byCategory = store.channels.filter { sportsCats.contains($0.categoryID) && !liveIDs.contains($0.id) }
+        return live + byCategory
+    }
+
+    /// Up to 4 favorites, else the first channels of the current filter.
+    private func openMultiview() {
+        let favorites = library.favoriteChannelIDs.compactMap { store.channel($0) }
+        let pick = favorites.count >= 2 ? favorites : filtered
+        PlayerCoordinator.shared.openMultiview(Array(pick.prefix(4)))
+    }
+
     private var channelList: some View {
         let list = filtered
         return Group {
             if list.isEmpty {
-                EmptyStateView(icon: filter == .favorites ? "star" : "tv", title: filter == .favorites ? "No favorites yet" : "Nothing here",
-                               message: filter == .favorites ? "Long-press a channel and choose Add to Favorites." : "No channels match.")
+                EmptyStateView(icon: filter == .favorites ? "star" : (filter == .sports ? "sportscourt" : "tv"),
+                               title: filter == .favorites ? "No favorites yet" : (filter == .sports ? "No sports on right now" : "Nothing here"),
+                               message: filter == .favorites ? "Long-press a channel and choose Add to Favorites."
+                                   : (filter == .sports ? "Sports are detected from the TV guide. Download it in Settings → Dispatcharr." : "No channels match."))
             } else {
                 ScrollView {
                     LazyVStack(spacing: rowSpacing) {
@@ -203,7 +231,10 @@ struct ChannelRow: View {
                         }
                     }
                     if let now {
-                        Text(now.title).font(.subheadline).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+                        HStack(spacing: 6) {
+                            if now.isSports { SportBadge() }
+                            Text(now.title).font(.subheadline).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+                        }
                         HStack(spacing: 8) {
                             ProgressLine(fraction: now.progress).frame(width: 90)
                             Text(now.timeRangeText).font(.caption2).foregroundStyle(Theme.secondaryText)
@@ -328,6 +359,12 @@ struct ChannelProgrammeSheet: View {
                 HStack {
                     Text(p.title).font(.headline).foregroundStyle(past && !p.hasArchive ? Theme.secondaryText : .white)
                     if p.isLive { LiveBadge() }
+                    if p.isSports { SportBadge() }
+                    if p.isNew { Pill(text: "NEW", color: Theme.accent.opacity(0.5)) }
+                }
+                if let sub = p.subtitle ?? p.episodeNumber {
+                    Text([p.episodeNumber, p.subtitle].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? sub)
+                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.secondaryText)
                 }
                 if !p.description.isEmpty {
                     Text(p.description).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(3)
@@ -339,6 +376,12 @@ struct ChannelProgrammeSheet: View {
                     }
                     if past && (p.hasArchive || channel.hasArchive) {
                         Button { dismiss(); player.playCatchup(channel, programme: p) } label: { Label("Catch-up", systemImage: "gobackward") }
+                    }
+                    if p.start > Date() {
+                        let on = ReminderCenter.shared.has(channelID: channel.id, programme: p)
+                        Button { ReminderCenter.shared.toggle(channel: channel, programme: p) } label: {
+                            Label(on ? "Reminder Set" : "Remind Me", systemImage: on ? "bell.fill" : "bell")
+                        }
                     }
                     if !past, store.restClient() != nil {
                         Button { record(p) } label: { Label("Record", systemImage: "record.circle") }

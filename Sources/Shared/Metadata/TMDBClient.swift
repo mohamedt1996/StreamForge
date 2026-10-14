@@ -136,6 +136,101 @@ struct TMDBClient {
         var recommendations: Recommendations?
         var release_dates: ReleaseDates?
         var content_ratings: ContentRatings?
+        var belongs_to_collection: CollectionRef?
+    }
+
+    struct CollectionRef: Decodable, Hashable {
+        var id: Int
+        var name: String?
+        var poster_path: String?
+        var backdrop_path: String?
+
+        var info: CollectionInfo {
+            CollectionInfo(id: id, name: name ?? "Collection", poster: TMDBClient.image(poster_path, size: "w342"),
+                           backdrop: TMDBClient.image(backdrop_path, size: "w1280"))
+        }
+    }
+
+    struct CollectionDetails: Decodable {
+        var id: Int
+        var name: String
+        var overview: String?
+        var poster_path: String?
+        var backdrop_path: String?
+        var parts: LossyArray<Summary>?
+    }
+
+    /// Just enough of /movie/{id} to know its collection (cheap lookups for the Collections shelf).
+    struct MovieBasics: Decodable {
+        var id: Int
+        var belongs_to_collection: CollectionRef?
+    }
+
+    struct PersonSummary: Decodable, Hashable, Identifiable {
+        var id: Int
+        var name: String
+        var profile_path: String?
+        var known_for_department: String?
+        var popularity: Double?
+    }
+
+    struct PersonCredit: Decodable, Hashable, Identifiable {
+        var creditID: String
+        var tmdbID: Int
+        var mediaType: String
+        var title: String
+        var poster: String?
+        var backdrop: String?
+        var date: String?
+        var popularity: Double
+        var vote: Double?
+        var role: String?
+        var genreIDs: [Int]
+
+        var id: String { creditID }
+        var year: Int? { date.flatMap { Int($0.prefix(4)) } }
+
+        enum CodingKeys: String, CodingKey {
+            case credit_id, id, media_type, title, name, poster_path, backdrop_path, release_date, first_air_date
+            case popularity, vote_average, character, job, genre_ids
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            tmdbID = try c.decode(Int.self, forKey: .id)
+            creditID = c.flexString(.credit_id) ?? "\(tmdbID)-\(UUID().uuidString)"
+            mediaType = c.flexString(.media_type) ?? "movie"
+            title = c.flexString(.title) ?? c.flexString(.name) ?? ""
+            poster = c.flexString(.poster_path)
+            backdrop = c.flexString(.backdrop_path)
+            date = c.flexString(.release_date) ?? c.flexString(.first_air_date)
+            popularity = c.flexDouble(.popularity) ?? 0
+            vote = c.flexDouble(.vote_average)
+            role = c.flexString(.character) ?? c.flexString(.job)
+            genreIDs = (try? c.decodeIfPresent([Int].self, forKey: .genre_ids)) ?? []
+        }
+
+        var mediaItem: MediaItem {
+            let type: MediaType = mediaType == "tv" ? .series : .movie
+            return MediaItem(id: "tmdb:\(type.rawValue):\(tmdbID)", type: type, title: title, year: year,
+                             poster: TMDBClient.image(poster, size: "w342"), backdrop: TMDBClient.image(backdrop, size: "w1280"),
+                             rating: vote.flatMap { $0 > 0 ? $0 : nil }, genres: genreIDs.compactMap { TMDBClient.genreNames[$0] },
+                             tmdbID: tmdbID, origin: .tmdb(id: tmdbID))
+        }
+    }
+
+    struct PersonDetails: Decodable {
+        struct Credits: Decodable { var cast: LossyArray<PersonCredit>?; var crew: LossyArray<PersonCredit>? }
+        struct Images: Decodable { struct Profile: Decodable { var file_path: String }; var profiles: [Profile]? }
+        var id: Int
+        var name: String
+        var biography: String?
+        var birthday: String?
+        var deathday: String?
+        var place_of_birth: String?
+        var profile_path: String?
+        var known_for_department: String?
+        var combined_credits: Credits?
+        var images: Images?
     }
 
     struct SeasonDetails: Decodable {
@@ -195,6 +290,27 @@ struct TMDBClient {
         let langs = "\(language),en,null"
         return try await request(Details.self, (isTV ? "tv/" : "movie/") + String(id),
                                  ["append_to_response": append, "include_image_language": langs, "include_video_language": langs])
+    }
+
+    func collection(id: Int) async throws -> CollectionDetails {
+        try await request(CollectionDetails.self, "collection/\(id)")
+    }
+
+    func movieBasics(id: Int) async throws -> MovieBasics {
+        try await request(MovieBasics.self, "movie/\(id)")
+    }
+
+    func person(id: Int) async throws -> PersonDetails {
+        var p = try await request(PersonDetails.self, "person/\(id)", ["append_to_response": "combined_credits,images"])
+        if (p.biography ?? "").isEmpty, !language.hasPrefix("en") {
+            let en = TMDBClient(key: key, language: "en")
+            if let bio = try? await en.request(PersonDetails.self, "person/\(id)").biography, !bio.isEmpty { p.biography = bio }
+        }
+        return p
+    }
+
+    func searchPerson(_ name: String) async throws -> [PersonSummary] {
+        try await request(Page<PersonSummary>.self, "search/person", ["query": name, "include_adult": "false"]).results.elements
     }
 
     func season(tvID: Int, season: Int) async throws -> SeasonDetails {

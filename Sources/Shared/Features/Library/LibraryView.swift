@@ -11,12 +11,36 @@ struct LibraryView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.rowSpacing) {
                 HStack(spacing: 12) {
-                    libraryTile("Torrents", icon: "arrow.down.circle", subtitle: "Active streams") { router.push(.torrents) }
+                    libraryTile("Activity", icon: "arrow.down.circle", subtitle: activitySubtitle) { router.push(.torrents) }
                     if store.restClient() != nil {
                         libraryTile("Recordings", icon: "record.circle", subtitle: "DVR on your server") { router.push(.recordings) }
                     }
+                    libraryTile(ProfileStore.shared.activeProfile.name, icon: "person.crop.circle", subtitle: "Switch profile") {
+                        ProfileStore.shared.needsSelection = true
+                    }
                 }
                 .padding(.horizontal, Theme.gutter)
+
+                remindersSection
+
+                Shelf(title: "Up Next", subtitle: "From Trakt", items: trakt.upNext) { entry in
+                    Button { router.push(.detail(entry.item)) } label: {
+                        LandscapeCard(title: entry.item.title, subtitle: "\(entry.episode.code) · \(entry.episode.title)",
+                                      image: entry.item.backdrop, fallbackImage: entry.item.poster,
+                                      badge: entry.isNew ? "NEW" : nil)
+                    }
+                    .cardButtonStyle()
+                }
+
+                let downloaded = DownloadManager.shared.records.filter { $0.state == .completed }
+                Shelf(title: "Downloaded", items: downloaded) { rec in
+                    Button { DownloadManager.shared.play(rec) } label: {
+                        LandscapeCard(title: rec.displayTitle, subtitle: rec.bytesWritten.byteText,
+                                      image: rec.episode?.still ?? rec.item.backdrop, fallbackImage: DownloadManager.shared.posterURL(rec),
+                                      badge: "OFFLINE")
+                    }
+                    .cardButtonStyle()
+                }
 
                 Shelf(title: "Continue Watching", items: library.continueWatching) { entry in
                     Button { router.push(.detail(entry.item)) } label: {
@@ -40,6 +64,48 @@ struct LibraryView: View {
         .navigationTitle("My Library")
     }
 
+    private var activitySubtitle: String {
+        let torrents = TorrentEngine.shared.activeCount
+        let downloads = DownloadManager.shared.activeCount
+        if torrents + downloads == 0 { return "Torrents & downloads" }
+        var parts: [String] = []
+        if torrents > 0 { parts.append("\(torrents) torrent\(torrents == 1 ? "" : "s")") }
+        if downloads > 0 { parts.append("\(downloads) downloading") }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var remindersSection: some View {
+        let reminders = ReminderCenter.shared.reminders
+        if !reminders.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeader(title: "Reminders", subtitle: "Programmes you asked to be reminded about")
+                VStack(spacing: 8) {
+                    ForEach(reminders) { r in
+                        HStack(spacing: 12) {
+                            if let ch = store.channel(r.channelID) {
+                                ChannelLogo(url: ch.icon, name: ch.name, size: 40)
+                            } else {
+                                Image(systemName: "bell.fill").frame(width: 40)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(r.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                Text("\(r.channelName) · \(r.start.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption).foregroundStyle(Theme.secondaryText)
+                            }
+                            Spacer()
+                            Button { ReminderCenter.shared.remove(r.id) } label: { Image(systemName: "trash") }
+                                .buttonStyle(.bordered)
+                        }
+                        .padding(10)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+                .padding(.horizontal, Theme.gutter)
+            }
+        }
+    }
+
     private func poster(_ item: MediaItem) -> some View {
         Button { router.push(.detail(item)) } label: { PosterCard(item: item) }
             .cardButtonStyle()
@@ -61,105 +127,6 @@ struct LibraryView: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct TorrentsView: View {
-    @Environment(TorrentEngine.self) private var engine
-    @Environment(PlayerCoordinator.self) private var player
-    @Environment(AppRouter.self) private var router
-    @State private var magnet = ""
-    @State private var importing = false
-    @State private var error: String?
-    @State private var reachable: Bool?
-
-    var body: some View {
-        List {
-            Section {
-                HStack {
-                    TextField("Paste a magnet link", text: $magnet)
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        #endif
-                    Button("Play") {
-                        player.playMagnet(magnet.trimmed)
-                        magnet = ""
-                    }
-                    .disabled(TorrentSource.parse(magnet: magnet.trimmed) == nil)
-                }
-                #if os(iOS)
-                Button { importing = true } label: { Label("Open .torrent file", systemImage: "doc.badge.plus") }
-                #endif
-            } header: {
-                Text("Stream a torrent")
-            } footer: {
-                Text("Engine: \(engine.mode.label)\(reachable == false ? " — not reachable" : "")")
-            }
-
-            Section("Active") {
-                if engine.torrents.isEmpty {
-                    Text("No active torrents").foregroundStyle(Theme.secondaryText)
-                }
-                ForEach(engine.torrents) { t in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(t.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                        HStack(spacing: 10) {
-                            Label("\(t.activePeers)/\(t.totalPeers)", systemImage: "person.2")
-                            Label(t.speedText, systemImage: "arrow.down")
-                            if t.size > 0 { Text(t.size.byteText) }
-                        }
-                        .font(.caption).foregroundStyle(Theme.secondaryText)
-                        ForEach(t.videoFiles) { f in
-                            Button {
-                                let source = TorrentSource(infoHash: t.hash, fileIdx: f.id - 1, filename: f.name, title: t.title, poster: t.poster)
-                                player.play(PlaybackRequest(
-                                    item: MediaItem(id: "torrent:\(t.hash):\(f.id)", type: .other, title: f.name, poster: t.poster, origin: .tmdb(id: 0)),
-                                    source: PlaybackSource(id: "tfile:\(t.hash):\(f.id)", kind: .torrent(source), title: f.name, provider: "Torrent")))
-                            } label: {
-                                Label("\(f.name) · \(f.length.byteText)", systemImage: "play.circle").font(.caption).lineLimit(1)
-                            }
-                        }
-                    }
-                    #if os(iOS)
-                    .swipeActions {
-                        Button(role: .destructive) { Task { await engine.remove(t.hash) } } label: { Label("Remove", systemImage: "trash") }
-                    }
-                    #endif
-                    .contextMenu {
-                        Button(role: .destructive) { Task { await engine.remove(t.hash) } } label: { Label("Remove", systemImage: "trash") }
-                    }
-                }
-            }
-        }
-        .hiddenListBackground()
-        .screenBackground()
-        .navigationTitle("Torrents")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                await refresh()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-            }
-        }
-        #if os(iOS)
-        .fileImporter(isPresented: $importing, allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]) { result in
-            if case .success(let url) = result { router.handle(url) }
-        }
-        #endif
-        .alert("Torrent", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: { Text(error ?? "") }
-    }
-
-    private func refresh() async {
-        if engine.mode == .embedded { await engine.startEmbeddedIfNeeded() }
-        reachable = await engine.ping()
-        await engine.refreshList()
     }
 }
 
