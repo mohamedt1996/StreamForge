@@ -6,6 +6,21 @@ import UserNotifications
 #if os(iOS)
 /// Receives background download events and sets up notification routing.
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// The player locks iPhone to landscape while it is on screen.
+    static var orientationLock: UIInterfaceOrientationMask = .all
+
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        AppDelegate.orientationLock
+    }
+
+    @MainActor static func setOrientation(_ mask: UIInterfaceOrientationMask, rotateTo: UIInterfaceOrientationMask) {
+        orientationLock = mask
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            scene.windows.forEach { $0.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations() }
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: rotateTo)) { _ in }
+        }
+    }
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = NotificationRouter.shared
         return true

@@ -282,11 +282,26 @@ fun SourcesDialog(item: MediaItem, ep: Episode?, onDismiss: () -> Unit, onPick: 
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
         title = { Text(ep?.let { "${item.title} · ${it.code}" } ?: item.title) },
         text = {
-            LazyColumn(Modifier.heightIn(max = 520.dp)) {
-                if (model.sorted.isEmpty()) item {
-                    Text(if (model.loading) "Waiting for ${model.pendingAddons} addon(s)…" else "No sources found. Install stream addons in Settings.", color = Palette.secondary)
+            var quality by remember(item.id, ep?.id) { mutableStateOf<String?>(null) }
+            val qualities = model.sorted.filter { it.resolution > 0 }.sortedByDescending { it.resolution }.map { it.resolutionLabel }.distinct()
+            val list = model.sorted.filter { quality == null || it.resolutionLabel == quality }
+            Column {
+                // Quality chips stay pinned above the scrolling list.
+                if (qualities.size > 1) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
+                        Chip("All", quality == null) { quality = null }
+                        qualities.forEach { q ->
+                            Spacer(Modifier.width(8.dp))
+                            Chip(q, quality == q) { quality = if (quality == q) null else q }
+                        }
+                    }
                 }
-                model.sorted.forEach { src -> item(key = src.id) { SourceRow(src) { onPick(src) } } }
+                LazyColumn(Modifier.heightIn(max = 520.dp)) {
+                    if (list.isEmpty()) item {
+                        Text(if (model.loading) "Waiting for ${model.pendingAddons} addon(s)…" else "No sources found. Install stream addons in Settings.", color = Palette.secondary)
+                    }
+                    list.forEach { src -> item(key = src.id) { SourceRow(src) { onPick(src) } } }
+                }
             }
         },
     )

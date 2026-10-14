@@ -399,31 +399,36 @@ private val listIcon = Icons.Filled.List
 @Composable
 private fun LoadingArtwork(c: PlayerController) {
     val r = c.request
+    // Clock-driven Ken Burns (continuous zoom + slow pan, 40 s loop) and a breathing logo, like Stremio.
     val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "loading")
-    val drift by t.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(
-        androidx.compose.animation.core.tween(18_000, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-        androidx.compose.animation.core.RepeatMode.Reverse), label = "drift")
-    val pulse by t.animateFloat(0.75f, 1f, androidx.compose.animation.core.infiniteRepeatable(
-        androidx.compose.animation.core.tween(1600), androidx.compose.animation.core.RepeatMode.Reverse), label = "pulse")
+    val clock by t.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(
+        androidx.compose.animation.core.tween(40_000, easing = androidx.compose.animation.core.LinearEasing),
+        androidx.compose.animation.core.RepeatMode.Restart), label = "clock")
+    val breathRaw by t.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(
+        androidx.compose.animation.core.tween(1200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        androidx.compose.animation.core.RepeatMode.Reverse), label = "breath")
+    val pulse = 0.55f + 0.45f * breathRaw
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         com.mohamedt.streamforge.ui.Artwork(
             r.episode?.still ?: r.item.backdrop ?: r.item.poster,
             Modifier.fillMaxSize().graphicsLayer {
-                val s = 1.02f + 0.16f * drift
+                val a = clock * 2f * Math.PI.toFloat()
+                val phase = (1f - kotlin.math.cos(a)) / 2f
+                val s = 1.12f + 0.22f * phase
                 scaleX = s; scaleY = s
-                translationX = size.width * (0.03f - 0.07f * drift)
-                translationY = size.height * (0.02f - 0.04f * drift)
-                alpha = 0.55f
+                translationX = size.width * 0.07f * kotlin.math.sin(a)
+                translationY = size.height * 0.04f * kotlin.math.sin(a * 2f)
+                alpha = 0.6f
             },
         )
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.2f), Color.Black.copy(alpha = 0.45f), Color.Black.copy(alpha = 0.9f)))))
         Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             if (r.item.logo != null) {
-                com.mohamedt.streamforge.ui.Artwork(r.item.logo, Modifier.width(360.dp).height(130.dp).graphicsLayer { alpha = pulse },
+                com.mohamedt.streamforge.ui.Artwork(r.item.logo, Modifier.width(360.dp).height(130.dp).graphicsLayer { alpha = pulse; scaleX = 0.95f + 0.07f * breathRaw; scaleY = scaleX },
                     androidx.compose.ui.layout.ContentScale.Fit)
             } else {
                 Text(r.item.title, fontSize = 34.sp, fontWeight = FontWeight.Black, maxLines = 3,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.graphicsLayer { alpha = pulse })
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.graphicsLayer { alpha = pulse; scaleX = 0.95f + 0.07f * breathRaw; scaleY = scaleX })
             }
             r.episode?.let { Spacer(Modifier.height(8.dp)); Text("${it.code} · ${it.title}", color = Color.White.copy(alpha = 0.8f), fontWeight = FontWeight.SemiBold) }
         }

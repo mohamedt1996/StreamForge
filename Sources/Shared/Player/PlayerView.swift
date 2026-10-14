@@ -123,12 +123,18 @@ struct PlayerScreen: View {
             #if os(iOS)
             UIApplication.shared.isIdleTimerDisabled = true
             keyboardFocused = true
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                AppDelegate.setOrientation(.landscape, rotateTo: .landscape)
+            }
             #endif
         }
         .onDisappear {
             model.stop()
             #if os(iOS)
             UIApplication.shared.isIdleTimerDisabled = false
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                AppDelegate.setOrientation(.all, rotateTo: .portrait)
+            }
             #endif
         }
         #if os(tvOS)

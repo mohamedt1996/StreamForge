@@ -81,6 +81,8 @@ extension PlayerScreen {
             }
         }
         .font(.caption2.monospacedDigit().weight(.semibold))
+        .lineLimit(1)
+        .fixedSize()
         .foregroundStyle(.white.opacity(0.9))
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(.black.opacity(0.45), in: Capsule())

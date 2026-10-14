@@ -256,53 +256,62 @@ extension PlayerScreen {
 struct LoadingArtworkView: View {
     let request: PlaybackRequest
     var status: String?
-    @State private var drift = false
-    @State private var pulse = false
+    @State private var startDate = Date()
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black
-                RemoteImage(url: request.episode?.still ?? request.item.backdrop ?? request.item.poster)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .scaleEffect(drift ? 1.18 : 1.02)
-                    .offset(x: drift ? -geo.size.width * 0.04 : geo.size.width * 0.03,
-                            y: drift ? -geo.size.height * 0.02 : geo.size.height * 0.02)
-                    .clipped()
-                    .opacity(0.55)
-                LinearGradient(colors: [.black.opacity(0.2), .black.opacity(0.45), .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
-                VStack(spacing: 18) {
-                    Spacer()
-                    if let logo = request.item.logo {
-                        RemoteImage(url: logo, contentMode: .fit)
-                            .frame(maxWidth: min(geo.size.width * 0.6, 520), maxHeight: 140)
-                            .opacity(pulse ? 1 : 0.75)
-                    } else {
-                        Text(request.item.title)
-                            .font(.system(size: 34, weight: .heavy))
-                            .multilineTextAlignment(.center)
-                            .lineLimit(3)
-                            .opacity(pulse ? 1 : 0.8)
+        // Driven by the clock rather than implicit animations, so the motion is continuous and
+        // can't be swallowed by the cover's presentation transition.
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSince(startDate)
+            // Ken Burns: steady zoom-in with a slow diagonal pan, looping smoothly every 40 s.
+            let phase = (1 - cos(t * 2 * .pi / 40)) / 2          // 0 → 1 → 0
+            let scale = 1.12 + 0.22 * phase
+            let panX = sin(t * 2 * .pi / 40) * 0.07
+            let panY = cos(t * 2 * .pi / 52) * 0.04
+            // Logo "breathing", like Stremio's start screen.
+            let breath = (1 - cos(t * 2 * .pi / 2.4)) / 2
+            GeometryReader { geo in
+                ZStack {
+                    Color.black
+                    RemoteImage(url: request.episode?.still ?? request.item.backdrop ?? request.item.poster)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(scale)
+                        .offset(x: geo.size.width * panX, y: geo.size.height * panY)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .opacity(0.6)
+                    LinearGradient(colors: [.black.opacity(0.25), .black.opacity(0.4), .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+                    VStack(spacing: 18) {
+                        Spacer()
+                        Group {
+                            if let logo = request.item.logo {
+                                RemoteImage(url: logo, contentMode: .fit)
+                                    .frame(maxWidth: min(geo.size.width * 0.6, 520), maxHeight: 140)
+                            } else {
+                                Text(request.item.title)
+                                    .font(.system(size: 34, weight: .heavy))
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(3)
+                            }
+                        }
+                        .scaleEffect(0.95 + 0.07 * breath)
+                        .opacity(0.55 + 0.45 * breath)
+                        if let ep = request.episode {
+                            Text("\(ep.code) · \(ep.title)").font(.headline).foregroundStyle(.white.opacity(0.8))
+                        }
+                        Spacer()
+                        HStack(spacing: 10) {
+                            ProgressView().tint(.white)
+                            Text(status ?? "Starting…").font(.footnote.weight(.medium)).foregroundStyle(.white.opacity(0.8))
+                                .lineLimit(1)
+                        }
+                        .padding(.bottom, 48)
                     }
-                    if let ep = request.episode {
-                        Text("\(ep.code) · \(ep.title)").font(.headline).foregroundStyle(.white.opacity(0.8))
-                    }
-                    Spacer()
-                    HStack(spacing: 10) {
-                        ProgressView().tint(.white)
-                        Text(status ?? "Starting…").font(.footnote.weight(.medium)).foregroundStyle(.white.opacity(0.8))
-                            .contentTransition(.opacity)
-                    }
-                    .padding(.bottom, 48)
+                    .padding(.horizontal, 32)
                 }
-                .padding(.horizontal, 32)
             }
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 18).repeatForever(autoreverses: true)) { drift = true }
-            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
-        }
     }
 }

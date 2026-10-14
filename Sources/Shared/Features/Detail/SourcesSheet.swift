@@ -23,7 +23,6 @@ struct SourcesSheet: View {
                     let list = filtered(model.sorted)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                            filters(model)
                             if list.isEmpty && !model.isLoading {
                                 EmptyStateView(icon: "antenna.radiowaves.left.and.right.slash", title: "No sources",
                                                message: "None of your addons returned a stream for this title. Install more stream addons in Settings → Addons.")
@@ -40,7 +39,16 @@ struct SourcesSheet: View {
                                 .padding()
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(Theme.gutter)
+                    }
+                    // Quality / provider chips stay pinned while the list scrolls.
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        filters(model)
+                            .padding(.horizontal, Theme.gutter)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.background.opacity(0.96))
                     }
                 } else {
                     LoadingView(text: "Finding sources…")
