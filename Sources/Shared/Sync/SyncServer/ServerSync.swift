@@ -285,11 +285,16 @@ final class ServerSync {
     }
 
     /// First sign-in (or lost state): queue every local record, then pull everything from rev 0.
-    private func prepareFirstSyncIfNeeded() {
+    private func prepareFirstSyncIfNeeded(previous: [String: Known] = [:]) {
         guard isSignedIn, !state.initialized else { return }
+        let legacyWatched = state.legacyWatched
+        let pendingAddons = state.pendingAddons
         state = State()
+        // Resolutions that keep record ids stable, and addons still waiting to be installed.
+        state.legacyWatched = legacyWatched
+        state.pendingAddons = pendingAddons
         outbox = [:]
-        scan(baseline: true)
+        scan(baseline: true, previous: previous)
         state.initialized = true
         saveNow()
     }
@@ -345,20 +350,26 @@ final class ServerSync {
             let res = try await api.pull(since: since, wait: waitSeconds)
             waitSeconds = 0
             received += res.records.count
-            if res.rev > 0, res.rev < since {
-                // The server lost its data (restored / recreated): upload everything again.
+            if res.rev < since {
+                // The server lost its data (restored / recreated, possibly to rev 0): upload
+                // everything again. Keep the timestamps of the versions this device already has so
+                // an older backup doesn't beat newer local data.
+                scan()
+                let previous = state.known
                 state.initialized = false
-                prepareFirstSyncIfNeeded()
+                prepareFirstSyncIfNeeded(previous: previous)
                 schedulePush(delay: 0)
                 return received
             }
             if !res.records.isEmpty {
                 scan() // capture local edits made during the long poll before applying
                 apply(res.records)
+                // Make the applied records durable before lastRev moves past them.
+                LibraryStore.shared.flush()
             }
             if res.rev > state.lastRev { state.lastRev = res.rev }
             markSynced()
-            saveSoon()
+            if res.records.isEmpty { saveSoon() } else { saveNow() }
             if !res.more || res.rev <= since { break }
         }
         if !outbox.isEmpty { schedulePush(delay: 1) }
@@ -447,7 +458,7 @@ final class ServerSync {
     /// `baseline` (first sign-in): queue everything with its own timestamp, or 1 when it has
     /// none, so records already on the server win and records it lacks are added.
     @discardableResult
-    func scan(baseline: Bool = false) -> Int {
+    func scan(baseline: Bool = false, previous: [String: Known] = [:]) -> Int {
         guard isSignedIn else { return 0 }
         let local = buildLocalRecords()
         let now = Self.nowMs()
@@ -463,6 +474,18 @@ final class ServerSync {
                     let t = state.known[key]?.t ?? 0
                     state.known[key] = Known(h: h, t: t, d: false)
                 }
+                // The newly active server's favorites that other devices synced aren't in this
+                // device's (single) list: that is not a removal, so never turn them into tombstones.
+                if let activeServer {
+                    for (key, known) in state.known where !known.d && local[key] == nil {
+                        let parts = Self.splitKey(key)
+                        guard parts.collection == "channels" else { continue }
+                        let p = parts.id.split(separator: "|", omittingEmptySubsequences: false)
+                        if p.count == 3, String(p[1]) == activeServer {
+                            state.known[key] = Known(h: "", t: known.t, d: true)
+                        }
+                    }
+                }
             }
             state.channelServer = activeServer
         }
@@ -474,6 +497,8 @@ final class ServerSync {
             var t: Int64
             if baseline {
                 t = rec.stamp ?? 1
+                // Server reset: the version this device already had keeps its own timestamp.
+                if let prev = previous[key], !prev.d, prev.h == h, prev.t > t { t = prev.t }
             } else {
                 t = rec.stamp ?? now
                 if let known, t <= known.t { t = known.t + 1 }

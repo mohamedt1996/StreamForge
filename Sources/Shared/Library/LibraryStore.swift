@@ -96,6 +96,11 @@ final class LibraryStore {
         watched = s.watched
         lastChannelID = s.lastChannelID
         hiddenCategoryIDs = s.hiddenCategoryIDs
+        // Sync metadata must follow the snapshot too: otherwise records applied from the server lose
+        // their dates / canonical keys on the next save, and switching profiles leaks the previous
+        // profile's maps into the new one.
+        favoriteDates = s.favoriteDates ?? [:]
+        watchedCanonical = s.watchedCanonical ?? [:]
     }
 
     private func scheduleSave() {

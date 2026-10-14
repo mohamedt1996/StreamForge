@@ -475,6 +475,12 @@ func (a *App) handlePairApprove(w http.ResponseWriter, r *http.Request, p *princ
 		writeRateLimited(w, retry)
 		return
 	}
+	// Also budget wrong codes per IP, so many accounts (open sign-up) can't pool their guesses.
+	ipKey := "code|" + p.ip
+	if blocked, retry := a.ipLimiter.blocked(ipKey); blocked {
+		writeRateLimited(w, retry)
+		return
+	}
 	scopes := p.device.Scopes
 	if req.Scopes != nil {
 		s, ok := normalizeScopes(*req.Scopes)
@@ -495,6 +501,7 @@ func (a *App) handlePairApprove(w http.ResponseWriter, r *http.Request, p *princ
 	code, ok := normalizePairCode(req.Code)
 	if !ok {
 		a.codeLimiter.hit(key)
+		a.ipLimiter.hit(ipKey)
 		writeErr(w, http.StatusNotFound, "invalid_code", "unknown pairing code")
 		return
 	}
@@ -507,6 +514,7 @@ func (a *App) handlePairApprove(w http.ResponseWriter, r *http.Request, p *princ
 		return
 	case status == "not_found":
 		a.codeLimiter.hit(key)
+		a.ipLimiter.hit(ipKey)
 		writeErr(w, http.StatusNotFound, "invalid_code", "unknown pairing code")
 		return
 	case status == "expired":

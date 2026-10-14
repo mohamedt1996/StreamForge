@@ -204,7 +204,9 @@ object ServerSync {
             if (changed) {
                 state.known[k] = fp
                 // Data that existed before sync was set up counts as old, so it never beats real edits elsewhere.
-                state.stamps[k] = if (first) (r.natural ?: 1L) else (r.natural ?: now)
+                // A local edit must beat the version it replaces even if that one came from a device
+                // whose clock runs ahead (records without their own time only).
+                state.stamps[k] = if (first) (r.natural ?: 1L) else (r.natural ?: maxOf(now, (state.stamps[k] ?: 0L) + 1))
             }
             if ((changed && !first) || full) {
                 if (enqueue(r.collection, r.id, r.data, state.stamps[k] ?: r.natural ?: 1L)) queued = true
@@ -214,8 +216,9 @@ object ServerSync {
         for (k in gone) {
             state.known.remove(k)
             if (first) continue
-            state.stamps[k] = now
-            if (enqueue(k.substringBefore('/'), k.substringAfter('/'), null, now)) queued = true
+            val t = maxOf(now, (state.stamps[k] ?: 0L) + 1)
+            state.stamps[k] = t
+            if (enqueue(k.substringBefore('/'), k.substringAfter('/'), null, t)) queued = true
         }
         state.baselined = true
         if (state.stamps.size > state.known.size + 1000) {
@@ -331,7 +334,9 @@ object ServerSync {
                     val c = raw(r, "collection") ?: continue
                     val id = raw(r, "id") ?: continue
                     done.add(rk(c, id))
-                    if (r.str("status") == "stale") r.long("rev")?.let { rev -> staleRev = minOf(staleRev ?: rev, rev) }
+                    // rev 0 = nothing to re-pull (e.g. a secret refused for lack of the secrets scope);
+                    // treating it as a rev would restart the pull from scratch.
+                    if (r.str("status") == "stale") r.long("rev")?.takeIf { it > 0 }?.let { rev -> staleRev = minOf(staleRev ?: rev, rev) }
                 }
                 if (results.isEmpty()) done.addAll(sent.keys)
                 val before = outbox.size

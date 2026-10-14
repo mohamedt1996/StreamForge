@@ -145,6 +145,10 @@ func (a *App) pull(userID string, since int64, limit int, includeSecrets bool) (
 		return res, err
 	}
 	defer rows.Close()
+	// Paging is decided on rows scanned, not records returned: a skipped (undecryptable) secret
+	// must not make us report "no more" while unread rows remain beyond the LIMIT.
+	scanned := 0
+	var lastScanned int64
 	for rows.Next() {
 		var rec Record
 		var data sql.NullString
@@ -152,6 +156,12 @@ func (a *App) pull(userID string, since int64, limit int, includeSecrets bool) (
 		if err := rows.Scan(&rec.Collection, &rec.ID, &data, &deleted, &rec.UpdatedAt, &rec.Rev, &rec.Device); err != nil {
 			return res, err
 		}
+		if scanned == limit {
+			res.More = true
+			break
+		}
+		scanned++
+		lastScanned = rec.Rev
 		rec.Deleted = deleted != 0
 		rec.Data = json.RawMessage("null")
 		if !rec.Deleted && data.Valid {
@@ -172,10 +182,8 @@ func (a *App) pull(userID string, since int64, limit int, includeSecrets bool) (
 	if err := rows.Err(); err != nil {
 		return res, err
 	}
-	if len(res.Records) > limit {
-		res.Records = res.Records[:limit]
-		res.More = true
-		res.Rev = res.Records[limit-1].Rev
+	if res.More {
+		res.Rev = lastScanned
 	}
 	return res, nil
 }

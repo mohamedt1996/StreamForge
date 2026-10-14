@@ -294,7 +294,8 @@ struct SyncPullResponse: Decodable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        rev = (try? c.decodeIfPresent(Int64.self, forKey: .rev)) ?? 0
+        // Required: a missing rev must not read as 0, which the client takes for "server was reset".
+        rev = try c.decode(Int64.self, forKey: .rev)
         // One malformed record must not hide the rest of the page.
         records = (try? c.decodeIfPresent(LossyArray<SyncRecord>.self, forKey: .records))?.elements ?? []
         more = (try? c.decodeIfPresent(Bool.self, forKey: .more)) ?? false

@@ -154,8 +154,32 @@ object Addons {
         RemoteSync.changed()
     }
 
-    /** Manifest URL, the addon's identity for sync. */
-    fun manifestUrl(addon: Addon): String = addon.baseUrl + "/manifest.json"
+    /**
+     * Manifest URL, the addon's identity for sync. Characters that aren't legal in a URL (e.g. the
+     * "|" in configured Torrentio links) are percent-encoded the way the Apple app's URL type does,
+     * so both platforms produce the same record id for the same addon.
+     */
+    fun manifestUrl(addon: Addon): String = canonicalUrl(addon.baseUrl.trimEnd('/') + "/manifest.json")
+
+    private const val URL_SAFE = "-._~!\$&'()*+,;=:@/?#%[]"
+
+    private fun canonicalUrl(s: String): String {
+        val sb = StringBuilder(s.length + 8)
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            val n = Character.charCount(cp)
+            if (cp < 128 && (Character.isLetterOrDigit(cp) || s[i] in URL_SAFE)) {
+                sb.append(s[i])
+            } else {
+                for (b in String(Character.toChars(cp)).toByteArray(Charsets.UTF_8)) {
+                    sb.append('%').append(String.format("%02X", b.toInt() and 0xff))
+                }
+            }
+            i += n
+        }
+        return sb.toString()
+    }
 
     /** Replaces the whole list (sync: reordering after pulled changes). */
     internal fun replaceAllFromSync(list: List<Addon>) { addons = list; save() }
@@ -164,7 +188,8 @@ object Addons {
         var s = raw.trim()
         if (s.lowercase().startsWith("stremio://")) s = "https://" + s.substring("stremio://".length)
         if (!s.contains("://")) s = "https://$s"
-        if (!s.endsWith("manifest.json")) s = s.trimEnd('/') + "/manifest.json"
+        s = s.trimEnd('/')
+        if (!s.endsWith("/manifest.json")) s = "$s/manifest.json"
         return s
     }
 
