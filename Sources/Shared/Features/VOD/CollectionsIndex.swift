@@ -25,6 +25,7 @@ final class CollectionsIndex {
     private(set) var lookedUp = 0
     @ObservationIgnored private var cache: Cache
     @ObservationIgnored private var lookupsThisSession = 0
+    @ObservationIgnored private var running = false
 
     static let sessionCap = 400
 
@@ -34,21 +35,20 @@ final class CollectionsIndex {
 
     /// Server movie that matches a TMDB collection part, if any.
     func serverItem(tmdbID: Int, title: String, year: Int?) -> MediaItem? {
-        let store = DispatcharrStore.shared
-        guard let serverID = store.activeServer?.id,
-              let m = store.matchMovie(tmdbID: tmdbID, imdbID: nil, title: title, year: year) else { return nil }
-        return m.mediaItem(serverID: serverID)
+        DispatcharrStore.shared.matchMovieItem(tmdbID: tmdbID, imdbID: nil, title: title, year: year)
     }
 
     /// Rebuilds groups from the cache, then looks up uncached movies (within the session cap).
     func buildIfNeeded() async {
-        guard !isBuilding else { return }
+        guard !isBuilding, !running else { return }
         let tmdb = MetadataService.shared.tmdb
         let store = DispatcharrStore.shared
-        guard let serverID = store.activeServer?.id else { collections = []; return }
-        regroup(serverID: serverID)
+        guard store.activeServer != nil else { collections = []; return }
+        running = true
+        defer { running = false }
+        // Grouping walks the whole library: done off the main thread on the ready-made MediaItems.
+        let unknown = await regroup()
         guard tmdb.isConfigured else { return }
-        let unknown = store.movies.compactMap(\.tmdbID).filter { cache.movieCollection[String($0)] == nil }
         let budget = Self.sessionCap - lookupsThisSession
         guard budget > 0, !unknown.isEmpty else { return }
         isBuilding = true
@@ -71,9 +71,10 @@ final class CollectionsIndex {
             if let ref = pair.1 { cache.collections[String(ref.id)] = ref.info }
         }
         lookedUp += found.count
-        FileStore.save(cache, "collections-cache.json")
+        let snapshot = cache
+        Task.detached(priority: .utility) { FileStore.save(snapshot, "collections-cache.json") }
         isBuilding = false
-        regroup(serverID: serverID)
+        await regroup()
     }
 
     nonisolated private static func lookup(_ tmdb: TMDBClient, _ id: Int) async -> (Int, TMDBClient.CollectionRef?, Bool) {
@@ -85,16 +86,29 @@ final class CollectionsIndex {
         }
     }
 
-    private func regroup(serverID: UUID) {
+    /// Rebuilds `collections` from the cache; returns the library's TMDB ids not looked up yet.
+    @discardableResult
+    private func regroup() async -> [Int] {
+        let items = DispatcharrStore.shared.movieItems
+        let cache = self.cache
+        let result = await detachedCancellable(priority: .utility) { CollectionsIndex.group(items, cache) }
+        collections = result.entries
+        return result.unknown
+    }
+
+    nonisolated private static func group(_ items: [MediaItem], _ cache: Cache) -> (entries: [Entry], unknown: [Int]) {
         var groups: [Int: [MediaItem]] = [:]
-        for m in DispatcharrStore.shared.movies {
-            guard let t = m.tmdbID, let cid = cache.movieCollection[String(t)], cid > 0 else { continue }
-            groups[cid, default: []].append(m.mediaItem(serverID: serverID))
+        var unknown: [Int] = []
+        for m in items {
+            guard let t = m.tmdbID else { continue }
+            guard let cid = cache.movieCollection[String(t)] else { unknown.append(t); continue }
+            if cid > 0 { groups[cid, default: []].append(m) }
         }
-        collections = groups.compactMap { cid, items -> Entry? in
+        let entries = groups.compactMap { cid, items -> Entry? in
             guard items.count >= 2, let info = cache.collections[String(cid)] else { return nil }
             return Entry(info: info, items: items.sorted { ($0.year ?? 0) < ($1.year ?? 0) })
         }
         .sorted { ($0.items.count, $1.info.name) > ($1.items.count, $0.info.name) }
+        return (entries, unknown)
     }
 }

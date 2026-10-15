@@ -43,6 +43,8 @@ data class SettingsValues(
     val guideDays: Int = 3,
     // Detail pages
     val trailerAutoplay: Boolean = true,
+    // Interface: "auto" (detect TV / remote), "tv" (10-foot, remote) or "touch". Device-local, not synced.
+    val interfaceMode: String = "auto",
 )
 
 object Settings {

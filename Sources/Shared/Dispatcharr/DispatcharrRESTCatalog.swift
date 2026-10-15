@@ -25,6 +25,9 @@ final class DispatcharrUUIDs: @unchecked Sendable {
     static let shared = DispatcharrUUIDs()
     private let lock = NSLock()
     private var maps: [UUID: [String: String]] = [:]
+    /// Writes happen in order on this queue, outside the lock: a REST library refresh records tens of
+    /// thousands of ids, and `uuid(...)` is called from the main thread to build playback URLs.
+    private let writer = DispatchQueue(label: "streamforge.dispatcharr-uuids", qos: .utility)
 
     private static func fileName(_ server: UUID) -> String { "dispatcharr-uuids-\(server.uuidString).json" }
 
@@ -46,7 +49,6 @@ final class DispatcharrUUIDs: @unchecked Sendable {
     func record(_ kind: Kind, _ entries: [Int: String], server: UUID) {
         guard !entries.isEmpty else { return }
         lock.lock()
-        defer { lock.unlock() }
         var m = map(server)
         var changed = false
         for (id, uuid) in entries where !uuid.isEmpty {
@@ -56,16 +58,21 @@ final class DispatcharrUUIDs: @unchecked Sendable {
                 changed = true
             }
         }
+        if changed { maps[server] = m }
+        lock.unlock()
         guard changed else { return }
-        maps[server] = m
-        FileStore.save(m, Self.fileName(server))
+        let name = Self.fileName(server)
+        let snapshot = m
+        writer.async { FileStore.save(snapshot, name) }
     }
 
     func remove(server: UUID) {
         lock.lock()
-        defer { lock.unlock() }
         maps[server] = nil
-        FileStore.remove(Self.fileName(server))
+        lock.unlock()
+        let name = Self.fileName(server)
+        // After any pending write of this map, so it isn't recreated.
+        writer.async { FileStore.remove(name) }
     }
 }
 

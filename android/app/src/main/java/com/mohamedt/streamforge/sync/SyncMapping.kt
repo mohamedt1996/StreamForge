@@ -20,6 +20,7 @@ import com.mohamedt.streamforge.library.Progress
 import com.mohamedt.streamforge.stremio.Addon
 import com.mohamedt.streamforge.stremio.Addons
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -32,6 +33,9 @@ import kotlinx.serialization.json.put
 
 /** Android has no profiles: every profile-scoped record uses this. */
 internal const val PROFILE = "default"
+
+/** Collection of managed items a user continues without (PROTOCOL.md §5, Dismissals). */
+internal const val DISMISSED = "dismissed"
 
 /** Sync bookkeeping persisted in sync-state.json. Keys are "<collection>/<id>". */
 @Serializable
@@ -50,6 +54,29 @@ internal data class SyncState(
     val serverIds: MutableMap<String, String> = mutableMapOf(),
     /** Canonical item key → when it was favourited. */
     val favoriteAddedAt: MutableMap<String, Long> = mutableMapOf(),
+    /** Record keys the server admin manages for this user (PROTOCOL.md §5). */
+    val managed: MutableSet<String> = mutableSetOf(),
+    /** Values of managed settings (put back when the user keeps the managed value). */
+    val managedSettings: MutableMap<String, JsonElement> = mutableMapOf(),
+    /** Display names of managed items by record key. */
+    val managedNames: MutableMap<String, String> = mutableMapOf(),
+    /** Active dismissals "<collection>|<id>" → dismissedAt (ms), synced as `dismissed` records. */
+    val dismissed: MutableMap<String, Long> = mutableMapOf(),
+    /** Managed servers/addons removed on this device without a dismissal (record keys). */
+    val locallyRemoved: MutableSet<String> = mutableSetOf(),
+    /** Managed records sync brought back after a local removal, waiting for the user's answer. */
+    val held: MutableMap<String, HeldRecord> = mutableMapOf(),
+    /** False for state saved before managed records were tracked: pull everything again once. */
+    var managedTracked: Boolean = false,
+)
+
+/** A pulled managed record kept out of the stores until the user answers the restore prompt. */
+@Serializable
+internal data class HeldRecord(
+    val collection: String,
+    val id: String,
+    val data: JsonObject? = null,
+    val updatedAt: Long,
 )
 
 @Serializable
@@ -413,10 +440,33 @@ internal object SyncMapping {
         }
 
         // Settings.
-        val values = Settings.values
-        for (m in settingsMap) add(LocalRecord("settings", m.key, buildJsonObject { put("value", m.read(values)) }))
+        for ((key, value) in settingValues()) add(LocalRecord("settings", key, buildJsonObject { put("value", value) }))
+
+        // Admin-managed items this account continues without.
+        for ((did, at) in st.dismissed) {
+            val c = did.substringBefore('|')
+            val id = did.substringAfter('|', "")
+            add(LocalRecord(DISMISSED, did, buildJsonObject {
+                put("collection", c)
+                put("id", id)
+                put("dismissedAt", at)
+            }, natural = at))
+        }
 
         return out
+    }
+
+    /** The synced settings of this device: key → value. */
+    fun settingValues(): Map<String, JsonPrimitive> {
+        val values = Settings.values
+        return settingsMap.associate { it.key to it.read(values) }
+    }
+
+    /** Applies a managed value to [values]; null when this device can't use it. */
+    fun settingWith(values: SettingsValues, key: String, value: JsonElement): SettingsValues? {
+        val m = settingsMap.firstOrNull { it.key == key } ?: return null
+        val v = value as? JsonPrimitive ?: return null
+        return m.write(values, v)
     }
 
     private fun authModeName(mode: AuthMode): String = when (mode) {
@@ -481,6 +531,10 @@ internal object SyncMapping {
             "servers" -> applyServer(id, deleted, data, st)
             "secrets" -> applySecret(id, deleted, data, ctx)
             "settings" -> applySetting(id, deleted, data)
+            DISMISSED -> {
+                if (deleted || data == null) st.dismissed.remove(id) else st.dismissed[id] = data.long("dismissedAt") ?: updatedAt
+                true
+            }
             else -> false // profiles: Android has none; unknown collections are ignored.
         }
     }

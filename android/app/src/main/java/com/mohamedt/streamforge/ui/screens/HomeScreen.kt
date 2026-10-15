@@ -91,6 +91,7 @@ import com.mohamedt.streamforge.ui.Palette
 import com.mohamedt.streamforge.ui.Pill
 import com.mohamedt.streamforge.ui.PosterCard
 import com.mohamedt.streamforge.ui.ProgressLine
+import com.mohamedt.streamforge.ui.PullRefresh
 import com.mohamedt.streamforge.ui.Screen
 import com.mohamedt.streamforge.ui.SfButton
 import com.mohamedt.streamforge.ui.Shelf
@@ -133,7 +134,8 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
     val open: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
 
-    LazyColumn(Modifier.fillMaxWidth()) {
+    PullRefresh({ DispatcharrRepo.refreshAll(true); GuideRepo.refresh() }) {
+    LazyColumn(Modifier.fillMaxSize()) {
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("StreamForge", fontSize = 26.sp, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
@@ -186,6 +188,7 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
         }
         item { Spacer(Modifier.height(30.dp)) }
     }
+    }
 }
 
 private const val WELCOME = "Sign in to your Dispatcharr server in Settings for live TV, the guide and your movie and series library. " +
@@ -196,8 +199,9 @@ private fun homeChannels(): List<Channel> {
     return ids.mapNotNull { DispatcharrRepo.channel(it) }
 }
 
-private fun recentMovies() = DispatcharrRepo.movieItems.sortedByDescending { it.added ?: 0 }.take(24)
-private fun recentSeries() = DispatcharrRepo.seriesItems.sortedByDescending { it.added ?: 0 }.take(24)
+// Pre-sorted off the main thread by DispatcharrRepo (sorting the whole library here ran on every recomposition).
+private fun recentMovies() = DispatcharrRepo.recentMovies.take(24)
+private fun recentSeries() = DispatcharrRepo.recentSeries.take(24)
 
 // MARK: TV
 

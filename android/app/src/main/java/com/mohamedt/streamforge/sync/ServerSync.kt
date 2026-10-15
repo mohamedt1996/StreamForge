@@ -14,6 +14,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.mohamedt.streamforge.core.AppJson
+import com.mohamedt.streamforge.core.Settings
 import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.core.bool
 import com.mohamedt.streamforge.core.child
@@ -23,6 +24,7 @@ import com.mohamedt.streamforge.core.normalizedBase
 import com.mohamedt.streamforge.core.objects
 import com.mohamedt.streamforge.core.str
 import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
+import com.mohamedt.streamforge.stremio.Addons
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -71,6 +73,15 @@ object ServerSync {
     private const val LONG_POLL_SECONDS = 50
     private const val TOMBSTONE_DAYS = 180L
 
+    private val SETTING_LABELS = mapOf(
+        "metadataLanguage" to "Metadata language", "metadataSource" to "Metadata source", "maxResolution" to "Maximum quality",
+        "excludeCam" to "Hide CAM releases", "streamSort" to "Stream sorting", "autoplayNext" to "Autoplay next episode",
+        "resumePlayback" to "Resume playback", "seekStep" to "Skip interval", "skipIntros" to "Skip intros", "autoSkip" to "Auto-skip",
+        "audioLanguage" to "Audio language", "subtitleLanguage" to "Subtitle language", "autoSubtitles" to "Automatic subtitles",
+        "subtitleScale" to "Subtitle size", "hideAdult" to "Hide adult content", "trailerAutoplay" to "Autoplay trailers",
+        "torrentMode" to "Torrent engine", "remoteTorrServer" to "Remote TorrServer",
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val diskWriter = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val mutex = Mutex()
@@ -94,6 +105,14 @@ object ServerSync {
     var pairing by mutableStateOf<Pairing?>(null); private set
     var pairMessage by mutableStateOf<String?>(null); private set
     var signOutReason by mutableStateOf<String?>(null); private set
+    /** Managed items removed on this device that sync brought back: "Restore from sync" / "Continue without it". */
+    var restorePrompt by mutableStateOf<List<ManagedItem>>(emptyList()); private set
+    /** Managed settings the user just changed: "Keep it" / "Remove from this account". */
+    var settingPrompt by mutableStateOf<List<ManagedItem>>(emptyList()); private set
+    /** The restore prompt was closed without an answer; asked again when sync brings news. */
+    var restorePromptSnoozed by mutableStateOf(false)
+    /** Managed items this account continues without (restorable in Settings). */
+    var dismissedItems by mutableStateOf<List<ManagedItem>>(emptyList()); private set
 
     /** A TV waiting for its code to be approved. */
     data class Pairing(val serverUrl: String, val code: String, val pairId: String, val expiresAt: Long, val failed: String? = null)
@@ -120,6 +139,8 @@ object ServerSync {
     private var pushJob: Job? = null
     private var pushRequested = false
     private var pairJob: Job? = null
+    /** Store callbacks while pulled records are written aren't user edits. */
+    private var applyingRemote = false
 
     private val token: String get() = Store.secret(TOKEN_KEY)
 
@@ -137,6 +158,12 @@ object ServerSync {
         lastSyncAt = p.getLong("sync.lastSync", 0L)
         signedIn = token.isNotEmpty() && serverUrl.isNotEmpty()
         state = Store.load(SyncState.serializer(), STATE_FILE) ?: SyncState()
+        if (!state.managedTracked) {
+            // State from before managed records were tracked: pull everything once more to learn
+            // which records are managed (already-applied versions are skipped by their stamps).
+            state.managedTracked = true
+            state.lastRev = 0
+        }
         outbox.clear()
         outbox.addAll(Store.load(ListSerializer(OutboxEntry.serializer()), OUTBOX_FILE) ?: emptyList())
         pending = outbox.size
@@ -160,6 +187,7 @@ object ServerSync {
         })
         // Switching the active Dispatcharr server swaps the per-server channel favourites (activate() doesn't save anything).
         scope.launch { snapshotFlow { DispatcharrRepo.active?.id }.collect { noteChange() } }
+        refreshManagedPrompts()
         noteChange()
     }
 
@@ -172,6 +200,7 @@ object ServerSync {
             scope.launch { noteChange() }
             return
         }
+        checkManagedSettingEdits()
         diffRequested = true
         if (diffJob?.isActive == true) return
         diffJob = scope.launch {
@@ -201,6 +230,9 @@ object ServerSync {
         for ((k, r) in local) {
             val fp = fingerprint(r.data)
             val changed = state.known[k] != fp
+            // A changed managed setting waits for the user's answer (settingPrompt); the server would refuse it anyway.
+            if (changed && !first && !full && r.collection == "settings" && k in state.known && isManagedForUser(k)) continue
+            if (changed) state.locallyRemoved.remove(k)
             if (changed) {
                 state.known[k] = fp
                 // Data that existed before sync was set up counts as old, so it never beats real edits elsewhere.
@@ -216,6 +248,9 @@ object ServerSync {
         for (k in gone) {
             state.known.remove(k)
             if (first) continue
+            // Removed here without "Remove from this account": if sync brings it back, ask.
+            val c = k.substringBefore('/')
+            if ((c == "servers" || c == "addons") && isManagedForUser(k)) state.locallyRemoved.add(k)
             val t = maxOf(now, (state.stamps[k] ?: 0L) + 1)
             state.stamps[k] = t
             if (enqueue(k.substringBefore('/'), k.substringAfter('/'), null, t)) queued = true
@@ -453,10 +488,14 @@ object ServerSync {
             val c = raw(r, "collection") ?: continue
             val id = raw(r, "id") ?: continue
             val ts = r.long("updatedAt") ?: 0L
+            trackManaged(c, id, r)
             if (ts <= (state.stamps[rk(c, id)] ?: 0L)) continue
             accepted.add(r)
         }
-        if (accepted.isEmpty()) return queued
+        if (accepted.isEmpty()) {
+            refreshManagedPrompts()
+            return queued
+        }
         val ordered = accepted.sortedBy {
             when (raw(it, "collection")) {
                 "secrets" -> 0
@@ -465,17 +504,27 @@ object ServerSync {
             }
         }
         val ctx = SyncMapping.ApplyContext(state, ordered)
-        for (r in ordered) {
-            val c = raw(r, "collection") ?: continue
-            val id = raw(r, "id") ?: continue
-            val ts = r.long("updatedAt") ?: 0L
-            try {
-                SyncMapping.apply(c, id, r.bool("deleted"), r["data"] as? JsonObject, ts, ctx, state)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
+        applyingRemote = true
+        try {
+            for (r in ordered) {
+                val c = raw(r, "collection") ?: continue
+                val id = raw(r, "id") ?: continue
+                val ts = r.long("updatedAt") ?: 0L
+                // A managed item the user removed here comes back: ask first (restore prompt).
+                if (holdIfLocallyRemoved(c, id, r, ts)) {
+                    state.stamps[rk(c, id)] = ts
+                    continue
+                }
+                try {
+                    SyncMapping.apply(c, id, r.bool("deleted"), r["data"] as? JsonObject, ts, ctx, state)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                }
+                state.stamps[rk(c, id)] = ts
             }
-            state.stamps[rk(c, id)] = ts
+        } finally {
+            applyingRemote = false
         }
         try {
             SyncMapping.applyAddons(ctx)
@@ -487,7 +536,261 @@ object ServerSync {
         val local = SyncMapping.collect(state)
         state.known.clear()
         for ((k, r) in local) state.known[k] = fingerprint(r.data)
+        refreshManagedPrompts()
         return queued
+    }
+
+    // MARK: Admin-managed configuration (PROTOCOL.md §5)
+
+    private fun dismissalId(key: String): String = key.substringBefore('/') + "|" + key.substringAfter('/', "")
+
+    /** Managed by the server admin and not dismissed by this account. */
+    private fun isManagedForUser(key: String): Boolean = key in state.managed && dismissalId(key) !in state.dismissed
+
+    /** Whether removing/changing this item needs the "Set up by your server" confirmation. */
+    fun isManaged(collection: String, id: String): Boolean = signedIn && isManagedForUser(rk(collection, id))
+
+    /** A confirmation for removing [id] when it is managed, else null (remove right away). */
+    fun managedRemoval(collection: String, id: String, name: String, perform: () -> Unit): ManagedRemoval? =
+        if (isManaged(collection, id)) ManagedRemoval(ManagedItem(rk(collection, id), collection, id, name), perform) else null
+
+    /** Tracks the managed flag of a pulled record (any version: the newest rev wins). */
+    private fun trackManaged(c: String, id: String, r: JsonObject) {
+        if (c != "servers" && c != "addons" && c != "settings" && c != "secrets") return
+        val k = rk(c, id)
+        val deleted = r.bool("deleted")
+        val data = r["data"] as? JsonObject
+        if (r.bool("managed") && !deleted) {
+            state.managed.add(k)
+            if (c == "settings") data?.get("value")?.let { state.managedSettings[id] = it }
+            if (c != "secrets") state.managedNames[k] = managedName(c, id, data)
+        } else {
+            state.managed.remove(k)
+            if (c == "settings") state.managedSettings.remove(id)
+        }
+        if (deleted) {
+            state.locallyRemoved.remove(k)
+            state.held.remove(k)
+        }
+    }
+
+    /** Holds a managed server/addon (or its credentials) the user removed on this device. Returns true when held. */
+    private fun holdIfLocallyRemoved(c: String, id: String, r: JsonObject, ts: Long): Boolean {
+        if (r.bool("deleted") || !r.bool("managed")) return false
+        val k = rk(c, id)
+        when (c) {
+            "servers", "addons" -> {
+                if (k !in state.locallyRemoved || dismissalId(k) in state.dismissed) return false
+                val present = if (c == "servers") DispatcharrRepo.servers.any { it.id.equals(id, ignoreCase = true) }
+                else Addons.addons.any { Addons.manifestUrl(it) == id }
+                if (present) {
+                    state.locallyRemoved.remove(k)
+                    return false
+                }
+            }
+            "secrets" -> {
+                if (!id.startsWith("server:")) return false
+                val serverKey = rk("servers", id.removePrefix("server:").lowercase())
+                if (serverKey !in state.locallyRemoved && serverKey !in state.held) return false
+            }
+            else -> return false
+        }
+        state.held[k] = HeldRecord(c, id, r["data"] as? JsonObject, ts)
+        outbox.removeAll { it.key == k }
+        pending = outbox.size
+        return true
+    }
+
+    private fun managedName(c: String, id: String, data: JsonObject?): String = when (c) {
+        "settings" -> SETTING_LABELS[id] ?: id
+        "addons" -> data?.str("name") ?: id.substringAfter("://").substringBefore('/')
+        "servers" -> data?.str("name") ?: "Dispatcharr server"
+        else -> id
+    }
+
+    private fun itemName(key: String): String =
+        state.managedNames[key] ?: managedName(key.substringBefore('/'), key.substringAfter('/', ""), null)
+
+    /** Recomputes the observable prompt lists from the persisted state. */
+    private fun refreshManagedPrompts() {
+        // Credentials whose server isn't held (or locally removed) any more have nothing to wait for.
+        state.held.entries.removeAll { (_, h) ->
+            if (h.collection != "secrets") return@removeAll false
+            val serverKey = rk("servers", h.id.removePrefix("server:").lowercase())
+            serverKey !in state.held && serverKey !in state.locallyRemoved
+        }
+        val restore = state.held.values.filter { it.collection != "secrets" }
+            .map { ManagedItem(rk(it.collection, it.id), it.collection, it.id, managedName(it.collection, it.id, it.data)) }
+            .sortedBy { it.name.lowercase() }
+        if (restore != restorePrompt) {
+            restorePrompt = restore
+            restorePromptSnoozed = false
+        }
+        val dismissed = state.dismissed.keys.map { did ->
+            val c = did.substringBefore('|')
+            val id = did.substringAfter('|', "")
+            val k = rk(c, id)
+            ManagedItem(k, c, id, itemName(k))
+        }.sortedBy { it.name.lowercase() }
+        if (dismissed != dismissedItems) dismissedItems = dismissed
+        if (settingPrompt.isNotEmpty()) {
+            val values = SyncMapping.settingValues()
+            val still = settingPrompt.filter { item ->
+                val managed = state.managedSettings[item.itemId]
+                isManagedForUser(item.key) && managed != null && values[item.itemId]?.let { it.toString() != managed.toString() } == true
+            }
+            if (still != settingPrompt) settingPrompt = still
+        }
+    }
+
+    /** Notices edits of managed settings right away (called on every local change). */
+    private fun checkManagedSettingEdits() {
+        if (!signedIn || applyingRemote || state.managedSettings.isEmpty()) return
+        val prompt = settingPrompt.toMutableList()
+        for ((key, value) in SyncMapping.settingValues()) {
+            val k = rk("settings", key)
+            if (!isManagedForUser(k)) continue
+            val known = state.known[k] ?: continue
+            if (known == fingerprint(buildJsonObject { put("value", value) }) || prompt.any { it.key == k }) continue
+            prompt.add(ManagedItem(k, "settings", key, itemName(k)))
+        }
+        if (prompt != settingPrompt) settingPrompt = prompt
+    }
+
+    /** "Remove from this account" for an addon or server: call before removing it locally. */
+    fun dismiss(collection: String, id: String) {
+        if (!signedIn) return
+        val k = rk(collection, id)
+        val at = System.currentTimeMillis()
+        // Main.immediate: runs before the caller removes the item unless a sync is applying records,
+        // and always before the (delayed) diff that turns the removal into a tombstone.
+        scope.launch {
+            mutex.withLock {
+                state.dismissed[dismissalId(k)] = at
+                state.locallyRemoved.remove(k)
+                refreshManagedPrompts()
+                persistLocked()
+            }
+            noteChange()
+        }
+    }
+
+    /** Ends a dismissal ("Restore"): the server sends the item again. */
+    fun restoreDismissed(item: ManagedItem) {
+        if (!signedIn) return
+        scope.launch {
+            mutex.withLock {
+                state.dismissed.remove(dismissalId(item.key))
+                refreshManagedPrompts()
+                diffLocked(false)
+                persistLocked()
+            }
+            schedulePush(0)
+        }
+    }
+
+    /** "Restore from sync": applies the held records. */
+    fun restoreHeld() {
+        scope.launch {
+            mutex.withLock {
+                val held = state.held.values.toList()
+                if (held.isEmpty()) return@withLock
+                state.held.clear()
+                val records = held.map { h ->
+                    val k = rk(h.collection, h.id)
+                    state.locallyRemoved.remove(k)
+                    if (h.collection == "secrets") state.locallyRemoved.remove(rk("servers", h.id.removePrefix("server:").lowercase()))
+                    state.stamps.remove(k)
+                    buildJsonObject {
+                        put("collection", h.collection)
+                        put("id", h.id)
+                        put("data", h.data ?: JsonNull)
+                        put("deleted", false)
+                        put("updatedAt", h.updatedAt)
+                        put("managed", true)
+                    }
+                }
+                if (applyLocked(records)) schedulePush()
+                persistLocked()
+            }
+        }
+    }
+
+    /** "Continue without it": dismisses the held items for this account. */
+    fun continueWithoutHeld() {
+        scope.launch {
+            mutex.withLock {
+                val held = state.held.values.toList()
+                if (held.isEmpty()) return@withLock
+                state.held.clear()
+                val now = System.currentTimeMillis()
+                for (h in held) {
+                    val k = rk(h.collection, h.id)
+                    state.locallyRemoved.remove(k)
+                    if (h.collection != "secrets") state.dismissed[dismissalId(k)] = now
+                    // The removal itself (the server tombstones it anyway once it has the dismissal).
+                    val t = maxOf(now, h.updatedAt + 1)
+                    state.stamps[k] = t
+                    enqueue(h.collection, h.id, null, t)
+                }
+                diffLocked(false)
+                refreshManagedPrompts()
+                persistLocked()
+            }
+            schedulePush(0)
+        }
+    }
+
+    /** "Keep it": puts the managed setting values back. */
+    fun keepManagedSettings() {
+        val items = settingPrompt
+        settingPrompt = emptyList()
+        if (items.isEmpty()) return
+        var values = Settings.values
+        for (item in items) {
+            val v = state.managedSettings[item.itemId] ?: continue
+            SyncMapping.settingWith(values, item.itemId, v)?.let { values = it }
+        }
+        applyingRemote = true
+        try {
+            if (values != Settings.values) Settings.update { values }
+        } finally {
+            applyingRemote = false
+        }
+        scope.launch {
+            mutex.withLock {
+                // Adopt the restored values as what this device has.
+                val local = SyncMapping.collect(state)
+                for (item in items) local[item.key]?.let { state.known[item.key] = fingerprint(it.data) }
+                persistLocked()
+            }
+        }
+    }
+
+    /** "Remove from this account": the user's own values replace the managed ones on all devices. */
+    fun releaseManagedSettings() {
+        val items = settingPrompt
+        settingPrompt = emptyList()
+        if (items.isEmpty()) return
+        scope.launch {
+            mutex.withLock {
+                val now = System.currentTimeMillis()
+                val values = SyncMapping.settingValues()
+                for (item in items) {
+                    state.dismissed[dismissalId(item.key)] = now
+                    val v = values[item.itemId] ?: continue
+                    val data = buildJsonObject { put("value", v) }
+                    val t = maxOf(now, (state.stamps[item.key] ?: 0L) + 1)
+                    state.known[item.key] = fingerprint(data)
+                    state.stamps[item.key] = t
+                    enqueue("settings", item.itemId, data, t)
+                }
+                diffLocked(false)
+                refreshManagedPrompts()
+                persistLocked()
+            }
+            schedulePush(0)
+        }
     }
 
     private fun markSynced() {
@@ -742,6 +1045,9 @@ object ServerSync {
         pushJob?.cancel()
         pushJob = null
         devices = emptyList()
+        restorePrompt = emptyList()
+        settingPrompt = emptyList()
+        dismissedItems = emptyList()
         signOutReason = reason
         status = reason ?: "Not signed in"
         // Pending uploads are dropped: the next sign-in uploads everything anyway.

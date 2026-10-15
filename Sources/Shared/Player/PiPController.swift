@@ -208,7 +208,7 @@ final class PiPController {
         if let renderer {
             renderer.setPaused(!playing)
         } else {
-            model?.player.setFlag("pause", !playing)
+            model?.setPausedByUser(!playing)
         }
         proxy?.paused = !playing
         pip?.invalidatePlaybackState()

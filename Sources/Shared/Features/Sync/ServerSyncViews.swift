@@ -260,6 +260,27 @@ struct ServerSyncAccountView: View {
             } footer: {
                 Text("Watch progress, favorites, favorite channels, addons, Dispatcharr servers, profiles and settings stay the same on every device signed in to this account. iCloud sync is paused while you use your own server.")
             }
+            if !sync.dismissedItems.isEmpty {
+                Section {
+                    ForEach(sync.dismissedItems) { item in
+                        Button { sync.restoreDismissed(item) } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.name)
+                                    Text(ServerSyncFormat.managedKind(item.collection))
+                                        .font(.caption).foregroundStyle(Theme.secondaryText)
+                                }
+                                Spacer()
+                                Text("Restore").foregroundStyle(Theme.accent)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Removed from this account")
+                } footer: {
+                    Text("Set up for you by your server admin. You chose to continue without them on all your devices; restore one to get it back everywhere.")
+                }
+            }
             Section {
                 NavigationLink { ServerDevicesView() } label: {
                     Label("Devices", systemImage: "laptopcomputer.and.iphone")
@@ -301,6 +322,15 @@ struct ServerSyncAccountView: View {
 }
 
 enum ServerSyncFormat {
+    static func managedKind(_ collection: String) -> String {
+        switch collection {
+        case "servers": return "Dispatcharr server"
+        case "addons": return "Addon"
+        case "settings": return "Setting"
+        default: return collection
+        }
+    }
+
     static func scopes(_ scopes: [String]) -> String {
         guard !scopes.isEmpty else { return "Full access" }
         let names: [String] = scopes.map {

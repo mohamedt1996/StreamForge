@@ -83,6 +83,7 @@ struct DispatcharrSettingsView: View {
     @Environment(DispatcharrStore.self) private var store
     @State private var editing: DispatcharrServer?
     @State private var adding = false
+    @State private var managedRemoval: ManagedRemoval?
 
     var body: some View {
         List {
@@ -101,11 +102,11 @@ struct DispatcharrSettingsView: View {
                     }
                     .contextMenu {
                         Button { editing = server } label: { Label("Edit", systemImage: "pencil") }
-                        Button(role: .destructive) { store.remove(server) } label: { Label("Remove", systemImage: "trash") }
+                        Button(role: .destructive) { remove(server) } label: { Label("Remove", systemImage: "trash") }
                     }
                     #if os(iOS)
                     .swipeActions {
-                        Button(role: .destructive) { store.remove(server) } label: { Label("Remove", systemImage: "trash") }
+                        Button(role: .destructive) { remove(server) } label: { Label("Remove", systemImage: "trash") }
                         Button { editing = server } label: { Label("Edit", systemImage: "pencil") }
                     }
                     #endif
@@ -158,6 +159,18 @@ struct DispatcharrSettingsView: View {
         .navigationTitle("Dispatcharr")
         .sheet(isPresented: $adding) { DispatcharrServerForm(server: nil) }
         .sheet(item: $editing) { DispatcharrServerForm(server: $0) }
+        .managedRemovalAlert($managedRemoval)
+    }
+
+    /// Servers the sync-server admin set up ask first ("Set up by your server").
+    private func remove(_ server: DispatcharrServer) {
+        let store = store
+        if let r = ServerSync.shared.managedRemoval("servers", server.id.uuidString.lowercased(), name: server.name,
+                                                    perform: { store.remove(server) }) {
+            managedRemoval = r
+        } else {
+            store.remove(server)
+        }
     }
 }
 
@@ -442,6 +455,7 @@ struct GuideSettingsSection: View {
 
 struct AddonsSettingsView: View {
     @Environment(AddonManager.self) private var addons
+    @State private var managedRemoval: ManagedRemoval?
     @State private var url = ""
     @State private var installing = false
     @State private var message: String?
@@ -493,11 +507,11 @@ struct AddonsSettingsView: View {
                             .labelsHidden()
                     }
                     .contextMenu {
-                        Button(role: .destructive) { addons.remove(addon) } label: { Label("Remove", systemImage: "trash") }
+                        Button(role: .destructive) { remove(addon) } label: { Label("Remove", systemImage: "trash") }
                     }
                 }
                 #if os(iOS)
-                .onDelete { idx in idx.map { addons.addons[$0] }.forEach { addons.remove($0) } }
+                .onDelete { idx in idx.map { addons.addons[$0] }.forEach { remove($0) } }
                 .onMove { addons.move(from: $0, to: $1) }
                 #endif
             }
@@ -511,6 +525,18 @@ struct AddonsSettingsView: View {
         #if os(iOS)
         .toolbar { EditButton() }
         #endif
+        .managedRemovalAlert($managedRemoval)
+    }
+
+    /// Addons the sync-server admin set up ask first ("Set up by your server").
+    private func remove(_ addon: InstalledAddon) {
+        let addons = addons
+        if let r = ServerSync.shared.managedRemoval("addons", addon.manifestURL.absoluteString, name: addon.manifest.name,
+                                                    perform: { addons.remove(addon) }) {
+            managedRemoval = r
+        } else {
+            addons.remove(addon)
+        }
     }
 
     private func capabilities(_ a: InstalledAddon) -> String {

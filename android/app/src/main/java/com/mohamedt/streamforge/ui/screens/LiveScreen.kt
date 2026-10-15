@@ -76,6 +76,7 @@ import com.mohamedt.streamforge.ui.PageTitle
 import com.mohamedt.streamforge.ui.Palette
 import com.mohamedt.streamforge.ui.Pill
 import com.mohamedt.streamforge.ui.ProgressLine
+import com.mohamedt.streamforge.ui.PullRefresh
 import com.mohamedt.streamforge.ui.Screen
 import com.mohamedt.streamforge.ui.SfButton
 import com.mohamedt.streamforge.ui.SfDialog
@@ -178,16 +179,16 @@ fun LiveScreen() {
             }
         }
 
+        val wide = isWide()
         val header: @Composable () -> Unit = {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(query, { query = it }, Modifier.weight(1f), placeholder = { Text("Filter channels") }, singleLine = true)
+                OutlinedTextField(query, { query = it }, Modifier.weight(1f), placeholder = { Text("Filter channels") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Filled.Search, null) })
                 Spacer(Modifier.width(8.dp))
-                Row(Modifier.card({ nav.push(Screen.Guide) }).background(Palette.surfaceHigh).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.CalendarMonth, null); Spacer(Modifier.width(6.dp)); Text("Guide")
-                }
+                HeaderAction(Icons.Filled.CalendarMonth, "Guide", showLabel = wide) { nav.push(Screen.Guide) }
                 if (DispatcharrRepo.restClient() != null) {
                     Spacer(Modifier.width(8.dp))
-                    Row(Modifier.card({ nav.push(Screen.Recordings) }).background(Palette.surfaceHigh).padding(12.dp)) { Text("Recordings") }
+                    HeaderAction(Icons.Filled.FiberManualRecord, "Recordings", showLabel = wide) { nav.push(Screen.Recordings) }
                 }
             }
         }
@@ -197,8 +198,10 @@ fun LiveScreen() {
                 EmptyState(if (filter == LiveFilter.Favorites) "No favorites yet" else "Nothing here",
                     if (filter == LiveFilter.Favorites) "Long-press a channel to add it to your favorites." else "No channels match.")
             } else {
-                LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(list, key = { it.id }) { ch -> ChannelRow(ch, list) { programmeFor = ch } }
+                PullRefresh({ DispatcharrRepo.refreshAll(true) }) {
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(list, key = { it.id }) { ch -> ChannelRow(ch, list) { programmeFor = ch } }
+                    }
                 }
             }
         }
@@ -395,10 +398,28 @@ private fun ChannelPreviewBody(ch: Channel, onSchedule: (Channel) -> Unit) {
             SfButton(null, { Library.toggleFavoriteChannel(ch.id) }, icon = if (Library.isFavoriteChannel(ch.id)) Icons.Filled.Star else Icons.Filled.StarBorder,
                 contentDescription = if (Library.isFavoriteChannel(ch.id)) "Remove favorite" else "Add to favorites")
         }
+        Spacer(Modifier.height(12.dp))
+        // Long-press isn't discoverable on a remote: say so.
+        Text("Tip: hold OK on a channel for its schedule, catch-up and recording.", fontSize = 14.sp, lineHeight = 19.sp, color = Palette.tertiary)
     }
 }
 
 // MARK: Phone rows
+
+/** 48 dp header action: icon only on phones, icon + label when there's room. */
+@Composable
+private fun HeaderAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, showLabel: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.height(48.dp).then(if (showLabel) Modifier else Modifier.width(48.dp))
+            .card(onClick, shape = RoundedCornerShape(24.dp)).background(Palette.surfaceHigh)
+            .padding(horizontal = if (showLabel) 14.dp else 0.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Icon(icon, label, modifier = Modifier.size(22.dp))
+        if (showLabel) { Spacer(Modifier.width(6.dp)); Text(label, fontWeight = FontWeight.SemiBold) }
+    }
+}
 
 @Composable
 fun ChannelRow(ch: Channel, list: List<Channel>, onLongClick: () -> Unit) {

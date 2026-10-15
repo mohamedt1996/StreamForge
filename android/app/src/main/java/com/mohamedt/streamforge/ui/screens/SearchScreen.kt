@@ -51,7 +51,9 @@ import com.mohamedt.streamforge.ui.Shelf
 import com.mohamedt.streamforge.ui.TvRowCardOffset
 import com.mohamedt.streamforge.ui.card
 import com.mohamedt.streamforge.ui.isTv
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SearchScreen() {
@@ -70,12 +72,22 @@ fun SearchScreen() {
         if (q.length < 2) { channels = emptyList(); groups = emptyList(); searching = false; return@LaunchedEffect }
         delay(350)
         searching = true
-        val lower = q.lowercase()
-        channels = DispatcharrRepo.channels.filter { it.name.lowercase().contains(lower) }.take(30)
-        val local = buildList {
-            DispatcharrRepo.movieItems.filter { it.title.lowercase().contains(lower) }.take(40).takeIf { it.isNotEmpty() }?.let { add("Movies on ${DispatcharrRepo.active?.name ?: "your server"}" to it) }
-            DispatcharrRepo.seriesItems.filter { it.title.lowercase().contains(lower) }.take(40).takeIf { it.isNotEmpty() }?.let { add("Series on ${DispatcharrRepo.active?.name ?: "your server"}" to it) }
+        val serverName = DispatcharrRepo.active?.name ?: "your server"
+        val allChannels = DispatcharrRepo.channels
+        val allMovies = DispatcharrRepo.movieItems
+        val allSeries = DispatcharrRepo.seriesItems
+        // Walks the whole library: off the main thread, stopping at the first 30 / 40 hits. A newer
+        // query cancels this effect (the result is then dropped).
+        val (foundChannels, local) = withContext(Dispatchers.Default) {
+            val ch = allChannels.asSequence().filter { it.name.contains(q, ignoreCase = true) }.take(30).toList()
+            ch to buildList {
+                allMovies.asSequence().filter { it.title.contains(q, ignoreCase = true) }.take(40).toList()
+                    .takeIf { it.isNotEmpty() }?.let { add("Movies on $serverName" to it) }
+                allSeries.asSequence().filter { it.title.contains(q, ignoreCase = true) }.take(40).toList()
+                    .takeIf { it.isNotEmpty() }?.let { add("Series on $serverName" to it) }
+            }
         }
+        channels = foundChannels
         groups = local
         if (Tmdb.configured) runCatching { Tmdb.search(q) }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { groups = groups + ("TMDB" to it) }
         for ((entry, metas) in runCatching { Addons.search(q) }.getOrDefault(emptyList())) {

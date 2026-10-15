@@ -48,7 +48,8 @@ final class NewEpisodeTracker {
         if keys != newKeys { newKeys = keys }
     }
 
-    /// Called after each library refresh with the unfiltered server series.
+    /// Called after each library refresh with the unfiltered server series. The per-series pass (and
+    /// the file write) runs in the background: big libraries have thousands of series.
     func noteServerSeries(_ series: [XCSeries], serverID: UUID) {
         let library = LibraryStore.shared
         let prefix = String(serverID.uuidString.prefix(8))
@@ -57,28 +58,48 @@ final class NewEpisodeTracker {
         for key in library.watched {
             if let hash = key.firstIndex(of: "#") { followed.insert(String(key[..<hash])) }
         }
-        let firstRun = serverState.lastModified.isEmpty
-        let cutoff = Date().addingTimeInterval(-7 * 86_400)
-        for s in series {
-            guard let modified = s.lastModified else { continue }
-            let key = "\(prefix):\(s.id)"
-            let itemID = "xc:\(prefix):series:\(s.id)"
-            if let previous = serverState.lastModified[key], modified > previous, !firstRun, followed.contains(itemID),
-               Date(timeIntervalSince1970: TimeInterval(modified)) > cutoff {
-                serverState.marks[itemID] = Date()
+        let previous = serverState.lastModified
+        let firstRun = previous.isEmpty
+        let follows = followed
+        Task {
+            let result = await detachedCancellable(priority: .utility) { () -> (lastModified: [String: Int], marked: [String]) in
+                var lastModified = previous
+                var marked: [String] = []
+                let cutoff = Date().addingTimeInterval(-7 * 86_400)
+                for s in series {
+                    guard let modified = s.lastModified else { continue }
+                    let key = "\(prefix):\(s.id)"
+                    let itemID = "xc:\(prefix):series:\(s.id)"
+                    if let old = lastModified[key], modified > old, !firstRun, follows.contains(itemID),
+                       Date(timeIntervalSince1970: TimeInterval(modified)) > cutoff {
+                        marked.append(itemID)
+                    }
+                    lastModified[key] = modified
+                }
+                return (lastModified, marked)
             }
-            serverState.lastModified[key] = modified
+            // Merge on main: new marks are added; marks cleared meanwhile (markSeen) stay cleared.
+            serverState.lastModified = result.lastModified
+            let now = Date()
+            for id in result.marked { serverState.marks[id] = now }
+            let cutoff = now.addingTimeInterval(-7 * 86_400)
+            serverState.marks = serverState.marks.filter { $0.value > cutoff }
+            persist()
+            rebuild()
         }
-        serverState.marks = serverState.marks.filter { $0.value > cutoff }
-        FileStore.save(serverState, "series-updates.json")
-        rebuild()
     }
 
     /// Opening a series clears its server-side mark.
     func markSeen(_ item: MediaItem) {
         guard serverState.marks[item.id] != nil else { return }
         serverState.marks[item.id] = nil
-        FileStore.save(serverState, "series-updates.json")
+        persist()
         rebuild()
+    }
+
+    /// One entry per server series: written off the main thread.
+    private func persist() {
+        let state = serverState
+        Task.detached(priority: .utility) { FileStore.save(state, "series-updates.json") }
     }
 }

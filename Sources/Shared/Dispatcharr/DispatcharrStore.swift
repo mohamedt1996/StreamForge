@@ -37,6 +37,19 @@ final class DispatcharrStore {
     private(set) var seriesGenres: [String] = []
     private(set) var movieSections: [CategorySection] = []
     private(set) var seriesSections: [CategorySection] = []
+    /// Ready-made MediaItems for the browse screens (built off the main thread with the library).
+    private(set) var movieItems: [MediaItem] = []
+    private(set) var seriesItems: [MediaItem] = []
+    /// Per-category slices, newest first.
+    private(set) var movieItemsByCategory: [String: [MediaItem]] = [:]
+    private(set) var seriesItemsByCategory: [String: [MediaItem]] = [:]
+    /// Newest 30 (by added / last update) and best rated (7+) 30, for Home and the VOD shelves.
+    private(set) var recentMovieItems: [MediaItem] = []
+    private(set) var recentSeriesItems: [MediaItem] = []
+    private(set) var topMovieItems: [MediaItem] = []
+    private(set) var topSeriesItems: [MediaItem] = []
+    /// True while the VOD library is being (re)built in the background.
+    private(set) var isBuildingVOD = false
 
     private(set) var liveState: LoadState = .idle
     private(set) var vodState: LoadState = .idle
@@ -50,6 +63,19 @@ final class DispatcharrStore {
     @ObservationIgnored private var rawSeriesCategories: [XCCategory] = []
     @ObservationIgnored private var rawSeries: [XCSeries] = []
     @ObservationIgnored private var channelIndex: [Int: XCChannel] = [:]
+    // O(1) lookups (matchMovie / matchSeries / categoryName), published together with the lists they index.
+    @ObservationIgnored private var movieIndex = VODMatchIndex()
+    @ObservationIgnored private var seriesIndex = VODMatchIndex()
+    @ObservationIgnored private var movieCategoryNames: [String: String] = [:]
+    @ObservationIgnored private var seriesCategoryNames: [String: String] = [:]
+    @ObservationIgnored private var liveCategoryNames: [String: String] = [:]
+    // Background work: a build that finishes after a newer one started (or a server switch) is dropped,
+    // and cached data never replaces data that already came from the network.
+    @ObservationIgnored private var vodGeneration = 0
+    @ObservationIgnored private var vodBuildTask: Task<Bool, Never>?
+    @ObservationIgnored private var diskLoadTask: Task<Void, Never>?
+    @ObservationIgnored private var liveFromNetwork = false
+    @ObservationIgnored private var vodFromNetwork = false
 
     /// Channel profiles from the REST API (empty without REST access).
     private(set) var channelProfiles: [DispatcharrChannelProfile] = []
@@ -199,13 +225,14 @@ final class DispatcharrStore {
         servers[i].channelProfileID = id
         FileStore.save(servers, "dispatcharr-servers.json", mirrorToDefaults: true)
         rest = nil
-        reapplyFilters()
+        // Channel profiles only filter live channels: no need to rebuild the VOD library.
+        applyLive(categories: rawLiveCategories, channels: rawChannels)
     }
 
     func loadChannelProfiles() async {
         guard let rest = restClient() else { channelProfiles = []; return }
         channelProfiles = (try? await rest.channelProfiles()) ?? []
-        reapplyFilters()
+        applyLive(categories: rawLiveCategories, channels: rawChannels)
     }
 
     /// Account / API-key servers: re-reads the XC password from /me once per launch, so a
@@ -239,6 +266,15 @@ final class DispatcharrStore {
         movieGenres = []; seriesGenres = []; movieSections = []; seriesSections = []
         rawLiveCategories = []; rawChannels = []; rawMovieCategories = []; rawMovies = []
         rawSeriesCategories = []; rawSeries = []; channelIndex = [:]
+        movieItems = []; seriesItems = []; movieItemsByCategory = [:]; seriesItemsByCategory = [:]
+        recentMovieItems = []; recentSeriesItems = []; topMovieItems = []; topSeriesItems = []
+        movieIndex = VODMatchIndex(); seriesIndex = VODMatchIndex()
+        movieCategoryNames = [:]; seriesCategoryNames = [:]; liveCategoryNames = [:]
+        vodGeneration += 1
+        vodBuildTask?.cancel(); vodBuildTask = nil
+        diskLoadTask?.cancel(); diskLoadTask = nil
+        isBuildingVOD = false
+        liveFromNetwork = false; vodFromNetwork = false
         epgCache = [:]
         liveState = .idle; vodState = .idle
         channelProfileNote = nil
@@ -276,6 +312,8 @@ final class DispatcharrStore {
             async let cats = client.liveCategories()
             async let chans = client.liveChannels()
             let (c, ch) = try await (cats, chans)
+            guard activeServer?.id == client.server.id else { return }
+            liveFromNetwork = true
             applyLive(categories: c, channels: ch)
             liveState = .loaded
         } catch {
@@ -302,7 +340,13 @@ final class DispatcharrStore {
             async let s = client.series()
             let (mcv, mv) = try await (mc, m)
             let (scv, sv) = try await (sc, s)
-            applyVOD(movieCategories: mcv, movies: mv, seriesCategories: scv, series: sv)
+            guard activeServer?.id == client.server.id else { return }
+            vodFromNetwork = true
+            // Decoding already happened off the main thread (nonisolated client); dedupe, MediaItems,
+            // slices and indexes are built in the background too. Wait for them so the cache save and
+            // `vodState` follow the published library.
+            _ = await applyVOD(movieCategories: mcv, movies: mv, seriesCategories: scv, series: sv)?.value
+            guard activeServer?.id == client.server.id else { return }
             vodState = .loaded
         } catch {
             vodState = (movies.isEmpty && series.isEmpty) ? .failed(Self.loadErrorMessage(error, server: client.server)) : .loaded
@@ -349,81 +393,60 @@ final class DispatcharrStore {
             channelsByCategory["__other"] = orphans
             liveCategories.append(XCCategory(id: "__other", name: "Other"))
         }
+        liveCategoryNames = Dictionary(liveCategories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
     }
 
-    private func applyVOD(movieCategories mc: [XCCategory], movies mv: [XCMovie], seriesCategories sc: [XCCategory], series sv: [XCSeries]) {
+    /// Stores the raw library and rebuilds everything derived from it (filters, dedupe, MediaItems,
+    /// per-category slices, shelves, match indexes) off the main thread, publishing it in one go.
+    /// The returned task finishes with true when this build was published.
+    @discardableResult
+    private func applyVOD(movieCategories mc: [XCCategory], movies mv: [XCMovie], seriesCategories sc: [XCCategory], series sv: [XCSeries]) -> Task<Bool, Never>? {
         rawMovieCategories = mc
         rawMovies = mv
         rawSeriesCategories = sc
         rawSeries = sv
+        guard let serverID = activeServer?.id else { return nil }
         let kids = ProfileStore.shared.isKidsMode
-        let hideAdult = AppSettings.shared.values.hideAdult || kids
-        var mvVisible = mv.filter { !(hideAdult && $0.isAdult) }
-        var svVisible = sv
-        if kids {
-            let movieCatNames = Dictionary(mc.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-            let seriesCatNames = Dictionary(sc.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
-            mvVisible = mvVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: movieCatNames[$0.categoryID]) }
-            svVisible = svVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: seriesCatNames[$0.categoryID]) }
+        let input = VODBuildInput(serverID: serverID, movieCategories: mc, movies: mv, seriesCategories: sc, series: sv,
+                                  kids: kids, hideAdult: AppSettings.shared.values.hideAdult || kids)
+        vodGeneration += 1
+        let generation = vodGeneration
+        vodBuildTask?.cancel()
+        isBuildingVOD = true
+        let task = Task<Bool, Never> {
+            // `build` runs detached (never on main) and gives up early when this task is cancelled
+            // by a newer build or a server switch.
+            guard let built = await VODLibraryBuilder.build(input),
+                  !Task.isCancelled, generation == self.vodGeneration else { return false }
+            self.publish(built)
+            self.isBuildingVOD = false
+            return true
         }
-        movies = dedupeMovies(mvVisible)
-        series = dedupeSeries(svVisible)
-        let movieCats = Set(movies.map(\.categoryID))
-        let seriesCats = Set(series.map(\.categoryID))
-        movieCategories = mc.filter { movieCats.contains($0.id) }
-        seriesCategories = sc.filter { seriesCats.contains($0.id) }
-        movieGenres = Self.genres(movies.compactMap(\.genre))
-        seriesGenres = Self.genres(series.compactMap(\.genre))
-        movieSections = Self.sections(movieCategories)
-        seriesSections = Self.sections(seriesCategories)
+        vodBuildTask = task
+        return task
     }
 
-    /// Providers often list the same film in several categories; keep one per TMDB/IMDb id or title+year.
-    private func dedupeMovies(_ list: [XCMovie]) -> [XCMovie] {
-        var seen = Set<String>()
-        var out: [XCMovie] = []
-        out.reserveCapacity(list.count)
-        for m in list {
-            let key: String
-            if let t = m.tmdbID { key = "tmdb\(t)" }
-            else if let i = m.imdbID, !i.isEmpty { key = i }
-            else { let c = TitleCleaner.clean(m.name); key = "\(c.title.lowercased())|\(c.year ?? m.year ?? 0)" }
-            if seen.insert(key).inserted { out.append(m) }
-        }
-        return out
-    }
-
-    private func dedupeSeries(_ list: [XCSeries]) -> [XCSeries] {
-        var seen = Set<String>()
-        return list.filter { s in
-            let key = s.tmdbID.map { "tmdb\($0)" } ?? "\(TitleCleaner.clean(s.name).title.lowercased())|\(s.year ?? 0)"
-            return seen.insert(key).inserted
-        }
-    }
-
-    private static func genres(_ raw: [String]) -> [String] {
-        var counts: [String: Int] = [:]
-        for g in raw {
-            for part in g.split(whereSeparator: { ",/|&".contains($0) }) {
-                let name = String(part).trimmed.capitalized
-                if name.count > 1, name.count < 24 { counts[name, default: 0] += 1 }
-            }
-        }
-        return counts.filter { $0.value >= 3 }.sorted { $0.value > $1.value }.map(\.key)
-    }
-
-    /// Groups "EN | Action", "EN | Drama", "FR | Action" into sections EN and FR.
-    private static func sections(_ cats: [XCCategory]) -> [CategorySection] {
-        var order: [String] = []
-        var groups: [String: [XCCategory]] = [:]
-        for c in cats {
-            let group = TitleCleaner.splitCategory(c.name).group ?? "All"
-            if groups[group] == nil { order.append(group) }
-            groups[group, default: []].append(c)
-        }
-        // Only split into sections when it actually organizes things.
-        if order.count <= 1 || order.count > 40 { return [CategorySection(name: "All", categories: cats)] }
-        return order.map { CategorySection(name: $0, categories: groups[$0] ?? []) }
+    private func publish(_ b: VODLibrary) {
+        movieIndex = b.movieIndex
+        seriesIndex = b.seriesIndex
+        movieCategoryNames = Dictionary(b.movieCategories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        seriesCategoryNames = Dictionary(b.seriesCategories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        movies = b.movies
+        series = b.series
+        movieCategories = b.movieCategories
+        seriesCategories = b.seriesCategories
+        movieGenres = b.movieGenres
+        seriesGenres = b.seriesGenres
+        movieSections = b.movieSections
+        seriesSections = b.seriesSections
+        movieItemsByCategory = b.movieItemsByCategory
+        seriesItemsByCategory = b.seriesItemsByCategory
+        recentMovieItems = b.recentMovieItems
+        recentSeriesItems = b.recentSeriesItems
+        topMovieItems = b.topMovieItems
+        topSeriesItems = b.topSeriesItems
+        movieItems = b.movieItems
+        seriesItems = b.seriesItems
     }
 
     // MARK: Lookups
@@ -442,29 +465,49 @@ final class DispatcharrStore {
     func movies(in categoryID: String) -> [XCMovie] { movies.filter { $0.categoryID == categoryID } }
     func series(in categoryID: String) -> [XCSeries] { series.filter { $0.categoryID == categoryID } }
 
+    /// O(1): called per channel by the guide's filters.
     func categoryName(_ id: String, kind: MediaType) -> String {
-        let list = kind == .series ? seriesCategories : (kind == .channel ? liveCategories : movieCategories)
-        let raw = list.first { $0.id == id }?.name ?? ""
-        return TitleCleaner.splitCategory(raw).name
+        let raw: String?
+        switch kind {
+        case .series: _ = seriesCategories; raw = seriesCategoryNames[id]
+        case .channel: _ = liveCategories; raw = liveCategoryNames[id]
+        default: _ = movieCategories; raw = movieCategoryNames[id]
+        }
+        return TitleCleaner.splitCategory(raw ?? "").name
     }
 
     /// Finds a Dispatcharr VOD that matches a TMDB/IMDb item so Stremio/TMDB detail pages can offer
     /// "Play from your server" alongside addon streams.
+    /// O(1) via indexes built with the library (keyed by TMDB id, IMDb id and normalized title).
+    /// Detail pages, person filmographies and source lists call this once per credit / item.
     func matchMovie(tmdbID: Int?, imdbID: String?, title: String, year: Int?) -> XCMovie? {
-        if let tmdbID, let m = movies.first(where: { $0.tmdbID == tmdbID }) { return m }
-        if let imdbID, let m = movies.first(where: { $0.imdbID == imdbID }) { return m }
-        let wanted = title.lowercased()
-        return movies.first { m in
-            let c = TitleCleaner.clean(m.name)
-            return c.title.lowercased() == wanted && (year == nil || (c.year ?? m.year) == nil || (c.year ?? m.year) == year)
-        }
+        let list = movies
+        guard let i = movieIndex.position(tmdbID: tmdbID, imdbID: imdbID, title: title, year: year, checkYear: true),
+              i < list.count else { return nil }
+        return list[i]
     }
 
     func matchSeries(tmdbID: Int?, imdbID: String?, title: String) -> XCSeries? {
-        if let tmdbID, let s = series.first(where: { $0.tmdbID == tmdbID }) { return s }
-        if let imdbID, let s = series.first(where: { $0.imdbID == imdbID }) { return s }
-        let wanted = title.lowercased()
-        return series.first { TitleCleaner.clean($0.name).title.lowercased() == wanted }
+        let list = series
+        guard let i = seriesIndex.position(tmdbID: tmdbID, imdbID: imdbID, title: title, year: nil, checkYear: false),
+              i < list.count else { return nil }
+        return list[i]
+    }
+
+    /// Like matchMovie / matchSeries, but returns the ready-made MediaItem (no title cleaning).
+    /// `movieItems[i]` / `seriesItems[i]` are built from `movies[i]` / `series[i]`.
+    func matchMovieItem(tmdbID: Int?, imdbID: String?, title: String, year: Int?) -> MediaItem? {
+        let list = movieItems
+        guard let i = movieIndex.position(tmdbID: tmdbID, imdbID: imdbID, title: title, year: year, checkYear: true),
+              i < list.count else { return nil }
+        return list[i]
+    }
+
+    func matchSeriesItem(tmdbID: Int?, imdbID: String?, title: String) -> MediaItem? {
+        let list = seriesItems
+        guard let i = seriesIndex.position(tmdbID: tmdbID, imdbID: imdbID, title: title, year: nil, checkYear: false),
+              i < list.count else { return nil }
+        return list[i]
     }
 
     // MARK: EPG
@@ -514,33 +557,262 @@ final class DispatcharrStore {
 
     // MARK: Disk cache
 
-    private struct DiskCache: Codable {
-        var liveCategories: [XCCategory]
-        var channels: [XCChannel]
-        var movieCategories: [XCCategory]
-        var movies: [XCMovie]
-        var seriesCategories: [XCCategory]
-        var series: [XCSeries]
-        var savedAt: Date
-    }
-
     private func cacheName(_ id: UUID) -> String { "dispatcharr-cache-\(id.uuidString).json" }
 
+    /// Reads (and decompresses / decodes) the cache off the main thread, then applies it unless the
+    /// network already delivered fresher data. The VOD part is built in the background as well.
     private func loadDiskCache() {
-        guard let id = activeServer?.id, let cache = FileStore.load(DiskCache.self, cacheName(id)) else { return }
-        applyLive(categories: cache.liveCategories, channels: cache.channels)
-        applyVOD(movieCategories: cache.movieCategories, movies: cache.movies, seriesCategories: cache.seriesCategories, series: cache.series)
-        liveState = .loaded
-        vodState = .loaded
+        guard let id = activeServer?.id else { return }
+        let name = cacheName(id)
+        diskLoadTask?.cancel()
+        diskLoadTask = Task {
+            guard let cache = await DispatcharrDiskCacheIO.read(name),
+                  !Task.isCancelled, self.activeServer?.id == id else { return }
+            if !self.liveFromNetwork, self.rawChannels.isEmpty {
+                self.applyLive(categories: cache.liveCategories, channels: cache.channels)
+                self.liveState = .loaded
+                SnapshotPublisher.schedule() // widgets / top shelf resolve channels by id
+            }
+            if !self.vodFromNetwork, self.rawMovies.isEmpty, self.rawSeries.isEmpty,
+               let task = self.applyVOD(movieCategories: cache.movieCategories, movies: cache.movies,
+                                        seriesCategories: cache.seriesCategories, series: cache.series) {
+                if await task.value, !self.vodFromNetwork, self.activeServer?.id == id { self.vodState = .loaded }
+            }
+        }
     }
 
     private func saveDiskCache() {
         guard let id = activeServer?.id else { return }
-        let cache = DiskCache(liveCategories: rawLiveCategories, channels: rawChannels,
-                              movieCategories: rawMovieCategories, movies: rawMovies,
-                              seriesCategories: rawSeriesCategories, series: rawSeries, savedAt: Date())
+        let cache = DispatcharrDiskCache(liveCategories: rawLiveCategories, channels: rawChannels,
+                                         movieCategories: rawMovieCategories, movies: rawMovies,
+                                         seriesCategories: rawSeriesCategories, series: rawSeries, savedAt: Date())
         let name = cacheName(id)
-        Task.detached(priority: .utility) { FileStore.save(cache, name) }
+        Task.detached(priority: .utility) { DispatcharrDiskCacheIO.write(cache, name) }
+    }
+}
+
+// MARK: - Background work
+
+/// Runs `work` on a detached task (never on the main actor) and forwards cancellation of the
+/// calling task to it, so `Task.isCancelled` inside `work` sees a superseded request.
+func detachedCancellable<T: Sendable>(priority: TaskPriority = .userInitiated,
+                                      _ work: @escaping @Sendable () async -> T) async -> T {
+    let task = Task.detached(priority: priority, operation: work)
+    return await withTaskCancellationHandler {
+        await task.value
+    } onCancel: {
+        task.cancel()
+    }
+}
+
+// MARK: - VOD library build (off the main thread)
+
+struct VODBuildInput: Sendable {
+    var serverID: UUID
+    var movieCategories: [XCCategory]
+    var movies: [XCMovie]
+    var seriesCategories: [XCCategory]
+    var series: [XCSeries]
+    var kids: Bool
+    var hideAdult: Bool
+}
+
+/// O(1) lookups for matchMovie / matchSeries. Values are positions in the published (deduped) list.
+struct VODMatchIndex: Sendable {
+    struct TitleEntry: Sendable {
+        var position: Int
+        var year: Int?
+    }
+
+    var byTMDB: [Int: Int] = [:]
+    var byIMDB: [String: Int] = [:]
+    /// Normalized cleaned title → entries in library order.
+    var byTitle: [String: [TitleEntry]] = [:]
+
+    /// The first item wins, like the linear searches this replaces.
+    mutating func add(position: Int, tmdbID: Int?, imdbID: String?, cleanedTitle: String, year: Int?) {
+        if let tmdbID, byTMDB[tmdbID] == nil { byTMDB[tmdbID] = position }
+        if let imdbID, !imdbID.isEmpty, byIMDB[imdbID] == nil { byIMDB[imdbID] = position }
+        let key = Self.normalize(cleanedTitle)
+        if !key.isEmpty { byTitle[key, default: []].append(TitleEntry(position: position, year: year)) }
+    }
+
+    func position(tmdbID: Int?, imdbID: String?, title: String, year: Int?, checkYear: Bool) -> Int? {
+        if let tmdbID, let i = byTMDB[tmdbID] { return i }
+        if let imdbID, !imdbID.isEmpty, let i = byIMDB[imdbID] { return i }
+        let key = Self.normalize(title)
+        guard !key.isEmpty, let entries = byTitle[key] else { return nil }
+        guard checkYear, let year else { return entries.first?.position }
+        return entries.first { $0.year == nil || $0.year == year }?.position
+    }
+
+    private static let kept = CharacterSet.alphanumerics
+
+    /// Letters and digits only, case and accents folded: "Amélie" = "amelie", "Spider-Man" = "Spiderman".
+    static func normalize(_ s: String) -> String {
+        let folded = s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        var scalars = String.UnicodeScalarView()
+        for u in folded.unicodeScalars where kept.contains(u) { scalars.append(u) }
+        return String(scalars).lowercased()
+    }
+}
+
+/// The visible VOD library and everything derived from it, ready to publish.
+struct VODLibrary: Sendable {
+    var movies: [XCMovie] = []
+    var series: [XCSeries] = []
+    var movieCategories: [XCCategory] = []
+    var seriesCategories: [XCCategory] = []
+    var movieGenres: [String] = []
+    var seriesGenres: [String] = []
+    var movieSections: [CategorySection] = []
+    var seriesSections: [CategorySection] = []
+    var movieIndex = VODMatchIndex()
+    var seriesIndex = VODMatchIndex()
+    var movieItems: [MediaItem] = []
+    var seriesItems: [MediaItem] = []
+    var movieItemsByCategory: [String: [MediaItem]] = [:]
+    var seriesItemsByCategory: [String: [MediaItem]] = [:]
+    var recentMovieItems: [MediaItem] = []
+    var recentSeriesItems: [MediaItem] = []
+    var topMovieItems: [MediaItem] = []
+    var topSeriesItems: [MediaItem] = []
+}
+
+enum VODLibraryBuilder {
+    /// Filters (adult / kids), dedupes, cleans every title exactly once (regex work), maps to
+    /// MediaItems and builds slices, shelves and indexes. Runs detached; nil when cancelled.
+    static func build(_ input: VODBuildInput) async -> VODLibrary? {
+        await detachedCancellable { VODLibraryBuilder.make(input) }
+    }
+
+    private static func make(_ input: VODBuildInput) -> VODLibrary? {
+        var mvVisible = input.movies.filter { !(input.hideAdult && $0.isAdult) }
+        var svVisible = input.series
+        if input.kids {
+            let movieCatNames = Dictionary(input.movieCategories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            let seriesCatNames = Dictionary(input.seriesCategories.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            mvVisible = mvVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: movieCatNames[$0.categoryID]) }
+            svVisible = svVisible.filter { KidsFilter.allows(genre: $0.genre, categoryName: seriesCatNames[$0.categoryID]) }
+        }
+        if Task.isCancelled { return nil }
+
+        var out = VODLibrary()
+        let serverID = input.serverID
+
+        // Providers often list the same film in several categories; keep one per TMDB/IMDb id or title+year.
+        var seen = Set<String>()
+        out.movies.reserveCapacity(mvVisible.count)
+        out.movieItems.reserveCapacity(mvVisible.count)
+        for (n, m) in mvVisible.enumerated() {
+            if n % 2048 == 0, Task.isCancelled { return nil }
+            let c = TitleCleaner.clean(m.name)
+            let key: String
+            if let t = m.tmdbID { key = "tmdb\(t)" }
+            else if let i = m.imdbID, !i.isEmpty { key = i }
+            else { key = "\(c.title.lowercased())|\(c.year ?? m.year ?? 0)" }
+            guard seen.insert(key).inserted else { continue }
+            out.movieIndex.add(position: out.movies.count, tmdbID: m.tmdbID, imdbID: m.imdbID, cleanedTitle: c.title, year: c.year ?? m.year)
+            out.movies.append(m)
+            out.movieItems.append(m.mediaItem(serverID: serverID, cleaned: c))
+        }
+        seen.removeAll()
+        out.series.reserveCapacity(svVisible.count)
+        out.seriesItems.reserveCapacity(svVisible.count)
+        for (n, s) in svVisible.enumerated() {
+            if n % 2048 == 0, Task.isCancelled { return nil }
+            let c = TitleCleaner.clean(s.name)
+            let key = s.tmdbID.map { "tmdb\($0)" } ?? "\(c.title.lowercased())|\(s.year ?? 0)"
+            guard seen.insert(key).inserted else { continue }
+            out.seriesIndex.add(position: out.series.count, tmdbID: s.tmdbID, imdbID: s.imdbID, cleanedTitle: c.title, year: nil)
+            out.series.append(s)
+            out.seriesItems.append(s.mediaItem(serverID: serverID, cleaned: c))
+        }
+        if Task.isCancelled { return nil }
+
+        let movieCats = Set(out.movies.map(\.categoryID))
+        let seriesCats = Set(out.series.map(\.categoryID))
+        out.movieCategories = input.movieCategories.filter { movieCats.contains($0.id) }
+        out.seriesCategories = input.seriesCategories.filter { seriesCats.contains($0.id) }
+        out.movieGenres = genres(out.movies.compactMap(\.genre))
+        out.seriesGenres = genres(out.series.compactMap(\.genre))
+        out.movieSections = sections(out.movieCategories)
+        out.seriesSections = sections(out.seriesCategories)
+
+        let newestFirst: (MediaItem, MediaItem) -> Bool = { ($0.added ?? .distantPast) > ($1.added ?? .distantPast) }
+        let bestFirst: (MediaItem, MediaItem) -> Bool = { ($0.rating ?? 0) > ($1.rating ?? 0) }
+        out.movieItemsByCategory = Dictionary(grouping: out.movieItems) { $0.categoryID ?? "0" }.mapValues { $0.sorted(by: newestFirst) }
+        out.seriesItemsByCategory = Dictionary(grouping: out.seriesItems) { $0.categoryID ?? "0" }.mapValues { $0.sorted(by: newestFirst) }
+        if Task.isCancelled { return nil }
+        out.recentMovieItems = Array(out.movieItems.sorted(by: newestFirst).prefix(30))
+        out.recentSeriesItems = Array(out.seriesItems.sorted(by: newestFirst).prefix(30))
+        out.topMovieItems = Array(out.movieItems.filter { ($0.rating ?? 0) >= 7 }.sorted(by: bestFirst).prefix(30))
+        out.topSeriesItems = Array(out.seriesItems.filter { ($0.rating ?? 0) >= 7 }.sorted(by: bestFirst).prefix(30))
+        return out
+    }
+
+    private static func genres(_ raw: [String]) -> [String] {
+        var counts: [String: Int] = [:]
+        for g in raw {
+            for part in g.split(whereSeparator: { ",/|&".contains($0) }) {
+                let name = String(part).trimmed.capitalized
+                if name.count > 1, name.count < 24 { counts[name, default: 0] += 1 }
+            }
+        }
+        return counts.filter { $0.value >= 3 }.sorted { $0.value > $1.value }.map(\.key)
+    }
+
+    /// Groups "EN | Action", "EN | Drama", "FR | Action" into sections EN and FR.
+    private static func sections(_ cats: [XCCategory]) -> [CategorySection] {
+        var order: [String] = []
+        var groups: [String: [XCCategory]] = [:]
+        for c in cats {
+            let group = TitleCleaner.splitCategory(c.name).group ?? "All"
+            if groups[group] == nil { order.append(group) }
+            groups[group, default: []].append(c)
+        }
+        // Only split into sections when it actually organizes things.
+        if order.count <= 1 || order.count > 40 { return [CategorySection(name: "All", categories: cats)] }
+        return order.map { CategorySection(name: $0, categories: groups[$0] ?? []) }
+    }
+}
+
+// MARK: - Disk cache (compressed, read and written off the main thread)
+
+struct DispatcharrDiskCache: Codable, Sendable {
+    var liveCategories: [XCCategory]
+    var channels: [XCChannel]
+    var movieCategories: [XCCategory]
+    var movies: [XCMovie]
+    var seriesCategories: [XCCategory]
+    var series: [XCSeries]
+    var savedAt: Date
+}
+
+enum DispatcharrDiskCacheIO {
+    /// Reads, decompresses and decodes the cache on a detached task. Plain JSON written by older
+    /// versions is read too.
+    static func read(_ name: String) async -> DispatcharrDiskCache? {
+        await detachedCancellable { DispatcharrDiskCacheIO.readNow(name) }
+    }
+
+    private static func readNow(_ name: String) -> DispatcharrDiskCache? {
+        guard let raw = try? Data(contentsOf: FileStore.url(name), options: .mappedIfSafe) else { return nil }
+        var data = raw
+        // LZFSE streams start with a "bvx" block magic; JSON never does.
+        if raw.starts(with: [0x62, 0x76, 0x78]) {
+            guard let plain = try? (raw as NSData).decompressed(using: .lzfse) as Data else { return nil }
+            data = plain
+        }
+        if Task.isCancelled { return nil }
+        return try? JSONDecoder().decode(DispatcharrDiskCache.self, from: data)
+    }
+
+    /// Blocking: call from a background task.
+    static func write(_ cache: DispatcharrDiskCache, _ name: String) {
+        guard let json = try? JSONEncoder().encode(cache) else { return }
+        let data = (try? (json as NSData).compressed(using: .lzfse) as Data) ?? json
+        try? data.write(to: FileStore.url(name), options: .atomic)
     }
 }
 
@@ -548,8 +820,13 @@ final class DispatcharrStore {
 
 extension XCMovie {
     func mediaItem(serverID: UUID) -> MediaItem {
-        let c = TitleCleaner.clean(name)
-        return MediaItem(
+        mediaItem(serverID: serverID, cleaned: TitleCleaner.clean(name))
+    }
+
+    /// `c` is `TitleCleaner.clean(name)`, passed in when the caller already has it (the regex work
+    /// is the expensive part of mapping a big library).
+    func mediaItem(serverID: UUID, cleaned c: (title: String, year: Int?)) -> MediaItem {
+        MediaItem(
             id: "xc:\(serverID.uuidString.prefix(8)):movie:\(id)",
             type: .movie,
             title: c.title,
@@ -569,8 +846,11 @@ extension XCMovie {
 
 extension XCSeries {
     func mediaItem(serverID: UUID) -> MediaItem {
-        let c = TitleCleaner.clean(name)
-        return MediaItem(
+        mediaItem(serverID: serverID, cleaned: TitleCleaner.clean(name))
+    }
+
+    func mediaItem(serverID: UUID, cleaned c: (title: String, year: Int?)) -> MediaItem {
+        MediaItem(
             id: "xc:\(serverID.uuidString.prefix(8)):series:\(id)",
             type: .series,
             title: c.title,

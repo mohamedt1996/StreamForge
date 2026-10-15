@@ -88,17 +88,31 @@ class FocusMemory {
 
 val LocalFocusMemory = staticCompositionLocalOf<FocusMemory?> { null }
 
+/** Where focus is in the TV shell (nav rail vs page), so late page updates don't yank focus. */
+class TvShellFocus {
+    var rail by mutableStateOf(false)
+    var content by mutableStateOf(false)
+}
+
+val LocalTvShell = staticCompositionLocalOf<TvShellFocus?> { null }
+
 /**
  * TV: focuses [requester] when the screen first appears. If the screen is being re-shown, the
  * remembered element gets focus instead; if that one never shows up, this one does.
+ * When [key] changes later (data arrived), focus only moves if the user isn't already somewhere
+ * (in the nav rail or on another element of the page), unless [always] is set.
  */
 @Composable
 fun InitialFocus(requester: FocusRequester, key: Any? = Unit, enabled: Boolean = true, always: Boolean = false) {
     val memory = LocalFocusMemory.current
+    val shell = LocalTvShell.current
     val tv = isTv()
-    LaunchedEffect(key, enabled) {
+    val ran = remember { booleanArrayOf(false) }
+    LaunchedEffect(key, enabled, tv) {
         if (!tv || !enabled) return@LaunchedEffect
         delay(90)
+        if (ran[0] && !always && shell != null && (shell.rail || shell.content)) return@LaunchedEffect
+        ran[0] = true
         val m = memory
         if (always || m == null || m.last == null) {
             runCatching { requester.requestFocus() }

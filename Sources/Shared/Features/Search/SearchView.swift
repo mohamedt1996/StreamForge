@@ -31,16 +31,17 @@ final class SearchModel {
     }
 
     private func search(_ q: String) async {
-        let lower = q.lowercased()
         let store = DispatcharrStore.shared
         let index = VODIndex.shared
-        index.rebuildIfNeeded()
 
-        // Local results are instant.
-        channels = Array(store.channels.filter { $0.name.lowercased().contains(lower) }.prefix(30))
+        // Local results: matched off the main thread (the library can hold tens of thousands of
+        // titles), stopping at the first 30 / 40 hits, and dropped if a newer query started.
+        let local = await Self.localMatches(q, channels: store.channels, movies: index.movies, series: index.series)
+        guard !Task.isCancelled, q == query.trimmed else { return }
+        channels = local.channels
         var newGroups: [ResultGroup] = []
-        let movies = index.movies.filter { $0.title.lowercased().contains(lower) }
-        let series = index.series.filter { $0.title.lowercased().contains(lower) }
+        let movies = local.movies
+        let series = local.series
         if !movies.isEmpty { newGroups.append(ResultGroup(id: "server-movies", title: "Movies on \(store.activeServer?.name ?? "your server")", items: Array(movies.prefix(40)))) }
         if !series.isEmpty { newGroups.append(ResultGroup(id: "server-series", title: "Series on \(store.activeServer?.name ?? "your server")", items: Array(series.prefix(40)))) }
         groups = newGroups
@@ -59,6 +60,32 @@ final class SearchModel {
                                 items: r.metas.prefix(40).map { $0.mediaItem(addonID: r.addon.id) }))
         }
         searching = false
+    }
+
+    private struct LocalMatches: Sendable {
+        var channels: [XCChannel]
+        var movies: [MediaItem]
+        var series: [MediaItem]
+    }
+
+    nonisolated private static func localMatches(_ q: String, channels: [XCChannel], movies: [MediaItem], series: [MediaItem]) async -> LocalMatches {
+        await detachedCancellable { () -> LocalMatches in
+            let fold: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+            func first<T>(_ list: [T], _ limit: Int, _ text: (T) -> String) -> [T] {
+                var out: [T] = []
+                for (n, x) in list.enumerated() {
+                    if n % 4096 == 0, Task.isCancelled { break }
+                    if text(x).range(of: q, options: fold) != nil {
+                        out.append(x)
+                        if out.count == limit { break }
+                    }
+                }
+                return out
+            }
+            return LocalMatches(channels: first(channels, 30) { $0.name },
+                                movies: first(movies, 40) { $0.title },
+                                series: first(series, 40) { $0.title })
+        }
     }
 }
 

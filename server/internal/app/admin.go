@@ -406,7 +406,11 @@ func (a *App) handlePutAssignment(w http.ResponseWriter, r *http.Request, p *pri
 		writeInternal(w, a, "assign dispatcharr", err)
 		return
 	}
-	if _, err := a.reconcileUser(u.ID); err != nil {
+	var clear []string
+	if created { // a new assignment overrides an earlier "removed by user"
+		clear = []string{"servers|" + s.ID}
+	}
+	if _, err := a.reconcileUserClearing(u.ID, clear); err != nil {
 		writeInternal(w, a, "assign dispatcharr reconcile", err)
 		return
 	}
@@ -788,7 +792,11 @@ func (a *App) handlePutAddonUser(w http.ResponseWriter, r *http.Request, p *prin
 		writeInternal(w, a, "assign addon", err)
 		return
 	}
-	if _, err := a.reconcileUser(u.ID); err != nil {
+	var clear []string
+	if n, _ := res.RowsAffected(); n > 0 { // a new assignment overrides an earlier "removed by user"
+		clear = []string{"addons|" + v.TransportURL}
+	}
+	if _, err := a.reconcileUserClearing(u.ID, clear); err != nil {
 		writeInternal(w, a, "assign addon reconcile", err)
 		return
 	}
@@ -937,8 +945,32 @@ func (a *App) handleApplyDefaultSettings(w http.ResponseWriter, r *http.Request,
 			applied++
 		}
 	}
-	if err := a.reconcileUsers(ids); err != nil {
-		writeInternal(w, a, "apply defaults reconcile", err)
+	// Pushing the defaults overrides users' earlier "removed by user" of those settings.
+	keys, err := a.queryStrings(`SELECT key FROM default_settings ORDER BY key`)
+	if err != nil {
+		writeInternal(w, a, "apply defaults", err)
+		return
+	}
+	clear := make([]string, 0, len(keys))
+	for _, k := range keys {
+		clear = append(clear, "settings|"+k)
+	}
+	seen := map[string]bool{}
+	var firstErr error
+	for _, uid := range ids {
+		if seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		if _, err := a.reconcileUserClearing(uid, clear); err != nil {
+			a.log.Printf("reconcile managed records for %s: %v", uid, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if firstErr != nil {
+		writeInternal(w, a, "apply defaults reconcile", firstErr)
 		return
 	}
 	a.auditAdmin(p, "admin.settings.apply", fmt.Sprintf("pushed default settings to %d user(s)", applied))
@@ -981,7 +1013,13 @@ func (a *App) handlePutUserSettings(w http.ResponseWriter, r *http.Request, p *p
 		writeInternal(w, a, "set user settings", err)
 		return
 	}
-	if _, err := a.reconcileUser(u.ID); err != nil {
+	var clear []string // setting a value for the user overrides an earlier "removed by user"
+	for _, k := range sortedKeys(vals) {
+		if vals[k] != nil {
+			clear = append(clear, "settings|"+k)
+		}
+	}
+	if _, err := a.reconcileUserClearing(u.ID, clear); err != nil {
 		writeInternal(w, a, "user settings reconcile", err)
 		return
 	}
@@ -1220,7 +1258,46 @@ func (a *App) handleAdminUser(w http.ResponseWriter, r *http.Request, p *princip
 		writeInternal(w, a, "user settings", err)
 		return
 	}
+
+	// Managed items the user removed from their account ("Removed by user").
+	type dismissedOut struct {
+		Collection  string `json:"collection"`
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		DismissedAt int64  `json:"dismissedAt"`
+	}
+	dm, err := activeDismissals(a.db, u.ID)
+	if err != nil {
+		writeInternal(w, a, "user dismissals", err)
+		return
+	}
+	dismissed := make([]dismissedOut, 0, len(dm))
+	for _, k := range sortedKeys(dm) {
+		c, item := splitRecKey(k)
+		o := dismissedOut{Collection: c, ID: item, DismissedAt: dm[k].dismissedAt}
+		switch c {
+		case "addons":
+			if v, ok := byURL[item]; ok {
+				o.Name = v.Name
+			}
+		case "servers":
+			for _, x := range assignments {
+				if x.ServerID == item {
+					o.Name = x.ServerName
+				}
+			}
+		case "settings":
+			if spec, ok := settingSpecFor(item); ok {
+				o.Name = spec.Label
+			}
+		}
+		if o.Name == "" {
+			o.Name = item
+		}
+		dismissed = append(dismissed, o)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"dismissed":     dismissed,
 		"user":          u,
 		"devices":       devices,
 		"stats":         stats,
@@ -1230,6 +1307,44 @@ func (a *App) handleAdminUser(w http.ResponseWriter, r *http.Request, p *princip
 		"libraryAddons": libOut,
 		"settings":      settings,
 	})
+}
+
+// handleRestoreDismissed ("Push again") lifts a user's dismissal of a managed item so it is
+// written to their devices again.
+func (a *App) handleRestoreDismissed(w http.ResponseWriter, r *http.Request, p *principal) {
+	u, ok := a.pathUser(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Collection string `json:"collection"`
+		ID         string `json:"id"`
+	}
+	if !decodeJSON(w, r, maxSmallBody, &req) {
+		return
+	}
+	did := dismissalIDFor(req.Collection, req.ID)
+	if req.Collection == secretsCollection || did == "" || req.ID == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_dismissal", "collection must be servers, addons or settings, with an id")
+		return
+	}
+	dm, err := activeDismissals(a.db, u.ID)
+	if err != nil {
+		writeInternal(w, a, "restore dismissal", err)
+		return
+	}
+	c, item, _ := parseDismissedID(did)
+	d, found := dm[recKey(c, item)]
+	if !found {
+		writeErr(w, http.StatusNotFound, "not_found", "the user hasn't removed this item")
+		return
+	}
+	if _, err := a.reconcileUserClearing(u.ID, []string{d.id}); err != nil {
+		writeInternal(w, a, "restore dismissal reconcile", err)
+		return
+	}
+	a.auditAdmin(p, "admin.dismissal.restore", fmt.Sprintf("pushed %s %q to %s again", c, item, u.Username))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- copy from another user -------------------------------------------------------------------------

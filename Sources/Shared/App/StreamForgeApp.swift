@@ -76,17 +76,22 @@ struct StreamForgeApp: App {
                 .environment(downloads)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .managedSyncPrompts()
                 .onOpenURL { router.handle($0) }
                 .task { await startup() }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active:
                         ServerSync.shared.setForeground(true)
+                        // Drop connections that died while suspended and revive the torrent engine,
+                        // so playing (or starting) anything after returning works.
+                        torrents.returnedToForeground()
                         Task {
                             await guide.refreshIfStale()
                             await trakt.refreshUpNext()
                         }
                     case .background:
+                        torrents.noteBackground()
                         library.flush()
                         SnapshotPublisher.publish()
                         CloudSync.shared.push()

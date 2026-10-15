@@ -997,8 +997,32 @@
       const notes = [];
       if (u.disabled) notes.push(h("div", { class: "card warn-card" }, "This account is disabled. Assignments are kept and apply again when it is re-enabled."));
       if (u.role === "admin") notes.push(h("div", { class: "card note-card" }, "Administrators' own devices may change managed records of their account; members' devices can't."));
-      root.replaceChildren(head, ...notes, stats,
-        devicesCard(d), dispatcharrCard(d, conns), addonsCard(d), settingsCard(d), countsCard(d));
+      root.replaceChildren(...[head, ...notes, stats,
+        devicesCard(d), dispatcharrCard(d, conns), addonsCard(d), settingsCard(d), dismissedCard(d), countsCard(d)].filter(Boolean));
+    }
+
+    function dismissedCard(d) {
+      const list = d.dismissed || [];
+      if (!list.length) return null;
+      const kinds = { servers: "Dispatcharr", addons: "Addon", settings: "Setting" };
+      const rows = list.map((x) => {
+        const btn = h("button", { class: "btn sm", type: "button" }, "Push again");
+        btn.addEventListener("click", busy(btn, async () => {
+          const ok = await confirmDialog("Push " + x.name + " again?", "It comes back on " + d.user.username + "'s devices on their next sync. They can remove it again.", "Push again", false);
+          if (!ok) return;
+          try { await api("POST", userBase + "/dismissed/restore", { collection: x.collection, id: x.id }); toast(x.name + " pushed again.", "ok"); load(); }
+          catch (e) { toast(e.message, "error"); }
+        }));
+        return h("tr", null,
+          h("td", null, h("b", null, x.name), x.collection !== "settings" ? h("div", { class: "mono muted small url", title: x.id }, x.id) : null),
+          h("td", null, h("span", { class: "badge" }, kinds[x.collection] || x.collection)),
+          h("td", { class: "muted" }, timeEl(x.dismissedAt)),
+          h("td", { class: "actions" }, btn));
+      });
+      return h("div", { class: "card" },
+        h("h2", null, "Removed by user"),
+        h("p", { class: "sub" }, "Managed items " + d.user.username + " chose to continue without. They stay assigned but aren't sent to their devices until you push them again or they restore them in the app."),
+        h("div", { class: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Item"), h("th", null, "Kind"), h("th", null, "Removed"), h("th", null, ""))), h("tbody", null, rows))));
     }
 
     function devicesCard(d) {

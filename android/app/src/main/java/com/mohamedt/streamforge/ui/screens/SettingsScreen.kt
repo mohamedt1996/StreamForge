@@ -59,7 +59,10 @@ import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
 import com.mohamedt.streamforge.dispatcharr.GuideRepo
 import com.mohamedt.streamforge.dispatcharr.Server
 import com.mohamedt.streamforge.stremio.Addons
+import com.mohamedt.streamforge.sync.ManagedRemoval
+import com.mohamedt.streamforge.sync.ManagedRemovalDialog
 import com.mohamedt.streamforge.sync.ServerSync
+import com.mohamedt.streamforge.sync.managedKindLabel
 import com.mohamedt.streamforge.sync.SyncDevice
 import com.mohamedt.streamforge.torrent.TorrServer
 import com.mohamedt.streamforge.ui.Chip
@@ -195,6 +198,7 @@ fun SettingsScreen() {
         else PaddingValues(Dims.gutter()),
     ) {
         item { PageTitle("Settings") }
+        item { com.mohamedt.streamforge.ui.InterfaceSetting() }
         item { SyncServerSection() }
         item { DispatcharrSection() }
         item { AddonsSection() }
@@ -284,6 +288,8 @@ private fun DispatcharrSection() {
     var xc by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var managedRemoval by remember { mutableStateOf<ManagedRemoval?>(null) }
+    managedRemoval?.let { ManagedRemovalDialog(it) { managedRemoval = null } }
 
     Section("Dispatcharr", "Account login uses your Dispatcharr username and password (or an API key); no XC password is needed. If your user has one, the app reads it automatically (admins get one created) and uses Xtream Codes, including catch-up. Without one, live TV, the guide, movies, series and DVR come through Dispatcharr's own API.") {
         DispatcharrRepo.servers.forEach { server ->
@@ -293,7 +299,11 @@ private fun DispatcharrSection() {
                     Text("${server.username} @ ${server.baseUrl} · ${server.authMode.name.lowercase().replace('_', ' ')}" +
                         if (server.usesRestStreaming) " · API streaming (no catch-up)" else "", fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
                 }
-                ActionText(onClick = { DispatcharrRepo.remove(server) }) { Text("Remove", color = Palette.live) }
+                ActionText(onClick = {
+                    // Servers the sync-server admin set up ask first ("Set up by your server").
+                    managedRemoval = ServerSync.managedRemoval("servers", server.id.lowercase(), server.name) { DispatcharrRepo.remove(server) }
+                    if (managedRemoval == null) DispatcharrRepo.remove(server)
+                }) { Text("Remove", color = Palette.live) }
             }
         }
         if (DispatcharrRepo.isConfigured) {
@@ -336,6 +346,8 @@ private fun AddonsSection() {
     val scope = rememberCoroutineScope()
     var url by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var managedRemoval by remember { mutableStateOf<ManagedRemoval?>(null) }
+    managedRemoval?.let { ManagedRemovalDialog(it) { managedRemoval = null } }
     Section("Stremio addons", "Paste any addon manifest link (https://…/manifest.json or stremio://…). Configure addons on their website first, then paste the configured link. Addons higher in the list are asked first.") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SfTextField(url, { url = it }, "Addon URL", Modifier.weight(1f))
@@ -355,7 +367,11 @@ private fun AddonsSection() {
                 ActionText(onClick = { Addons.move(a, true) }) { Text("↑") }
                 ActionText(onClick = { Addons.move(a, false) }) { Text("↓") }
                 SettingSwitch(a.enabled) { Addons.setEnabled(a, it) }
-                ActionText(onClick = { Addons.remove(a) }) { Text("✕", color = Palette.live) }
+                ActionText(onClick = {
+                    // Addons the sync-server admin set up ask first ("Set up by your server").
+                    managedRemoval = ServerSync.managedRemoval("addons", Addons.manifestUrl(a), a.name) { Addons.remove(a) }
+                    if (managedRemoval == null) Addons.remove(a)
+                }) { Text("✕", color = Palette.live) }
             }
         }
     }
@@ -526,6 +542,20 @@ private fun SyncSignedIn() {
             ActionText(onClick = { toggle(SyncPanel.APPROVE) }) { Text("Approve a TV code") }
             ActionText(onClick = { toggle(SyncPanel.PASSWORD) }) { Text("Change password") }
             ActionText(onClick = { scope.launch { ServerSync.signOut() } }) { Text("Sign out", color = Palette.live) }
+        }
+        if (ServerSync.dismissedItems.isNotEmpty()) {
+            Text("Removed from this account", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+            Text("Set up for you by your server admin. You chose to continue without them on all your devices; restore one to get it back everywhere.",
+                fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
+            ServerSync.dismissedItems.forEach { item ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(item.name)
+                        Text(managedKindLabel(item.collection), fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
+                    }
+                    ActionText(onClick = { ServerSync.restoreDismissed(item) }) { Text("Restore") }
+                }
+            }
         }
         when (panel) {
             SyncPanel.DEVICES -> SyncDevicesPanel()

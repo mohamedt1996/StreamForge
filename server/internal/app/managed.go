@@ -309,11 +309,103 @@ type recWrite struct {
 	prevUpdatedAt  int64
 }
 
+// ---- dismissals ---------------------------------------------------------------------------
+//
+// A user may remove a managed item from their account ("Continue without it" in the apps).
+// Their device pushes dismissed/<collection>|<id> {"collection","id","dismissedAt"}; while that
+// record exists (not deleted) reconcile leaves the item out for this user: servers (+ their
+// secrets) and addons are tombstoned, settings are released. Tombstoning the dismissal (the
+// app's "Restore from sync", or the admin's "Push again") brings the item back.
+
+const dismissedCollection = "dismissed"
+
+// dismissible lists the collections whose managed records a user may dismiss.
+func dismissible(collection string) bool {
+	return collection == "servers" || collection == "addons" || collection == "settings"
+}
+
+// parseDismissedID splits a dismissal id "<collection>|<id>". Addon ids never contain a raw
+// "|" (it is percent-encoded), server ids are UUIDs and settings keys are plain words.
+func parseDismissedID(id string) (collection, itemID string, ok bool) {
+	c, item, found := strings.Cut(id, "|")
+	if !found || item == "" || !dismissible(c) {
+		return "", "", false
+	}
+	if c == "servers" {
+		item = strings.ToLower(item)
+	}
+	return c, item, true
+}
+
+// dismissalIDFor returns the dismissal id that covers a record ("" if none can): secrets of a
+// Dispatcharr server are covered by the server's dismissal.
+func dismissalIDFor(collection, id string) string {
+	if collection == secretsCollection {
+		if sid, ok := strings.CutPrefix(id, "server:"); ok {
+			return "servers|" + strings.ToLower(sid)
+		}
+		return ""
+	}
+	if !dismissible(collection) {
+		return ""
+	}
+	if collection == "servers" {
+		id = strings.ToLower(id)
+	}
+	return collection + "|" + id
+}
+
+type dismissalRow struct {
+	id          string // "<collection>|<itemId>" as stored
+	updatedAt   int64
+	dismissedAt int64
+}
+
+// activeDismissals returns the user's dismissals that are in effect, keyed by record key of
+// the dismissed item.
+func activeDismissals(q queryer, userID string) (map[string]dismissalRow, error) {
+	rows, err := q.Query(`SELECT id, data, updated_at FROM records WHERE user_id = ? AND collection = ? AND deleted = 0`, userID, dismissedCollection)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]dismissalRow{}
+	for rows.Next() {
+		var d dismissalRow
+		var data sql.NullString
+		if err := rows.Scan(&d.id, &data, &d.updatedAt); err != nil {
+			return nil, err
+		}
+		c, item, ok := parseDismissedID(d.id)
+		if !ok {
+			continue
+		}
+		if data.Valid {
+			var m struct {
+				DismissedAt int64 `json:"dismissedAt"`
+			}
+			_ = json.Unmarshal([]byte(data.String), &m)
+			d.dismissedAt = m.DismissedAt
+		}
+		if d.dismissedAt == 0 {
+			d.dismissedAt = d.updatedAt
+		}
+		out[recKey(c, item)] = d
+	}
+	return out, rows.Err()
+}
+
 // reconcileUser brings the user's managed records in line with the admin configuration and
 // returns how many records were written. Records that stop being managed are tombstoned
 // (servers, secrets, addons) or released — kept with their value but no longer locked
 // (settings).
 func (a *App) reconcileUser(userID string) (int, error) {
+	return a.reconcileUserClearing(userID, nil)
+}
+
+// reconcileUserClearing is reconcileUser that first lifts the given dismissals (ids
+// "<collection>|<itemId>"), so those items are written for the user again.
+func (a *App) reconcileUserClearing(userID string, clear []string) (int, error) {
 	tx, err := a.db.Begin()
 	if err != nil {
 		return 0, err
@@ -323,6 +415,32 @@ func (a *App) reconcileUser(userID string) (int, error) {
 	desired, keep, err := a.desiredManaged(tx, userID)
 	if err != nil {
 		return 0, err
+	}
+	dismissals, err := activeDismissals(tx, userID)
+	if err != nil {
+		return 0, err
+	}
+	clearSet := map[string]bool{}
+	for _, id := range clear {
+		if c, item, ok := parseDismissedID(id); ok {
+			clearSet[recKey(c, item)] = true
+		}
+	}
+	// Dismissals: lifted ones and those whose item is no longer assigned are tombstoned (a
+	// later assignment then reaches the user again); the others take the item out of desired.
+	var writes []recWrite
+	for _, k := range sortedKeys(dismissals) {
+		d := dismissals[k]
+		if _, assigned := desired[k]; !assigned || clearSet[k] {
+			writes = append(writes, recWrite{collection: dismissedCollection, id: d.id, prevUpdatedAt: d.updatedAt})
+			continue
+		}
+		delete(desired, k)
+		if c, id := splitRecKey(k); c == "servers" {
+			sk := recKey(secretsCollection, "server:"+id)
+			delete(desired, sk)
+			delete(keep, sk)
+		}
 	}
 	existing := map[string]existingRec{}
 	rows, err := tx.Query(`SELECT collection, id, data, deleted, managed, updated_at FROM records
@@ -346,7 +464,6 @@ func (a *App) reconcileUser(userID string) (int, error) {
 		return 0, err
 	}
 
-	var writes []recWrite
 	for _, k := range sortedKeys(desired) {
 		want := desired[k]
 		c, id := splitRecKey(k)

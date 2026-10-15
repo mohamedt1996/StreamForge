@@ -42,7 +42,13 @@ struct VODBrowserView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         filterBar
-                        if gridMode { grid } else { shelves }
+                        if gridMode {
+                            grid
+                        } else {
+                            // Lazy: providers have hundreds of categories; only visible shelves (and
+                            // their posters) are built.
+                            LazyVStack(alignment: .leading, spacing: 14) { shelves }
+                        }
                     }
                     .padding(.bottom, 30)
                 }
@@ -54,18 +60,26 @@ struct VODBrowserView: View {
         .searchable(text: $filter.query, prompt: "Search \(title.lowercased())")
         #endif
         .refreshable { await store.refreshAll(force: true) }
-        .onAppear { index.rebuildIfNeeded() }
-        .onChange(of: store.lastRefresh) { index.rebuildIfNeeded() }
-        .task(id: TaskKey(filter: filter, count: index.items(kind, categoryID: categoryID).count, watched: library.watched.count)) {
+        .task(id: TaskKey(filter: filter, count: index.items(kind, categoryID: categoryID).count, watched: library.watched.count,
+                          grid: gridMode, building: index.isBuilding)) {
+            // The shelves don't use `results`: only filter the library when the grid is showing.
+            guard gridMode else { return }
+            // Typing restarts this task: wait for a pause before walking the whole library.
+            if !filter.query.trimmed.isEmpty {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if Task.isCancelled { return }
+            }
             let items = index.items(kind, categoryID: categoryID)
             let f = filter
             let watched = library.watched
+            // Off the main thread and cancelled with this task, so a stale result never lands.
+            guard let filtered = await VODIndex.filtered(f, items: items, watched: watched), !Task.isCancelled else { return }
             visibleCount = 120
-            results = await Task.detached(priority: .userInitiated) { VODIndex.apply(f, to: items, watched: watched) }.value
+            results = filtered
         }
     }
 
-    private struct TaskKey: Equatable { var filter: VODFilter; var count: Int; var watched: Int }
+    private struct TaskKey: Equatable { var filter: VODFilter; var count: Int; var watched: Int; var grid: Bool; var building: Bool }
 
     // MARK: Filter bar
 
@@ -149,7 +163,6 @@ struct VODBrowserView: View {
 
     @ViewBuilder
     private var shelves: some View {
-        let all = index.items(kind, categoryID: nil)
         let continueItems = library.continueWatching.filter { $0.item.type == kind && isFromServer($0.item) }
         let myList = library.favorites.filter { $0.type == kind }
 
@@ -162,9 +175,10 @@ struct VODBrowserView: View {
                 .cardButtonStyle()
             }
         }
-        Shelf(title: "Recently Added", items: Array(all.sorted { ($0.added ?? .distantPast) > ($1.added ?? .distantPast) }.prefix(30)),
+        // Pre-built off the main thread by DispatcharrStore (no full-library sort per render).
+        Shelf(title: "Recently Added", items: index.recent(kind),
               seeAll: { showGrid = true; filter.sort = .added }) { poster($0) }
-        Shelf(title: "Top Rated", items: Array(all.filter { ($0.rating ?? 0) >= 7 }.sorted { ($0.rating ?? 0) > ($1.rating ?? 0) }.prefix(30)),
+        Shelf(title: "Top Rated", items: index.topRated(kind),
               seeAll: { showGrid = true; filter.sort = .rating }) { poster($0) }
         if kind == .movie {
             // TMDB franchises found in the server library (needs a TMDB key).
@@ -185,9 +199,9 @@ struct VODBrowserView: View {
         }
         let activeSection = sections.first { $0.name == (section ?? sections.first?.name) }
         ForEach(activeSection?.categories.filter { !library.isHidden(category: "\(kind.rawValue):\($0.id)") } ?? []) { cat in
-            let items = index.items(kind, categoryID: cat.id)
+            let items = index.items(kind, categoryID: cat.id) // already newest first
             let name = TitleCleaner.splitCategory(cat.name).name
-            Shelf(title: name, subtitle: "\(items.count) titles", items: Array(items.sorted { ($0.added ?? .distantPast) > ($1.added ?? .distantPast) }.prefix(20)),
+            Shelf(title: name, subtitle: "\(items.count) titles", items: Array(items.prefix(20)),
                   seeAll: { router.push(kind == .series ? .series(categoryID: cat.id, title: name) : .movies(categoryID: cat.id, title: name)) }) { poster($0) }
                 .contextMenu {
                     Button { library.toggleHidden(category: "\(kind.rawValue):\(cat.id)") } label: { Label("Hide Category", systemImage: "eye.slash") }
