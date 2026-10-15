@@ -20,7 +20,7 @@ env:
 jobs:
   torrserverkit:
     name: TorrServerKit (gomobile)
-    runs-on: [self-hosted, macOS]
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
   ios:
     name: iOS / iPadOS
     needs: torrserverkit
-    runs-on: [self-hosted, macOS]
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +108,7 @@ jobs:
 
   tvos:
     name: tvOS
-    runs-on: [self-hosted, macOS]
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -142,7 +142,7 @@ jobs:
 
   torrserver-android:
     name: TorrServer engine (Android)
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -190,7 +190,7 @@ jobs:
   android:
     name: Android (phone + TV)
     needs: torrserver-android
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -208,9 +208,19 @@ jobs:
       - name: Build release APKs
         env:
           BUILD_NUMBER: ${{ github.run_number }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          # A private signing key from repository secrets, when set, replaces the public sideload key.
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+            [ -z "$ANDROID_KEY_PASSWORD" ] && export ANDROID_KEY_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+            echo "::notice::Signing with the private key from repository secrets"
+          else
+            echo "::warning::Signing with the public sideload key in the repo; add ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD secrets to use a private key"
+          fi
           [ -z "$ANDROID_KEYSTORE_PASSWORD" ] && unset ANDROID_KEYSTORE_PASSWORD
           [ -z "$ANDROID_KEY_PASSWORD" ] && unset ANDROID_KEY_PASSWORD
           ls -la android/app/libs || true
@@ -237,7 +247,7 @@ jobs:
 
   sync-server:
     name: Sync server (Go)
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -322,7 +332,7 @@ jobs:
     name: Publish release
     needs: [ios, tvos, android, sync-server]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
