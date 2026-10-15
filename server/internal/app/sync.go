@@ -24,6 +24,9 @@ type Record struct {
 	UpdatedAt  int64           `json:"updatedAt"`
 	Rev        int64           `json:"rev"`
 	Device     string          `json:"device"`
+	// Managed is true for records the admin manages for this user (PROTOCOL.md §5). Members'
+	// devices can't change or delete them; clients may use it to hide edit/delete controls.
+	Managed bool `json:"managed,omitempty"`
 }
 
 type pullResponse struct {
@@ -134,7 +137,7 @@ func (a *App) pull(userID string, since int64, limit int, includeSecrets bool) (
 	}
 	// Bounding by userRev (read first) guarantees we never skip a rev that is assigned but
 	// committed after this query: everything <= users.rev is committed in the same transaction.
-	query := `SELECT collection, id, data, deleted, updated_at, rev, device_id FROM records
+	query := `SELECT collection, id, data, deleted, updated_at, rev, device_id, managed FROM records
 		WHERE user_id = ? AND rev > ? AND rev <= ?`
 	if !includeSecrets {
 		query += ` AND collection <> 'secrets'`
@@ -152,10 +155,11 @@ func (a *App) pull(userID string, since int64, limit int, includeSecrets bool) (
 	for rows.Next() {
 		var rec Record
 		var data sql.NullString
-		var deleted int
-		if err := rows.Scan(&rec.Collection, &rec.ID, &data, &deleted, &rec.UpdatedAt, &rec.Rev, &rec.Device); err != nil {
+		var deleted, managed int
+		if err := rows.Scan(&rec.Collection, &rec.ID, &data, &deleted, &rec.UpdatedAt, &rec.Rev, &rec.Device, &managed); err != nil {
 			return res, err
 		}
+		rec.Managed = managed != 0 && deleted == 0
 		if scanned == limit {
 			res.More = true
 			break
@@ -260,6 +264,7 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 	a.touchSync(p.user.ID)
 
 	canSecrets := p.device.has("secrets")
+	isAdmin := p.user.Role == "admin"
 	nowMs := a.nowMs()
 	maxTS := a.now().Add(futureSkew).UnixMilli()
 
@@ -290,9 +295,24 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 			ua = maxTS
 		}
 		var storedUA, storedRev int64
-		err := tx.QueryRow(`SELECT updated_at, rev FROM records WHERE user_id = ? AND collection = ? AND id = ?`,
-			p.user.ID, rec.Collection, rec.ID).Scan(&storedUA, &storedRev)
+		var storedManaged int
+		err := tx.QueryRow(`SELECT updated_at, rev, managed FROM records WHERE user_id = ? AND collection = ? AND id = ?`,
+			p.user.ID, rec.Collection, rec.ID).Scan(&storedUA, &storedRev, &storedManaged)
 		switch {
+		case err == nil && storedManaged != 0 && !isAdmin:
+			// Admin-managed record: a member's device may not change or delete it. Re-stamp the
+			// stored copy so it is newer than what the device has (and the rev advances), so the
+			// device takes it back on its next pull.
+			rev++
+			restamp := max(nowMs, ua+1, storedUA+1)
+			if _, err := tx.Exec(`UPDATE records SET updated_at = ?, rev = ?, stored_at = ? WHERE user_id = ? AND collection = ? AND id = ?`,
+				restamp, rev, nowMs, p.user.ID, rec.Collection, rec.ID); err != nil {
+				writeInternal(w, a, "push restamp", err)
+				return
+			}
+			res.Status, res.Rev = "stale", rev
+			results = append(results, res)
+			continue
 		case err == nil && ua <= storedUA:
 			res.Status, res.Rev = "stale", storedRev
 			results = append(results, res)

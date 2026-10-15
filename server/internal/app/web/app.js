@@ -41,6 +41,9 @@
     pair: "M3 6h18v11H3zM8 21h8M12 17v4M9 10.5h6",
     users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM22 19v-1a4 4 0 0 0-3-3.9M16 3.1a3.5 3.5 0 0 1 0 6.8",
     activity: "M22 12h-4l-3 8L9 4l-3 8H2",
+    dispatcharr: "M3 4h18v6H3zM3 14h18v6H3zM7 7h.01M7 17h.01M11 7h6M11 17h6",
+    addons: "M9 3h6v3.5a1.5 1.5 0 0 0 3 0V6h3v6h-.5a1.5 1.5 0 0 0 0 3h.5v6h-6v-.5a1.5 1.5 0 0 0-3 0v.5H6v-6h-.5a1.5 1.5 0 0 1 0-3H6V6h3z",
+    defaults: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
     account: "M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM4 21a8 8 0 0 1 16 0",
     logout: "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3",
     ios: "M8 2h8a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM11 18h2",
@@ -245,6 +248,10 @@
     { id: "devices", label: "Devices", view: viewDevices },
     { id: "pair", label: "Pair a TV", view: viewPair },
     { id: "users", label: "Users", view: viewUsers, admin: true },
+    { id: "user", label: "User", view: viewUser, admin: true, hidden: true, parent: "users" },
+    { id: "dispatcharr", label: "Dispatcharr", view: viewDispatcharr, admin: true },
+    { id: "addons", label: "Addons", view: viewAddons, admin: true },
+    { id: "defaults", label: "Default settings", view: viewDefaults, admin: true },
     { id: "activity", label: "Activity", view: viewActivity },
     { id: "account", label: "Account", view: viewAccount },
   ];
@@ -263,8 +270,10 @@
         h("a", { class: "brand", href: "#/overview" }, brandMark(),
           h("div", null, h("div", { class: "brand-name" }, "StreamForge"), h("div", { class: "brand-sub" }, me.server.name))),
         h("nav", { class: "nav", "aria-label": "Main" },
-          ROUTES.filter((r) => !r.admin || isAdmin).map((r) =>
-            h("a", { href: "#/" + r.id, class: r.id === route.id ? "active" : null, "aria-current": r.id === route.id ? "page" : null }, icon(r.id), r.label))),
+          ROUTES.filter((r) => (!r.admin || isAdmin) && !r.hidden).map((r) => {
+            const active = r.id === (route.parent || route.id);
+            return h("a", { href: "#/" + r.id, class: active ? "active" : null, "aria-current": active ? "page" : null }, icon(r.id), r.label);
+          })),
         h("div", { class: "sidebar-foot" },
           h("div", { class: "avatar", "aria-hidden": "true" }, me.user.username.slice(0, 1).toUpperCase()),
           h("div", { class: "who" }, h("b", null, me.user.username), h("small", null, me.user.role === "admin" ? "Administrator" : "Member")),
@@ -464,20 +473,32 @@
     const p = h("input", { class: "input", type: "password", required: true, minlength: 8, autocomplete: "new-password", placeholder: "at least 8 characters" });
     const role = h("select", { class: "input" }, h("option", { value: "member" }, "Member"), h("option", { value: "admin" }, "Admin"));
     const btn = h("button", { class: "btn primary", type: "submit" }, "Create user");
+    const assignBox = h("div", { class: "assign-new" });
     const form = h("form", { onsubmit: (e) => { e.preventDefault(); create(); } },
       h("div", { class: "row" },
         h("label", { class: "field" }, h("span", null, "Username"), u),
         h("label", { class: "field" }, h("span", null, "Password"), p),
         h("label", { class: "field" }, h("span", null, "Role"), role),
-        btn), err);
+        btn), assignBox, err);
+    let pickers = { servers: () => [], addons: () => [], reset: () => {} };
     const create = busy(btn, async () => {
       err.textContent = "";
       try {
-        const nu = await api("POST", "/api/users", { username: u.value.trim(), password: p.value, role: role.value });
-        u.value = ""; p.value = ""; role.value = "member";
-        toast("Created " + nu.username + ".", "ok"); load();
+        const body = { username: u.value.trim(), password: p.value, role: role.value };
+        const ds = pickers.servers(), ad = pickers.addons();
+        if (ds.length) body.dispatcharr = ds;
+        if (ad.length) body.addons = ad;
+        const nu = await api("POST", "/api/users", body);
+        u.value = ""; p.value = ""; role.value = "member"; pickers.reset();
+        toast("Created " + nu.username + (ds.length || ad.length ? " with " + plural(ds.length, "server") + " and " + plural(ad.length, "addon") + "." : "."), "ok");
+        load();
       } catch (e) { err.textContent = e.message; }
     });
+    // Optional: assign Dispatcharr connections and addons right away.
+    Promise.all([api("GET", "/api/admin/dispatcharr"), api("GET", "/api/admin/addons")]).then(([ds, lib]) => {
+      pickers = newUserPickers(ds.servers, lib.addons);
+      assignBox.replaceChildren(pickers.el);
+    }).catch(() => {});
 
     async function load() {
       try {
@@ -515,20 +536,613 @@
         load();
       } }, "Delete");
       return h("tr", null,
-        h("td", null, h("b", null, user.username), self ? h("span", { class: "badge accent" }, " you") : null),
+        h("td", null, h("a", { class: "user-link", href: "#/user?id=" + encodeURIComponent(user.id) }, h("b", null, user.username)), self ? h("span", { class: "badge accent" }, " you") : null),
         h("td", null, roleSel),
         h("td", null, user.disabled ? h("span", { class: "badge danger" }, "Disabled") : h("span", { class: "badge ok" }, "Active")),
         h("td", { class: "muted" }, timeEl(user.createdAt)),
         h("td", { class: "actions" },
+          h("a", { class: "btn sm", href: "#/user?id=" + encodeURIComponent(user.id) }, "Manage"),
           h("a", { class: "btn sm ghost", href: "#/devices?user=" + encodeURIComponent(user.id) }, "Devices"),
           resetBtn, disBtn, delBtn));
     }
     load();
     return h("div", null,
       pageHead("Users", "Each user has their own completely separate library, progress and settings."),
-      h("div", { class: "card" }, h("h2", null, "Add a user"), h("p", { class: "sub" }, "They sign in from the app with this username and password."), form),
+      h("div", { class: "card" }, h("h2", null, "Add a user"), h("p", { class: "sub" }, "They sign in from the app with this username and password. Default settings and addons for all users are applied automatically."), form),
       h("div", { class: "card" }, h("div", { class: "table-wrap" },
         h("table", null, h("thead", null, h("tr", null, h("th", null, "User"), h("th", null, "Role"), h("th", null, "Status"), h("th", null, "Created"), h("th", null, ""))), tbody))));
+  }
+
+  // ---------- managed configuration: shared helpers ----------
+  const enc = encodeURIComponent;
+  function qparam(name) { return new URLSearchParams(location.hash.split("?")[1] || "").get(name) || ""; }
+  function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+  function loadingCard() { return h("div", { class: "card" }, h("div", { class: "empty" }, "Loading…")); }
+  function messageCard(msg) { return h("div", { class: "card" }, h("div", { class: "empty" }, msg)); }
+
+  const AUTH_MODES = [
+    { id: "xc", label: "XC (Xtream Codes)", short: "XC" },
+    { id: "web", label: "Web account", short: "Web" },
+    { id: "apiKey", label: "API key", short: "API key" },
+  ];
+  function authLabel(m) { const x = AUTH_MODES.find((a) => a.id === m); return x ? x.short : m || "—"; }
+  const CRED_FIELDS = [
+    { key: "xcPassword", has: "hasXcPassword", label: "XC password" },
+    { key: "webPassword", has: "hasWebPassword", label: "Web password" },
+    { key: "apiKey", has: "hasApiKey", label: "API key" },
+  ];
+  function credBadges(x) {
+    return h("span", { class: "cred-badges" }, CRED_FIELDS.map((f) =>
+      h("span", { class: "badge " + (x[f.has] ? "ok" : ""), title: f.label + (x[f.has] ? " is set" : " is not set") }, f.label.replace(" password", "") + (x[f.has] ? " ✓" : " –"))),
+      x.credentialsUnreadable ? h("span", { class: "badge danger", title: "The stored credentials can't be decrypted; enter them again." }, "unreadable") : null);
+  }
+  function managedBadge(text) { return h("span", { class: "badge managed", title: "Managed by the admin: the user's devices can't change or remove it." }, text || "Managed"); }
+
+  // Credentials dialog for a Dispatcharr assignment. Resolves to the PUT body or undefined.
+  // Existing secrets are never shown: blank keeps them, "Clear" removes them.
+  function credentialsDialog(title, existing) {
+    return showDialog((close) => {
+      const mode = h("select", { class: "input" }, AUTH_MODES.map((m) => h("option", { value: m.id }, m.label)));
+      mode.value = existing ? existing.authMode : "xc";
+      const uname = h("input", { class: "input", value: existing ? existing.username : "", autocomplete: "off", spellcheck: "false", placeholder: "their Dispatcharr username" });
+      const fields = CRED_FIELDS.map((f) => {
+        const isSet = !!(existing && existing[f.has]);
+        const input = h("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: isSet ? "set — leave blank to keep" : "not set" });
+        const clear = isSet ? h("input", { type: "checkbox", class: "chk" }) : null;
+        const row = h("div", { class: "field" },
+          h("span", null, f.label, " ", h("em", { class: "badge " + (isSet ? "ok" : "") }, isSet ? "set" : "not set")),
+          input,
+          clear ? h("label", { class: "inline-check" }, clear, "Clear the saved value") : null);
+        return { f, input, clear, row };
+      });
+      const hint = h("p", { class: "hint" });
+      const sync = () => {
+        hint.textContent = mode.value === "xc" ? "XC uses the username and the XC password." : mode.value === "web" ? "Web account uses the username and the web password." : "API key mode only needs the API key.";
+        for (const x of fields) x.row.classList.toggle("dim", !(mode.value === "xc" ? x.f.key === "xcPassword" : mode.value === "web" ? x.f.key === "webPassword" : x.f.key === "apiKey"));
+      };
+      mode.addEventListener("change", sync);
+      sync();
+      return h("form", { class: "dlg", onsubmit: (e) => {
+        e.preventDefault();
+        const body = { authMode: mode.value, username: uname.value.trim() };
+        for (const x of fields) {
+          if (x.input.value) body[x.f.key] = x.input.value;
+          else if (x.clear && x.clear.checked) body[x.f.key] = "";
+        }
+        close(body);
+      } },
+        h("h3", null, title),
+        h("p", null, "Dispatcharr accounts are per person. The credentials are encrypted on the server and only reach this user's devices that have the Secrets scope."),
+        h("label", { class: "field" }, h("span", null, "Sign-in method"), mode), hint,
+        h("label", { class: "field" }, h("span", null, "Username"), uname),
+        fields.map((x) => x.row),
+        h("div", { class: "btns" },
+          h("button", { type: "button", class: "btn ghost", onclick: () => close(undefined) }, "Cancel"),
+          h("button", { type: "submit", class: "btn primary" }, existing ? "Save" : "Assign")));
+    });
+  }
+
+  // Simple form dialog: fields [{key, label, value, type, placeholder}] → object or undefined.
+  function formDialog(title, text, fields, ok) {
+    return showDialog((close) => {
+      const inputs = fields.map((f) => ({ f, el: h("input", { class: "input", type: f.type || "text", value: f.value == null ? "" : String(f.value), placeholder: f.placeholder || "", autocomplete: "off", required: !!f.required }) }));
+      return h("form", { class: "dlg", onsubmit: (e) => {
+        e.preventDefault();
+        const out = {};
+        for (const x of inputs) out[x.f.key] = x.f.type === "number" ? (x.el.value === "" ? null : Number(x.el.value)) : x.el.value.trim();
+        close(out);
+      } },
+        h("h3", null, title), text ? h("p", null, text) : null,
+        inputs.map((x) => h("label", { class: "field" }, h("span", null, x.f.label), x.el)),
+        h("div", { class: "btns" },
+          h("button", { type: "button", class: "btn ghost", onclick: () => close(undefined) }, "Cancel"),
+          h("button", { type: "submit", class: "btn primary" }, ok || "Save")));
+    });
+  }
+
+  function addonLogo(logo) {
+    return logo ? h("img", { class: "addon-logo", src: logo, alt: "" }) : h("div", { class: "addon-logo ph", "aria-hidden": "true" }, icon("addons"));
+  }
+
+  function fmtSetting(v) {
+    if (v === null || v === undefined) return "—";
+    if (v === true) return "On";
+    if (v === false) return "Off";
+    if (v === "") return "(empty)";
+    return String(v);
+  }
+
+  // One editable control per synced settings key. initial === null means "not managed".
+  function settingControl(spec, initial) {
+    let el, read;
+    if (spec.type === "bool" || spec.type === "enum") {
+      const opts = spec.type === "bool" ? [["", "— not set"], ["true", "On"], ["false", "Off"]] : [["", "— not set"]].concat(spec.options.map((o) => [o, o]));
+      el = h("select", { class: "input", "aria-label": spec.label }, opts.map(([v, l]) => h("option", { value: v }, l)));
+      el.value = initial === null ? "" : String(initial);
+      read = () => el.value === "" ? null : spec.type === "bool" ? el.value === "true" : el.value;
+    } else if (spec.type === "int" || spec.type === "number") {
+      el = h("input", { class: "input", type: "number", "aria-label": spec.label, step: spec.type === "int" ? "1" : "0.05", min: spec.min, max: spec.max, placeholder: "— not set" });
+      el.value = initial === null ? "" : String(initial);
+      read = () => el.value === "" ? null : Number(el.value);
+    } else {
+      el = h("input", { class: "input", type: "text", "aria-label": spec.label, placeholder: "— not set", spellcheck: "false" });
+      el.value = initial === null ? "" : String(initial);
+      read = () => el.value === "" ? null : el.value;
+    }
+    return { el, read, initial };
+  }
+
+  // rows: [{spec, current?, managedValue (null = not managed)}]. Returns {el, changes()}.
+  function settingsEditor(rows, showCurrent) {
+    const controls = rows.map((r) => ({ r, c: settingControl(r.spec, r.managedValue) }));
+    const tbody = h("tbody", null, controls.map(({ r, c }) => h("tr", null,
+      h("td", null, h("div", null, r.spec.label), h("div", { class: "mono muted small" }, r.spec.key)),
+      showCurrent ? h("td", { class: "muted" }, fmtSetting(r.current)) : null,
+      h("td", { class: "setting-input" }, c.el),
+      h("td", null, r.managedValue !== null ? managedBadge(showCurrent ? "Locked" : "Default") : null))));
+    const el = h("div", { class: "table-wrap" }, h("table", { class: "settings-table" },
+      h("thead", null, h("tr", null, h("th", null, "Setting"), showCurrent ? h("th", null, "On their devices") : null, h("th", null, showCurrent ? "Managed value" : "Default value"), h("th", null, ""))),
+      tbody));
+    return {
+      el,
+      changes() {
+        const out = {};
+        for (const { r, c } of controls) {
+          const now = c.read();
+          if (JSON.stringify(now) !== JSON.stringify(c.initial)) out[r.spec.key] = now;
+        }
+        return out;
+      },
+    };
+  }
+
+  // Pickers on the "Add a user" form.
+  function newUserPickers(servers, addons) {
+    const serverRows = servers.map((s) => {
+      const cb = h("input", { type: "checkbox", class: "chk" });
+      const mode = h("select", { class: "input", "aria-label": "Sign-in method" }, AUTH_MODES.map((m) => h("option", { value: m.id }, m.label)));
+      const uname = h("input", { class: "input", placeholder: "Dispatcharr username", autocomplete: "off", spellcheck: "false" });
+      const secret = h("input", { class: "input", type: "password", autocomplete: "new-password" });
+      const syncPh = () => { secret.placeholder = mode.value === "xc" ? "XC password" : mode.value === "web" ? "Web password" : "API key"; };
+      mode.addEventListener("change", syncPh); syncPh();
+      const creds = h("div", { class: "row creds", hidden: true }, h("div", { class: "field" }, mode), h("div", { class: "field" }, uname), h("div", { class: "field" }, secret));
+      cb.addEventListener("change", () => { creds.hidden = !cb.checked; });
+      const el = h("div", { class: "pick" }, h("label", { class: "inline-check" }, cb, h("b", null, s.name), h("span", { class: "muted mono small" }, s.url)), creds);
+      return {
+        el,
+        value: () => {
+          if (!cb.checked) return null;
+          const v = { serverId: s.id, authMode: mode.value, username: uname.value.trim() };
+          v[mode.value === "xc" ? "xcPassword" : mode.value === "web" ? "webPassword" : "apiKey"] = secret.value;
+          return v;
+        },
+        reset: () => { cb.checked = false; creds.hidden = true; uname.value = ""; secret.value = ""; mode.value = "xc"; syncPh(); },
+      };
+    });
+    const forAll = addons.filter((a) => a.allUsers);
+    const addonRows = addons.filter((a) => !a.allUsers).map((a) => {
+      const cb = h("input", { type: "checkbox", class: "chk" });
+      return { el: h("label", { class: "inline-check pick-addon" }, cb, addonLogo(a.logo), h("b", null, a.name)), value: () => cb.checked ? a.id : null, reset: () => { cb.checked = false; } };
+    });
+    const el = h("details", { class: "assign-details" },
+      h("summary", null, "Assign Dispatcharr and addons right away (optional)"),
+      h("div", { class: "assign-grid" },
+        h("div", null, h("h4", null, "Dispatcharr"),
+          serverRows.length ? serverRows.map((r) => r.el) : h("p", { class: "muted small" }, "No connections yet — add them on the ", h("a", { href: "#/dispatcharr" }, "Dispatcharr"), " page.")),
+        h("div", null, h("h4", null, "Addons"),
+          addonRows.length ? addonRows.map((r) => r.el) : h("p", { class: "muted small" }, "No addons to pick — manage the library on the ", h("a", { href: "#/addons" }, "Addons"), " page."),
+          forAll.length ? h("p", { class: "muted small" }, plural(forAll.length, "addon") + " for all users are added automatically: " + forAll.map((a) => a.name).join(", ") + ".") : null)));
+    return {
+      el,
+      servers: () => serverRows.map((r) => r.value()).filter(Boolean),
+      addons: () => addonRows.map((r) => r.value()).filter(Boolean),
+      reset: () => { serverRows.forEach((r) => r.reset()); addonRows.forEach((r) => r.reset()); el.open = false; },
+    };
+  }
+
+  // ---------- Dispatcharr ----------
+  function viewDispatcharr() {
+    const list = h("div", null, loadingCard());
+    const err = h("div", { class: "form-error" });
+    const name = h("input", { class: "input", required: true, placeholder: "e.g. Home IPTV", autocomplete: "off" });
+    const url = h("input", { class: "input", required: true, placeholder: "http://192.168.1.10:9191", autocomplete: "off", spellcheck: "false", inputmode: "url" });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "Add connection");
+    const form = h("form", { onsubmit: (e) => { e.preventDefault(); add(); } },
+      h("div", { class: "row" },
+        h("label", { class: "field" }, h("span", null, "Name"), name),
+        h("label", { class: "field" }, h("span", null, "URL"), url), btn), err);
+    const add = busy(btn, async () => {
+      err.textContent = "";
+      try {
+        const s = await api("POST", "/api/admin/dispatcharr", { name: name.value.trim(), url: url.value.trim() });
+        name.value = url.value = "";
+        toast("Added " + s.name + ". Tick the users who should get it.", "ok"); load();
+      } catch (e) { err.textContent = e.message; }
+    });
+
+    let users = [];
+    async function load() {
+      try {
+        const [s, u] = await Promise.all([api("GET", "/api/admin/dispatcharr"), api("GET", "/api/users")]);
+        users = u.users;
+        list.replaceChildren(...(s.servers.length ? s.servers.map(serverCard) : [messageCard("No Dispatcharr connections yet. Add one above, then tick the users who should get it.")]));
+      } catch (e) { list.replaceChildren(messageCard(e.message)); }
+    }
+
+    function serverCard(s) {
+      const byUser = Object.fromEntries(s.assignments.map((x) => [x.userId, x]));
+      const base = "/api/admin/dispatcharr/" + enc(s.id);
+      const rows = users.map((u) => {
+        const x = byUser[u.id];
+        const cb = h("input", { type: "checkbox", class: "chk", checked: !!x, "aria-label": "Assign " + s.name + " to " + u.username });
+        cb.addEventListener("change", async () => {
+          if (cb.checked) {
+            const body = await credentialsDialog("Assign " + s.name + " to " + u.username, null);
+            if (!body) { cb.checked = false; return; }
+            try { await api("PUT", base + "/users/" + enc(u.id), body); toast(s.name + " assigned to " + u.username + ".", "ok"); load(); }
+            catch (e) { cb.checked = false; toast(e.message, "error"); }
+          } else {
+            const ok = await confirmDialog("Remove " + s.name + " from " + u.username + "?", "It disappears from all of their devices on the next sync, together with its saved credentials.", "Remove", true);
+            if (!ok) { cb.checked = true; return; }
+            try { await api("DELETE", base + "/users/" + enc(u.id)); toast(s.name + " removed from " + u.username + ".", "ok"); load(); }
+            catch (e) { cb.checked = true; toast(e.message, "error"); }
+          }
+        });
+        const credBtn = x ? h("button", { class: "btn sm", type: "button", onclick: async () => {
+          const body = await credentialsDialog(s.name + " · " + u.username, x);
+          if (!body) return;
+          try { await api("PUT", base + "/users/" + enc(u.id), body); toast("Credentials updated for " + u.username + ".", "ok"); load(); }
+          catch (e) { toast(e.message, "error"); }
+        } }, "Credentials") : null;
+        return h("tr", { class: x ? "on" : null },
+          h("td", { class: "chk-cell" }, cb),
+          h("td", null, h("a", { class: "user-link", href: "#/user?id=" + enc(u.id) }, u.username), u.disabled ? h("span", { class: "badge danger" }, "Disabled") : null),
+          h("td", null, x ? [authLabel(x.authMode), x.username ? h("span", { class: "muted" }, " · " + x.username) : null] : h("span", { class: "muted" }, "—")),
+          h("td", null, x ? credBadges(x) : null),
+          h("td", { class: "actions" }, credBtn));
+      });
+      const editBtn = h("button", { class: "btn sm", type: "button", onclick: async () => {
+        const v = await formDialog("Edit " + s.name, "Changes reach every assigned user's devices on their next sync.", [
+          { key: "name", label: "Name", value: s.name, required: true },
+          { key: "url", label: "URL", value: s.url, required: true },
+          { key: "order", label: "Order (lower comes first)", value: s.order, type: "number" },
+        ]);
+        if (!v) return;
+        const body = { name: v.name, url: v.url };
+        if (v.order != null) body.order = v.order;
+        try { await api("PATCH", base, body); toast("Saved.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+      } }, "Edit");
+      const delBtn = h("button", { class: "btn sm danger", type: "button", onclick: async () => {
+        const ok = await confirmDialog("Delete " + s.name + "?", s.assignments.length ? "It is removed from " + plural(s.assignments.length, "user") + " and their devices, with its credentials." : "Nobody is using it.", "Delete", true);
+        if (!ok) return;
+        try { await api("DELETE", base); toast(s.name + " deleted.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+      } }, "Delete");
+      return h("div", { class: "card" },
+        h("div", { class: "card-head" },
+          h("div", { class: "card-title" }, h("div", { class: "device-icon" }, icon("dispatcharr")),
+            h("div", null, h("h2", null, s.name), h("div", { class: "mono muted small" }, s.url), h("div", { class: "muted small" }, plural(s.assignments.length, "user") + " · id " + s.id))),
+          h("div", { class: "btns" }, editBtn, delBtn)),
+        h("div", { class: "table-wrap" }, h("table", { class: "assign-table" },
+          h("thead", null, h("tr", null, h("th", null, ""), h("th", null, "User"), h("th", null, "Account"), h("th", null, "Credentials"), h("th", null, ""))),
+          h("tbody", null, rows))));
+    }
+
+    load();
+    return h("div", null,
+      pageHead("Dispatcharr", "Connections you manage for your users. Each assigned user gets the server (and, on devices with the Secrets scope, their own credentials) and can't remove it."),
+      h("div", { class: "card" }, h("h2", null, "Add a connection"), h("p", { class: "sub" }, "The URL your users' devices use to reach Dispatcharr."), form),
+      list);
+  }
+
+  // ---------- Addons ----------
+  function viewAddons() {
+    const matrix = h("div", null, loadingCard());
+    const err = h("div", { class: "form-error" });
+    const url = h("input", { class: "input", required: true, placeholder: "https://…/manifest.json or stremio://…", autocomplete: "off", spellcheck: "false", inputmode: "url" });
+    const name = h("input", { class: "input", placeholder: "from the manifest", autocomplete: "off" });
+    const all = h("input", { type: "checkbox", class: "chk" });
+    const btn = h("button", { class: "btn primary", type: "submit" }, "Add addon");
+    const form = h("form", { onsubmit: (e) => { e.preventDefault(); add(); } },
+      h("div", { class: "row" },
+        h("label", { class: "field grow2" }, h("span", null, "Manifest URL"), url),
+        h("label", { class: "field" }, h("span", null, "Name (optional)"), name),
+        btn),
+      h("label", { class: "inline-check" }, all, "Give it to all users (including users created later)"), err);
+    const add = busy(btn, async () => {
+      err.textContent = "";
+      try {
+        const v = await api("POST", "/api/admin/addons", { url: url.value.trim(), name: name.value.trim(), allUsers: all.checked });
+        url.value = name.value = ""; all.checked = false;
+        toast(v.fetchError ? "Added " + v.name + " (manifest: " + v.fetchError + ")." : "Added " + v.name + ".", v.fetchError ? "" : "ok");
+        load();
+      } catch (e) { err.textContent = e.message; }
+    });
+
+    async function load() {
+      try {
+        const [lib, u] = await Promise.all([api("GET", "/api/admin/addons"), api("GET", "/api/users")]);
+        matrix.replaceChildren(lib.addons.length ? table(lib.addons, u.users) : messageCard("The library is empty. Add an addon above, then tick who gets it."));
+      } catch (e) { matrix.replaceChildren(messageCard(e.message)); }
+    }
+
+    function table(addons, users) {
+      const head = h("tr", null, h("th", null, "Addon"), h("th", { class: "center" }, "All users"),
+        users.map((u) => h("th", { class: "center user-col" }, h("a", { class: "user-link", href: "#/user?id=" + enc(u.id) }, u.username))),
+        h("th", null, ""));
+      const rows = addons.map((v) => {
+        const base = "/api/admin/addons/" + enc(v.id);
+        const assigned = new Set(v.users.map((x) => x.id));
+        const allCb = h("input", { type: "checkbox", class: "chk", checked: v.allUsers, "aria-label": v.name + " for all users" });
+        allCb.addEventListener("change", async () => {
+          const on = allCb.checked;
+          if (!on) {
+            const ok = await confirmDialog("Stop giving " + v.name + " to everyone?", "Users without a direct tick lose it on their next sync.", "Continue", true);
+            if (!ok) { allCb.checked = true; return; }
+          }
+          try { await api("PATCH", base, { allUsers: on }); toast(v.name + (on ? " now goes to all users." : " is no longer for all users."), "ok"); load(); }
+          catch (e) { allCb.checked = !on; toast(e.message, "error"); }
+        });
+        const cells = users.map((u) => {
+          const cb = h("input", { type: "checkbox", class: "chk", checked: v.allUsers || assigned.has(u.id), disabled: v.allUsers, title: v.allUsers ? "Assigned to all users" : null, "aria-label": v.name + " for " + u.username });
+          cb.addEventListener("change", async () => {
+            try {
+              await api(cb.checked ? "PUT" : "DELETE", base + "/users/" + enc(u.id));
+              toast(v.name + (cb.checked ? " assigned to " : " removed from ") + u.username + ".", "ok");
+            } catch (e) { cb.checked = !cb.checked; toast(e.message, "error"); }
+          });
+          return h("td", { class: "center" }, cb);
+        });
+        const refresh = h("button", { class: "btn sm", type: "button", title: "Fetch the manifest again" }, "Refresh");
+        refresh.addEventListener("click", busy(refresh, async () => {
+          try { const r = await api("POST", base + "/refresh"); toast(r.fetchError ? "Manifest: " + r.fetchError : "Manifest updated.", r.fetchError ? "error" : "ok"); load(); }
+          catch (e) { toast(e.message, "error"); }
+        }));
+        const edit = h("button", { class: "btn sm", type: "button", onclick: async () => {
+          const r = await formDialog("Edit " + v.name, "Leave the name empty to use the manifest's name.", [
+            { key: "name", label: "Name", value: v.customName, placeholder: v.manifestName || "" },
+            { key: "order", label: "Order (lower comes first)", value: v.order, type: "number" },
+          ]);
+          if (!r) return;
+          const body = { name: r.name };
+          if (r.order != null) body.order = r.order;
+          try { await api("PATCH", base, body); toast("Saved.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+        } }, "Edit");
+        const del = h("button", { class: "btn sm danger", type: "button", onclick: async () => {
+          const ok = await confirmDialog("Delete " + v.name + "?", "It is removed from the library and from every user it was assigned to.", "Delete", true);
+          if (!ok) return;
+          try { await api("DELETE", base); toast(v.name + " deleted.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+        } }, "Delete");
+        return h("tr", null,
+          h("td", null, h("div", { class: "addon-cell" }, addonLogo(v.logo),
+            h("div", { class: "addon-info" },
+              h("div", null, h("b", null, v.name), v.version ? h("span", { class: "muted small" }, " v" + v.version) : null),
+              v.description ? h("div", { class: "muted small clamp" }, v.description) : null,
+              h("div", { class: "mono muted small url", title: v.transportUrl }, v.transportUrl),
+              v.fetchError ? h("div", { class: "badge warn", title: v.fetchError }, "Manifest: " + v.fetchError) : null))),
+          h("td", { class: "center" }, allCb),
+          cells,
+          h("td", { class: "actions" }, refresh, edit, del));
+      });
+      return h("div", { class: "card" },
+        h("h2", null, "Who gets what"), h("p", { class: "sub" }, "Ticked users get the addon installed on all their devices and can't remove it. Unticking removes it from their devices."),
+        h("div", { class: "table-wrap" }, h("table", { class: "matrix" }, h("thead", null, head), h("tbody", null, rows))));
+    }
+
+    load();
+    return h("div", null,
+      pageHead("Addons", "An addon library you manage. Devices fetch each manifest themselves; the server only checks it to show its name and logo."),
+      h("div", { class: "card" }, h("h2", null, "Add an addon"), h("p", { class: "sub" }, "Paste the (configured) manifest link. stremio:// links work too."), form),
+      matrix);
+  }
+
+  // ---------- Default settings ----------
+  function viewDefaults() {
+    const body = h("div", null, loadingCard());
+    async function load() {
+      try {
+        const r = await api("GET", "/api/admin/settings");
+        const editor = settingsEditor(r.keys.map((k) => ({ spec: k, managedValue: k.key in r.defaults ? r.defaults[k.key] : null })), false);
+        const save = h("button", { class: "btn primary", type: "button" }, "Save defaults");
+        save.addEventListener("click", busy(save, async () => {
+          const values = editor.changes();
+          if (!Object.keys(values).length) { toast("Nothing changed."); return; }
+          try { await api("PUT", "/api/admin/settings/defaults", { values }); toast("Defaults saved. New users get them automatically.", "ok"); load(); }
+          catch (e) { toast(e.message, "error"); }
+        }));
+        const push = h("button", { class: "btn", type: "button" }, "Push to all existing users");
+        push.addEventListener("click", busy(push, async () => {
+          if (Object.keys(editor.changes()).length) { toast("Save your changes first.", "error"); return; }
+          const ok = await confirmDialog("Push defaults to everyone?", "Every existing user gets these values as managed (locked) settings, replacing their own values for these keys.", "Push to all users");
+          if (!ok) return;
+          try { const res = await api("POST", "/api/admin/settings/defaults/apply"); toast("Pushed to " + plural(res.users, "user") + ".", "ok"); }
+          catch (e) { toast(e.message, "error"); }
+        }));
+        body.replaceChildren(h("div", { class: "card" },
+          h("h2", null, "Defaults for all users"),
+          h("p", { class: "sub" }, "Values set here are applied as managed settings to every user created from now on. Leave a setting at “— not set” to let users choose. Per-user overrides live on each user's page."),
+          editor.el,
+          h("div", { class: "btns end" }, push, save)));
+      } catch (e) { body.replaceChildren(messageCard(e.message)); }
+    }
+    load();
+    return h("div", null, pageHead("Default settings", "Synced app settings you set for everyone."), body);
+  }
+
+  // ---------- User detail ----------
+  function viewUser() {
+    const id = qparam("id");
+    const root = h("div", null, pageHead("User", null), loadingCard());
+    if (!id) { root.replaceChildren(pageHead("User", null), messageCard("No user selected.")); return root; }
+    const userBase = "/api/admin/users/" + enc(id);
+
+    async function load() {
+      try {
+        const [d, conns, all] = await Promise.all([api("GET", userBase), api("GET", "/api/admin/dispatcharr"), api("GET", "/api/users")]);
+        draw(d, conns.servers, all.users);
+      } catch (e) { root.replaceChildren(pageHead("User", null), messageCard(e.message)); }
+    }
+
+    function draw(d, conns, allUsers) {
+      const u = d.user;
+      const copyBtn = h("button", { class: "btn", type: "button", onclick: () => copyFrom(u, allUsers) }, "Copy from user…");
+      const head = pageHead(u.username,
+        (u.role === "admin" ? "Administrator" : "Member") + " · created " + fullDate(u.createdAt),
+        h("div", { class: "toolbar" }, h("a", { class: "btn ghost", href: "#/users" }, "← Users"), copyBtn));
+      const s = d.stats;
+      const stats = h("div", { class: "stats" },
+        stat("Records", num(s.records), "across " + s.collections.length + " collections"),
+        stat("Devices", num(d.devices.length), d.devices.length ? "latest: " + d.devices.slice().sort((a, b) => b.lastSeenAt - a.lastSeenAt)[0].name : "none yet"),
+        stat("Last sync", s.lastSyncAt ? ago(s.lastSyncAt) : "never", s.lastSyncAt ? fullDate(s.lastSyncAt) : ""),
+        stat("Revision", num(s.rev), "server change counter"));
+      const notes = [];
+      if (u.disabled) notes.push(h("div", { class: "card warn-card" }, "This account is disabled. Assignments are kept and apply again when it is re-enabled."));
+      if (u.role === "admin") notes.push(h("div", { class: "card note-card" }, "Administrators' own devices may change managed records of their account; members' devices can't."));
+      root.replaceChildren(head, ...notes, stats,
+        devicesCard(d), dispatcharrCard(d, conns), addonsCard(d), settingsCard(d), countsCard(d));
+    }
+
+    function devicesCard(d) {
+      const rows = d.devices.sort((a, b) => b.lastSeenAt - a.lastSeenAt).map((x) => h("tr", null,
+        h("td", null, h("div", { class: "mini-dev" }, h("span", { class: "mini-icon" }, icon(x.platform)), h("b", null, x.name))),
+        h("td", { class: "muted" }, PLATFORM_NAMES[x.platform] || x.platform),
+        h("td", null, h("span", { class: "scope-list" }, x.scopes.map((sc) => h("span", { class: "badge" + (sc === "secrets" ? " accent-soft" : "") }, sc)))),
+        h("td", { class: "muted" }, timeEl(x.lastSeenAt))));
+      return h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", null, "Devices"), h("p", { class: "sub" }, "Signed-in apps and browsers. Only devices with the Secrets scope receive Dispatcharr credentials.")),
+          h("a", { class: "btn sm", href: "#/devices?user=" + enc(id) }, "Manage devices")),
+        rows.length ? h("div", { class: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Device"), h("th", null, "Platform"), h("th", null, "Scopes"), h("th", null, "Active"))), h("tbody", null, rows)))
+          : h("div", { class: "empty" }, "No devices yet."));
+    }
+
+    function dispatcharrCard(d, conns) {
+      const assigned = new Set(d.dispatcharr.map((x) => x.serverId));
+      const rows = d.dispatcharr.map((x) => {
+        const base = "/api/admin/dispatcharr/" + enc(x.serverId) + "/users/" + enc(id);
+        return h("tr", null,
+          h("td", null, h("b", null, x.serverName), h("div", { class: "mono muted small" }, x.serverUrl)),
+          h("td", null, authLabel(x.authMode), x.username ? h("span", { class: "muted" }, " · " + x.username) : null),
+          h("td", null, credBadges(x)),
+          h("td", { class: "actions" },
+            h("button", { class: "btn sm", type: "button", onclick: async () => {
+              const body = await credentialsDialog(x.serverName + " · " + d.user.username, x);
+              if (!body) return;
+              try { await api("PUT", base, body); toast("Credentials updated.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+            } }, "Credentials"),
+            h("button", { class: "btn sm danger", type: "button", onclick: async () => {
+              const ok = await confirmDialog("Remove " + x.serverName + "?", "It disappears from " + d.user.username + "'s devices on their next sync, with its credentials.", "Remove", true);
+              if (!ok) return;
+              try { await api("DELETE", base); toast("Removed.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+            } }, "Unassign")));
+      });
+      const avail = conns.filter((c) => !assigned.has(c.id));
+      const sel = h("select", { class: "input", "aria-label": "Connection to assign" }, avail.map((c) => h("option", { value: c.id }, c.name)));
+      const assignBtn = h("button", { class: "btn primary sm", type: "button", disabled: !avail.length, onclick: async () => {
+        const c = avail.find((x) => x.id === sel.value);
+        if (!c) return;
+        const body = await credentialsDialog("Assign " + c.name + " to " + d.user.username, null);
+        if (!body) return;
+        try { await api("PUT", "/api/admin/dispatcharr/" + enc(c.id) + "/users/" + enc(id), body); toast(c.name + " assigned.", "ok"); load(); }
+        catch (e) { toast(e.message, "error"); }
+      } }, "Assign");
+      const own = d.servers.filter((x) => !x.managed);
+      return h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", null, "Dispatcharr"), h("p", { class: "sub" }, "Managed connections with this user's own credentials.")),
+          avail.length ? h("div", { class: "inline-assign" }, sel, assignBtn) : h("a", { class: "btn sm ghost", href: "#/dispatcharr" }, conns.length ? "All connections assigned" : "Add a connection")),
+        rows.length ? h("div", { class: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Connection"), h("th", null, "Account"), h("th", null, "Credentials"), h("th", null, ""))), h("tbody", null, rows)))
+          : h("div", { class: "empty" }, "No managed Dispatcharr connections."),
+        own.length ? h("div", { class: "subsection" }, h("h3", null, "Their own servers"), h("p", { class: "sub" }, "Added on their devices; synced but not managed."),
+          h("ul", { class: "plain-list" }, own.map((x) => h("li", null, h("b", null, x.name || "Dispatcharr"), h("span", { class: "mono muted small" }, " " + x.url), x.authMode ? h("span", { class: "muted small" }, " · " + authLabel(x.authMode) + (x.username ? " · " + x.username : "")) : null)))) : null);
+    }
+
+    function addonsCard(d) {
+      const rows = d.addons.map((x) => {
+        const label = x.source === "all" ? managedBadge("All users") : x.managed ? managedBadge("Assigned") : h("span", { class: "badge" }, "Their own");
+        const unassign = x.managed && x.source === "direct" && x.libraryId ? h("button", { class: "btn sm danger", type: "button", onclick: async () => {
+          const ok = await confirmDialog("Remove " + x.name + "?", "It is uninstalled from " + d.user.username + "'s devices on their next sync.", "Remove", true);
+          if (!ok) return;
+          try { await api("DELETE", "/api/admin/addons/" + enc(x.libraryId) + "/users/" + enc(id)); toast("Removed.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+        } }, "Unassign") : x.source === "all" ? h("a", { class: "btn sm ghost", href: "#/addons", title: "Assigned to all users — change it on the Addons page" }, "Addons page") : null;
+        return h("tr", null,
+          h("td", null, h("div", { class: "addon-cell" }, addonLogo(x.logo), h("div", { class: "addon-info" },
+            h("b", null, x.name || "Addon"), h("div", { class: "mono muted small url", title: x.transportUrl }, x.transportUrl)))),
+          h("td", null, x.enabled ? h("span", { class: "badge ok" }, "Enabled") : h("span", { class: "badge" }, "Disabled")),
+          h("td", null, label),
+          h("td", { class: "actions" }, unassign));
+      });
+      const avail = d.libraryAddons.filter((a) => !a.allUsers && !a.assigned);
+      const sel = h("select", { class: "input", "aria-label": "Addon to assign" }, avail.map((a) => h("option", { value: a.id }, a.name)));
+      const assignBtn = h("button", { class: "btn primary sm", type: "button" }, "Assign");
+      assignBtn.addEventListener("click", busy(assignBtn, async () => {
+        if (!sel.value) return;
+        try { await api("PUT", "/api/admin/addons/" + enc(sel.value) + "/users/" + enc(id)); toast("Addon assigned.", "ok"); load(); } catch (e) { toast(e.message, "error"); }
+      }));
+      return h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", null, "Addons"), h("p", { class: "sub" }, "Everything installed for this user — managed by you, or added on their devices.")),
+          avail.length ? h("div", { class: "inline-assign" }, sel, assignBtn) : h("a", { class: "btn sm ghost", href: "#/addons" }, "Addon library")),
+        rows.length ? h("div", { class: "table-wrap" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Addon"), h("th", null, "State"), h("th", null, "Source"), h("th", null, ""))), h("tbody", null, rows)))
+          : h("div", { class: "empty" }, "No addons synced yet."));
+    }
+
+    function settingsCard(d) {
+      const editor = settingsEditor(d.settings.map((x) => ({ spec: x, current: x.value, managedValue: x.managed ? x.managedValue : null })), true);
+      const save = h("button", { class: "btn primary", type: "button" }, "Save managed settings");
+      save.addEventListener("click", busy(save, async () => {
+        const values = editor.changes();
+        if (!Object.keys(values).length) { toast("Nothing changed."); return; }
+        try { await api("PUT", userBase + "/settings", { values }); toast("Settings saved. Their devices pick them up on the next sync.", "ok"); load(); }
+        catch (e) { toast(e.message, "error"); }
+      }));
+      return h("div", { class: "card" },
+        h("h2", null, "Settings"),
+        h("p", { class: "sub" }, "A managed value is pushed to all of this user's devices and locked there. Set it back to “— not set” to release it (the value stays, but they can change it again)."),
+        editor.el, h("div", { class: "btns end" }, save));
+    }
+
+    function countsCard(d) {
+      const cs = d.stats.collections;
+      const max = Math.max(1, ...cs.map((c) => c.count + c.deleted));
+      return h("div", { class: "card" }, h("h2", null, "Records"), h("p", { class: "sub" }, "Synced records per collection."),
+        cs.length ? h("div", { class: "bars" }, cs.map((c) => {
+          const fill = h("div", { class: "bar-fill" });
+          fill.style.width = Math.max(1, (c.count / max) * 100) + "%";
+          return h("div", { class: "bar-row" }, h("div", { class: "name", title: c.collection }, c.collection), h("div", { class: "bar-track" }, fill),
+            h("div", { class: "num" }, num(c.count), c.deleted ? h("small", null, num(c.deleted) + " deleted") : null));
+        })) : h("div", { class: "empty" }, "Nothing synced yet."));
+    }
+
+    async function copyFrom(target, allUsers) {
+      const others = allUsers.filter((x) => x.id !== target.id);
+      if (!others.length) { toast("There's no other user to copy from.", "error"); return; }
+      const res = await showDialog((close) => {
+        const sel = h("select", { class: "input" }, others.map((x) => h("option", { value: x.id }, x.username)));
+        const boxes = [["addons", "Addons"], ["servers", "Dispatcharr servers (with their credentials)"], ["settings", "Settings"]].map(([k, l]) => {
+          const cb = h("input", { type: "checkbox", class: "chk", checked: true });
+          return { k, cb, el: h("label", { class: "inline-check" }, cb, l) };
+        });
+        return h("form", { class: "dlg", onsubmit: (e) => {
+          e.preventDefault();
+          const body = { from: sel.value };
+          for (const b of boxes) body[b.k] = b.cb.checked;
+          close(body);
+        } },
+          h("h3", null, "Copy configuration to " + target.username),
+          h("p", null, "Takes the other user's current addons, Dispatcharr servers and settings and assigns the same to " + target.username + " as managed configuration. Dispatcharr accounts are usually per person — review the credentials afterwards."),
+          h("label", { class: "field" }, h("span", null, "Copy from"), sel),
+          h("div", { class: "field" }, boxes.map((b) => b.el)),
+          h("div", { class: "btns" },
+            h("button", { type: "button", class: "btn ghost", onclick: () => close(undefined) }, "Cancel"),
+            h("button", { type: "submit", class: "btn primary" }, "Copy")));
+      });
+      if (!res) return;
+      try {
+        const c = await api("POST", userBase + "/copy", res);
+        toast("Copied " + plural(c.addons, "addon") + ", " + plural(c.servers, "server") + " and " + plural(c.settings, "setting") + ".", "ok");
+        load();
+      } catch (e) { toast(e.message, "error"); }
+    }
+
+    load();
+    return root;
   }
 
   // ---------- Activity ----------
@@ -553,6 +1167,7 @@
       if (/failed/.test(ev)) return "bad";
       if (/^(device\.revoke|user\.(disable|delete)|logout)/.test(ev)) return "warn";
       if (/^pair/.test(ev)) return "pair";
+      if (/^admin\./.test(ev)) return "admin";
       if (/^(login|signup|setup)/.test(ev)) return ev.split(".")[0];
       return "";
     }

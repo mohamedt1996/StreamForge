@@ -20,6 +20,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onKeyEvent
+import com.mohamedt.streamforge.ui.ButtonKind
+import com.mohamedt.streamforge.ui.SfButton
+import com.mohamedt.streamforge.ui.SfListRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -96,7 +102,9 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
     val tv = isTv()
     val focus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val seekFocus = remember { FocusRequester() }
     val errorFocus = remember { FocusRequester() }
+    var rootFocused by remember { mutableStateOf(false) }
     val step = Settings.values.seekStep * 1000L
 
     LaunchedEffect(interaction) { if (interaction > 0) { controls = true; lastTouch = System.currentTimeMillis() } }
@@ -114,6 +122,8 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
         runCatching {
             when {
                 hasError -> errorFocus.requestFocus()
+                // VOD: land on the seek bar, so left/right keep scrubbing; live: on play/pause.
+                controls && !c.isLive && c.durationMs > 0 -> seekFocus.requestFocus()
                 controls -> playFocus.requestFocus()
                 else -> focus.requestFocus()
             }
@@ -131,16 +141,22 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 // Any remote key keeps the controls alive (also keys consumed by a focused button).
                 lastTouch = System.currentTimeMillis()
+                // Controls just appeared but focus hasn't reached the seek bar yet: keep seeking.
+                val pending = controls && rootFocused && panel == null && c.error == null && !c.isLive
+                if (pending && e.key == Key.DirectionLeft) { c.seekBy(-step); return@onPreviewKeyEvent true }
+                if (pending && e.key == Key.DirectionRight) { c.seekBy(step); return@onPreviewKeyEvent true }
                 if (panel != null || controls || c.error != null) return@onPreviewKeyEvent false
                 when (e.key) {
-                    Key.DirectionLeft -> { if (c.isLive) c.lastChannel() else c.seekBy(-step); true }
-                    Key.DirectionRight -> { if (c.isLive) panel = Panel.CHANNELS else c.seekBy(step); true }
+                    // VOD: seek and bring up the bar (focus lands on it, so further presses keep seeking).
+                    Key.DirectionLeft -> { if (c.isLive) c.lastChannel() else { c.seekBy(-step); controls = true }; true }
+                    Key.DirectionRight -> { if (c.isLive) panel = Panel.CHANNELS else { c.seekBy(step); controls = true }; true }
                     Key.DirectionUp -> { if (c.isLive) c.zap(-1) else controls = true; true }
                     Key.DirectionDown -> { if (c.isLive) c.zap(1) else controls = true; true }
                     Key.DirectionCenter, Key.Enter -> { controls = true; true }
                     else -> false
                 }
             }
+            .onFocusChanged { rootFocused = it.isFocused }
             .focusable(),
     ) {
         AndroidView(factory = { surface }, modifier = Modifier.fillMaxSize())
@@ -166,14 +182,25 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
         }
 
         c.error?.let { err ->
-            Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(20.dp)).background(Color(0xE0101020)).padding(24.dp),
+            Column(Modifier.align(Alignment.Center).widthIn(max = if (tv) 640.dp else 480.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xE0101020))
+                .padding(if (tv) 32.dp else 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Can't play this", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text(err, color = Palette.secondary)
-                Row {
-                    TextButton(onClick = onClose) { Text("Close") }
-                    TextButton(onClick = { c.retry() }, modifier = Modifier.focusRequester(errorFocus)) { Text("Try again") }
-                    if (c.isLive) TextButton(onClick = { c.zap(1) }) { Text("Next channel") }
+                Text("Can't play this", fontSize = if (tv) 28.sp else 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text(err, color = Palette.secondary, fontSize = if (tv) 18.sp else 14.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                if (tv) {
+                    Spacer(Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        SfButton("Try again", { c.retry() }, kind = ButtonKind.PRIMARY, focusRequester = errorFocus)
+                        if (c.isLive) SfButton("Next channel", { c.zap(1) })
+                        SfButton("Close", onClose)
+                    }
+                } else {
+                    Row {
+                        TextButton(onClick = onClose) { Text("Close") }
+                        TextButton(onClick = { c.retry() }, modifier = Modifier.focusRequester(errorFocus)) { Text("Try again") }
+                        if (c.isLive) TextButton(onClick = { c.zap(1) }) { Text("Next channel") }
+                    }
                 }
             }
         }
@@ -190,10 +217,12 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
 
         if (!inPip) {
             // Skip intro / next episode buttons stay visible without the controls.
-            Column(Modifier.align(Alignment.BottomEnd).padding(end = 32.dp, bottom = if (controls) 120.dp else 40.dp), horizontalAlignment = Alignment.End) {
+            Column(Modifier.align(Alignment.BottomEnd).padding(end = if (tv) 48.dp else 32.dp, bottom = if (controls) (if (tv) 190.dp else 120.dp) else 40.dp),
+                horizontalAlignment = Alignment.End) {
                 c.activeSegment?.let { s ->
-                    Text(s.label, fontWeight = FontWeight.Bold, modifier = Modifier.card({ c.skipSegment() }, shape = RoundedCornerShape(10.dp))
-                        .background(Color.White.copy(alpha = 0.9f)).padding(horizontal = 18.dp, vertical = 10.dp), color = Color.Black)
+                    Text(s.label, fontWeight = FontWeight.Bold, fontSize = if (tv) 18.sp else 14.sp,
+                        modifier = Modifier.card({ c.skipSegment() }, shape = RoundedCornerShape(10.dp))
+                        .background(Color.White.copy(alpha = 0.9f)).padding(horizontal = if (tv) 24.dp else 18.dp, vertical = if (tv) 14.dp else 10.dp), color = Color.Black)
                 }
                 if (c.showNextCard) c.nextEpisode?.let { n ->
                     Spacer(Modifier.height(8.dp))
@@ -209,7 +238,10 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
                 }
             }
 
-            AnimatedVisibility(controls && c.error == null, enter = fadeIn(), exit = fadeOut()) { Controls(c, onClose, onPip, playFocus) { panel = it } }
+            AnimatedVisibility(controls && c.error == null, enter = fadeIn(), exit = fadeOut()) {
+                if (tv) TvControls(c, playFocus, seekFocus, onInteract = { lastTouch = System.currentTimeMillis() }) { panel = it }
+                else Controls(c, onClose, onPip, playFocus) { panel = it }
+            }
 
             panel?.let { p -> androidx.compose.runtime.key(p) { SidePanel(c, p) { panel = null } } }
         }
@@ -289,6 +321,119 @@ private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit
     }
 }
 
+/**
+ * 10-foot controls: big title top-left, a focusable seek bar (left/right skip, OK pauses) and a row
+ * of large buttons. Focus starts on the seek bar for films and episodes, on play/pause for live TV.
+ */
+@Composable
+private fun TvControls(c: PlayerController, playFocus: FocusRequester, seekFocus: FocusRequester, onInteract: () -> Unit, openPanel: (Panel) -> Unit) {
+    val step = Settings.values.seekStep * 1000L
+    val live = c.isLive
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+        0f to Color.Black.copy(alpha = 0.8f), 0.28f to Color.Transparent, 0.55f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.92f)))) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 48.dp, vertical = 27.dp), verticalAlignment = Alignment.Top) {
+            if (live) c.currentChannel?.let {
+                ChannelLogo(it.icon, it.name, 64.dp)
+                Spacer(Modifier.width(18.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(c.title, fontSize = 30.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    if (live) { Spacer(Modifier.width(12.dp)); LiveBadge() }
+                }
+                c.subtitle?.let { Text(it, fontSize = 19.sp, color = Color.White.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                if (live) c.nextProgramme?.let { Text("Next at ${timeText(it.start)}  ${it.title}", fontSize = 16.sp, color = Palette.secondary, maxLines = 1) }
+            }
+            Text(timeText(System.currentTimeMillis()), fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = 0.85f))
+        }
+
+        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 48.dp, vertical = 27.dp)) {
+            if (live) {
+                c.nowProgramme?.let { p ->
+                    Text(p.title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(timeText(p.start), fontSize = 17.sp)
+                        Box(Modifier.weight(1f).padding(horizontal = 14.dp)) { ProgressLine(p.progress, height = 6.dp) }
+                        Text(timeText(p.end), fontSize = 17.sp)
+                    }
+                }
+                if (c.behindLiveMs > 5_000) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("−${c.behindLiveMs.clockText()} behind live", fontSize = 17.sp, color = Palette.gold)
+                        Spacer(Modifier.width(14.dp))
+                        SfButton("Go live", { c.goLive() }, kind = ButtonKind.DANGER)
+                    }
+                }
+            } else {
+                TvSeekBar(c, step, seekFocus, onInteract)
+            }
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                SfButton(null, { c.togglePause() }, icon = if (c.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause, kind = ButtonKind.PRIMARY,
+                    focusRequester = playFocus, contentDescription = if (c.paused) "Play" else "Pause")
+                if (live) {
+                    SfButton(null, { c.zap(-1) }, icon = Icons.Filled.KeyboardArrowUp, contentDescription = "Previous channel")
+                    SfButton(null, { c.zap(1) }, icon = Icons.Filled.KeyboardArrowDown, contentDescription = "Next channel")
+                    SfButton("Channels", { openPanel(Panel.CHANNELS) }, icon = Icons.Filled.List)
+                    SfButton("Last channel", { c.lastChannel() })
+                } else {
+                    SfButton(null, { c.seekBy(-step) }, icon = Icons.Filled.FastRewind, contentDescription = "Back ${step / 1000} seconds")
+                    SfButton(null, { c.seekBy(step) }, icon = Icons.Filled.FastForward, contentDescription = "Forward ${step / 1000} seconds")
+                    c.nextEpisode?.let { n -> SfButton("Next: ${n.code}", { c.playNextEpisode() }, icon = Icons.Filled.SkipNext) }
+                }
+                Spacer(Modifier.weight(1f))
+                SfButton("Audio", { openPanel(Panel.AUDIO) }, icon = Icons.Filled.Audiotrack)
+                SfButton("Subtitles", { openPanel(Panel.SUBTITLES) }, icon = Icons.Filled.Subtitles)
+                SfButton(null, { openPanel(Panel.SETTINGS) }, icon = Icons.Filled.Tune, contentDescription = "Playback settings")
+            }
+        }
+    }
+}
+
+/** Focusable progress bar: left/right skip by the configured interval (held keys repeat), OK pauses. */
+@Composable
+private fun TvSeekBar(c: PlayerController, step: Long, requester: FocusRequester, onInteract: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val total = c.durationMs.coerceAtLeast(1)
+    val fraction = (c.positionMs.toFloat() / total).coerceIn(0f, 1f)
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(c.positionMs.clockText(), fontSize = 19.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(96.dp))
+            Box(
+                Modifier.weight(1f).height(32.dp)
+                    .focusRequester(requester)
+                    .onFocusChanged { focused = it.isFocused }
+                    .onKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown) return@onKeyEvent false
+                        when (e.key) {
+                            Key.DirectionLeft -> { c.seekBy(-step); onInteract(); true }
+                            Key.DirectionRight -> { c.seekBy(step); onInteract(); true }
+                            Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { c.togglePause(); onInteract(); true }
+                            else -> false
+                        }
+                    }
+                    .focusable(),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                val h = if (focused) 10.dp else 6.dp
+                Box(Modifier.fillMaxWidth().height(h).clip(CircleShape).background(Color.White.copy(alpha = 0.25f)))
+                Box(Modifier.fillMaxWidth(fraction).height(h).clip(CircleShape).background(Palette.gradient))
+                if (focused) {
+                    Box(Modifier.fillMaxWidth(fraction), contentAlignment = Alignment.CenterEnd) {
+                        Box(Modifier.size(22.dp).clip(CircleShape).background(Color.White))
+                    }
+                }
+            }
+            Text("-" + (c.durationMs - c.positionMs).coerceAtLeast(0).clockText(), fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(110.dp).padding(start = 14.dp))
+        }
+        Text(if (focused) "◀ ▶ skip ${step / 1000} s   OK ${if (c.paused) "play" else "pause"}" else " ",
+            fontSize = 15.sp, color = Palette.secondary, modifier = Modifier.padding(start = 96.dp, top = 4.dp))
+    }
+}
+
 @Composable
 private fun CtrlButton(icon: ImageVector, label: String, onClick: () -> Unit, size: androidx.compose.ui.unit.Dp = 44.dp, modifier: Modifier = Modifier) {
     Box(modifier.size(size).card(onClick, shape = CircleShape), contentAlignment = Alignment.Center) {
@@ -324,10 +469,11 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
     LaunchedEffect(panel) { if (tv) { delay(60); runCatching { first.requestFocus() } } }
     // Tap outside closes; not a focus target, so the D-pad stays inside the list.
     Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { onClose() } }) {
-        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(if (tv) 460.dp else 340.dp).background(Color(0xF0121026)).padding(16.dp)
+        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(if (tv) 460.dp else 340.dp).background(Color(0xF015131F))
+            .padding(horizontal = if (tv) 28.dp else 16.dp, vertical = if (tv) 27.dp else 16.dp)
             .pointerInput(Unit) { detectTapGestures { } }) {
             Text(when (panel) { Panel.AUDIO -> "Audio"; Panel.SUBTITLES -> "Subtitles"; Panel.CHANNELS -> "Channels"; Panel.SETTINGS -> "Playback" },
-                fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                fontSize = if (tv) 26.sp else 18.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             LazyColumn(state = listState) {
                 when (panel) {
@@ -337,13 +483,13 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
                     Panel.SUBTITLES -> {
                         item { Option("Off", c.subtitleTracks.none { it.selected }, Modifier.focusRequester(first)) { c.selectSubtitle(null) } }
                         items(c.subtitleTracks) { t -> Option(t.label, t.selected) { c.selectSubtitle(t) } }
-                        if (c.addonSubtitles.isNotEmpty()) item { Text("FROM ADDONS", fontSize = 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
+                        if (c.addonSubtitles.isNotEmpty()) item { Text("From addons", fontSize = if (tv) 16.sp else 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
                         items(c.addonSubtitles.take(60)) { s ->
                             Option(java.util.Locale.forLanguageTag(s.lang).displayLanguage.ifEmpty { s.lang }, false) { c.loadAddonSubtitle(s) }
                         }
                         item {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 12.dp)) {
-                                Text("Delay %+.2fs".format(c.subtitleDelay), Modifier.weight(1f))
+                                Text("Delay %+.2fs".format(c.subtitleDelay), Modifier.weight(1f), fontSize = if (tv) 18.sp else 14.sp)
                                 TextChip("−0.25") { c.changeSubtitleDelay(-0.25) }
                                 Spacer(Modifier.width(6.dp))
                                 TextChip("+0.25") { c.changeSubtitleDelay(0.25) }
@@ -352,13 +498,16 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
                     }
                     Panel.CHANNELS -> items(channels.distinctBy { it.id }, key = { it.id }) { ch ->
                         val now = GuideRepo.now(ch)
-                        Row((if (ch.id == focusChannelId) Modifier.focusRequester(first) else Modifier).fillMaxWidth().card({ c.switchChannel(ch); onClose() }).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            ch.number?.let { Text("$it", fontSize = 12.sp, color = Palette.secondary, modifier = Modifier.width(36.dp)) }
-                            ChannelLogo(ch.icon, ch.name, 34.dp)
-                            Spacer(Modifier.width(8.dp))
+                        Row(Modifier.fillMaxWidth().card({ c.switchChannel(ch); onClose() }, focusScale = if (tv) 1.02f else null, glow = false,
+                            focusRequester = if (ch.id == focusChannelId) first else null)
+                            .background(if (ch.id == c.request.channelId) Color.White.copy(alpha = 0.1f) else Color.Transparent)
+                            .padding(if (tv) 10.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            ch.number?.let { Text("$it", fontSize = if (tv) 16.sp else 12.sp, color = Palette.secondary, modifier = Modifier.width(if (tv) 46.dp else 36.dp)) }
+                            ChannelLogo(ch.icon, ch.name, if (tv) 44.dp else 34.dp)
+                            Spacer(Modifier.width(if (tv) 12.dp else 8.dp))
                             Column {
-                                Text(ch.name, fontWeight = if (ch.id == c.request.channelId) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
-                                now?.let { Text(it.title, fontSize = 12.sp, color = Palette.secondary, maxLines = 1) }
+                                Text(ch.name, fontSize = if (tv) 18.sp else 14.sp, fontWeight = if (ch.id == c.request.channelId) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
+                                now?.let { Text(it.title, fontSize = if (tv) 15.sp else 12.sp, color = Palette.secondary, maxLines = 1) }
                             }
                         }
                     }
@@ -371,10 +520,10 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
                             item { Option("Mark intro end here", false) { c.markIntro(false) } }
                         }
                         c.chapters.takeIf { it.size > 1 }?.let { chs ->
-                            item { Text("CHAPTERS", fontSize = 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
+                            item { Text("Chapters", fontSize = if (tv) 16.sp else 11.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
                             items(chs) { ch -> Option("${ch.title} · ${(ch.time * 1000).toLong().clockText()}", false) { c.seekTo((ch.time * 1000).toLong()) } }
                         }
-                        item { Text("Source: ${c.request.source.provider}", fontSize = 12.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
+                        item { Text("Source: ${c.request.source.provider}", fontSize = if (tv) 15.sp else 12.sp, color = Palette.secondary, modifier = Modifier.padding(top = 12.dp)) }
                     }
                 }
             }
@@ -384,11 +533,7 @@ private fun SidePanel(c: PlayerController, panel: Panel, onClose: () -> Unit) {
 
 @Composable
 private fun Option(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Row(modifier.fillMaxWidth().card(onClick, shape = RoundedCornerShape(10.dp)).background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
-        .padding(horizontal = 10.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, Modifier.weight(1f), fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-        if (selected) Text("✓", color = Palette.accent)
-    }
+    SfListRow(text, onClick, modifier, selected = selected)
 }
 
 @Suppress("unused")

@@ -170,5 +170,99 @@ Device-specific things (active server, active profile, hardware decoding, last c
   `STREAMFORGE_ADMIN_PASSWORD`, `STREAMFORGE_OPEN_SIGNUP`, `STREAMFORGE_NAME`,
   `STREAMFORGE_TRUST_PROXY` (use `X-Forwarded-For`).
 * The `secrets` collection is encrypted at rest (AES-256-GCM, key in `/data/secret.key`).
-* Web admin at `/`: sign in, approve TV pairing codes, manage devices/scopes, users, change password.
+* Web admin at `/`: sign in, approve TV pairing codes, manage devices/scopes, users (with a per-user
+  detail page), Dispatcharr connections, the addon library, default settings (§5), change password.
+* Dispatcharr credentials of admin assignments are encrypted at rest like the `secrets` collection.
 * `GET /healthz` → `ok`. Put it behind HTTPS (reverse proxy) when exposed outside your LAN.
+
+---
+
+## 5. Admin-managed configuration
+
+Admins can manage Dispatcharr connections, addons and settings centrally on the server and push
+them to specific users. The server materialises them as **ordinary records** in each affected
+user's store, so clients need no new endpoints: they pull them like anything else.
+
+| what the admin manages | records written into the user's store |
+|---|---|
+| Dispatcharr connection assigned to the user | `servers/<uuid>` `{"name","url","username","authMode","order","managed":true}` and `secrets/server:<uuid>` `{"xcPassword","webPassword","apiKey"}` (the user's own credentials for that connection) |
+| Addon from the library (assigned to the user, or to all users) | `addons/<transportUrl>` `{"transportUrl","name","enabled":true,"order","managed":true}` |
+| Managed setting | `settings/<key>` `{"value": any, "managed": true}` |
+
+* Every write gets `updatedAt = max(now, stored updatedAt + 1)`, a new `rev` and wakes the user's
+  long polls; `device` is `"server"`.
+* Pulled records that are managed also carry a top-level `"managed": true` (clients may use it to
+  hide delete/edit controls). The `secrets` collection is still filtered for devices without the
+  `secrets` scope.
+* **Removal.** Unassigning a connection or addon, deleting it, or switching an addon off "all
+  users" writes **tombstones** (`servers` + `secrets`, or `addons`) for the affected users. Releasing
+  a managed setting re-writes `settings/<key>` as `{"value": …}` (same value, no longer managed).
+  Afterwards the user owns those ids again.
+* **Enforcement.** A push to a managed record from a device whose user is not an admin is not
+  stored. Instead the server re-stamps the stored copy (`updatedAt = max(now, incoming.updatedAt + 1,
+  stored.updatedAt + 1)`, new `rev`) and answers `stale`; the device then pulls the managed version
+  back (it is newer than its local change) and restores it. Admins' own devices may change managed
+  records of their own account normally (the next admin change to that configuration overwrites them).
+* **Addon ids** are normalised exactly like the apps do: trim; `stremio://` → `https://`; add
+  `https://` when there is no scheme; strip trailing `/` and `/manifest.json`; append
+  `/manifest.json`; percent-encode (UTF-8, upper-case hex) every character that is not an ASCII
+  letter/digit or one of ``-._~!$&'()*+,;=:@/?#%[]`` — e.g.
+  `stremio://torrentio.strem.fun/sort=size|qualityfilter=cam` →
+  `https://torrentio.strem.fun/sort=size%7Cqualityfilter=cam/manifest.json`.
+* "All users" addons and the default settings are applied to users created later (setup, admin
+  creation, open sign-up). Default settings reach existing users only via *apply*.
+
+### Endpoints (admin only, every change is written to the activity log)
+
+Credentials are write-only: responses only say whether each is set
+(`hasXcPassword`, `hasWebPassword`, `hasApiKey`).
+
+**Dispatcharr connections**
+* `GET /api/admin/dispatcharr` → `{"servers": [Server]}`
+* `POST /api/admin/dispatcharr` `{"name", "url", "id"?: uuid, "order"?}` → `Server`
+* `PATCH /api/admin/dispatcharr/{id}` `{"name"?, "url"?, "order"?}` → `Server` (rewrites records of assigned users)
+* `DELETE /api/admin/dispatcharr/{id}` → `204` (tombstones for assigned users)
+* `PUT /api/admin/dispatcharr/{id}/users/{userId}` `{"authMode"?: "xc"|"web"|"apiKey", "username"?, "xcPassword"?, "webPassword"?, "apiKey"?}` → `Assignment`.
+  Creates or updates the assignment; omitted fields keep their value, `""` clears a credential.
+* `DELETE /api/admin/dispatcharr/{id}/users/{userId}` → `204`
+
+```
+Server     = {"id": "uuid", "name", "url", "order", "createdAt", "updatedAt", "assignments": [Assignment]}
+Assignment = {"serverId", "serverName", "serverUrl", "userId", "user": "<username>", "authMode",
+              "username": "<Dispatcharr account>", "hasXcPassword", "hasWebPassword", "hasApiKey", "updatedAt"}
+```
+
+**Addon library**
+* `GET /api/admin/addons` → `{"addons": [Addon]}`
+* `POST /api/admin/addons` `{"url", "name"?, "allUsers"?, "order"?, "users"?: [userId]}` → `Addon`.
+  The manifest is fetched server-side (5 s timeout) for name/logo/description; failure is recorded
+  in `fetchError` and doesn't block. `409 addon_exists` (with `id`) if the normalised URL is already in the library.
+* `PATCH /api/admin/addons/{id}` `{"name"?, "allUsers"?, "order"?}` → `Addon`
+* `POST /api/admin/addons/{id}/refresh` → `Addon` (fetch the manifest again)
+* `DELETE /api/admin/addons/{id}` → `204`
+* `PUT` / `DELETE /api/admin/addons/{id}/users/{userId}` → `204`
+
+```
+Addon = {"id": "a_…", "transportUrl", "name", "customName", "manifestName", "manifestId", "version",
+         "description", "logo": "data:image/…" | "", "allUsers", "order", "fetchedAt", "fetchError",
+         "createdAt", "updatedAt", "users": [{"id", "username"}]}
+```
+
+**Settings** (keys and value types: §3)
+* `GET /api/admin/settings` → `{"keys": [{"key","label","type","options"?,"min"?,"max"?}], "defaults": {key: value}}`
+* `PUT /api/admin/settings/defaults` `{"values": {key: value | null}}` → same as GET (`null` removes a default)
+* `POST /api/admin/settings/defaults/apply` `{"users"?: [userId]}` → `{"users": n}` — writes the
+  defaults as managed settings of existing users (all users when omitted)
+* `PUT /api/admin/users/{id}/settings` `{"values": {key: value | null}}` → `{"settings": [UserSetting]}` (`null` releases)
+
+**Per user**
+* `GET /api/admin/users/{id}` → `{"user", "devices", "stats", "dispatcharr": [Assignment], "servers": [...],
+  "addons": [{"transportUrl","name","enabled","order","managed","libraryId","logo","source": "all"|"direct"|""}],
+  "libraryAddons": [...], "settings": [UserSetting]}` where
+  `UserSetting = {key, label, type, …, "value": <synced value>|null, "managed", "managedValue"|null}`
+* `POST /api/admin/users/{id}/copy` `{"from": userId, "addons"?: true, "servers"?: true, "settings"?: true}`
+  → `{"addons": n, "servers": n, "settings": n}` — assigns the other user's current addons,
+  Dispatcharr servers (with their credentials; connections are created for servers the library
+  doesn't know yet, keeping their UUID) and synced settings as managed configuration.
+* `POST /api/users` additionally accepts `"dispatcharr": [{"serverId","authMode","username","xcPassword"?,"webPassword"?,"apiKey"?}]`
+  and `"addons": ["a_…"]` to assign right away.

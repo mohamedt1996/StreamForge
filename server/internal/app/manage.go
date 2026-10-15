@@ -156,6 +156,9 @@ func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request, p *princi
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
+		// Optional admin-managed configuration to assign right away (PROTOCOL.md §5).
+		Dispatcharr []newUserServer `json:"dispatcharr"`
+		Addons      []string        `json:"addons"`
 	}
 	if !decodeJSON(w, r, maxSmallBody, &req) {
 		return
@@ -176,6 +179,13 @@ func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request, p *princi
 		writeErr(w, http.StatusBadRequest, "invalid_role", "role must be admin or member")
 		return
 	}
+	if msg, err := a.validateNewUserAssignments(req.Dispatcharr, req.Addons); err != nil {
+		writeInternal(w, a, "create user assignments", err)
+		return
+	} else if msg != "" {
+		writeErr(w, http.StatusBadRequest, "invalid_assignment", msg)
+		return
+	}
 	u, err := a.createUser(req.Username, req.Password, req.Role)
 	if errors.Is(err, errUsernameTaken) {
 		writeErr(w, http.StatusConflict, "username_taken", "that username is taken")
@@ -186,6 +196,14 @@ func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request, p *princi
 		return
 	}
 	a.audit(p.user.ID, p.user.Username, p.device.ID, "user.create", fmt.Sprintf("created %s (%s)", u.Username, u.Role), p.ip)
+	if err := a.applyNewUserAssignments(u.ID, req.Dispatcharr, req.Addons); err != nil {
+		writeInternal(w, a, "create user assignments", err)
+		return
+	}
+	if n := len(req.Dispatcharr) + len(req.Addons); n > 0 {
+		a.audit(p.user.ID, p.user.Username, p.device.ID, "admin.assign",
+			fmt.Sprintf("assigned %d Dispatcharr connection(s) and %d addon(s) to %s", len(req.Dispatcharr), len(req.Addons), u.Username), p.ip)
+	}
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -339,41 +357,18 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request, p *principal) 
 	if !ok {
 		return
 	}
-	var rev, lastSync, devices int64
-	if err := a.db.QueryRow(`SELECT rev, last_sync_at, (SELECT COUNT(*) FROM devices WHERE user_id = users.id) FROM users WHERE id = ?`, uid).
-		Scan(&rev, &lastSync, &devices); err != nil {
-		writeInternal(w, a, "stats", err)
-		return
-	}
-	rows, err := a.db.Query(`SELECT collection, SUM(CASE WHEN deleted = 0 THEN 1 ELSE 0 END), SUM(deleted)
-		FROM records WHERE user_id = ? GROUP BY collection ORDER BY collection`, uid)
+	st, err := a.userStats(uid)
 	if err != nil {
-		writeInternal(w, a, "stats", err)
-		return
-	}
-	defer rows.Close()
-	stats := []collectionStat{}
-	var total int64
-	for rows.Next() {
-		var s collectionStat
-		if err := rows.Scan(&s.Collection, &s.Count, &s.Deleted); err != nil {
-			writeInternal(w, a, "stats", err)
-			return
-		}
-		total += s.Count
-		stats = append(stats, s)
-	}
-	if err := rows.Err(); err != nil {
 		writeInternal(w, a, "stats", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":        uid,
-		"rev":         rev,
-		"lastSyncAt":  lastSync,
-		"devices":     devices,
-		"records":     total,
-		"collections": stats,
+		"rev":         st.Rev,
+		"lastSyncAt":  st.LastSyncAt,
+		"devices":     st.Devices,
+		"records":     st.Records,
+		"collections": st.Collections,
 	})
 }
 

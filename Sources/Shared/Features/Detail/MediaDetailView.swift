@@ -68,6 +68,9 @@ struct MediaDetailView: View {
     @Environment(AppRouter.self) private var router
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
     @State private var model: DetailModel
     @State private var sourceSheet: SourceSheetContext?
     @State private var downloadSheet: DownloadSheetContext?
@@ -84,23 +87,31 @@ struct MediaDetailView: View {
     private var item: MediaItem { model.details.item }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
-                actions
-                if let overview = item.overview, !overview.isEmpty { overviewView(overview) }
-                if item.type == .series { seasonsAndEpisodes }
-                if item.type == .movie, let sources = model.sources { inlineSources(sources) }
-                if item.type == .movie, let collection = model.details.collection {
-                    CollectionRow(collection: collection, currentItem: item)
+        // Every size on this page comes from the live container size (never cached in @State), so
+        // rotation, iPad split view and the player's landscape lock/unlock simply lay it out again.
+        GeometryReader { geo in
+            let layout = detailLayout(for: geo)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    header(layout)
+                    actions
+                    if let overview = item.overview, !overview.isEmpty { overviewView(overview) }
+                    if item.type == .series { seasonsAndEpisodes(layout) }
+                    if item.type == .movie, let sources = model.sources { inlineSources(sources) }
+                    if item.type == .movie, let collection = model.details.collection {
+                        CollectionRow(collection: collection, currentItem: item)
+                    }
+                    castRow
+                    similarRow
+                    infoSection
+                    Color.clear.frame(height: 30)
                 }
-                castRow
-                similarRow
-                infoSection
-                Color.clear.frame(height: 30)
+                // Exactly the visible width: a row that can't shrink any further is cut off on
+                // its own instead of stretching the whole page past the screen edges.
+                .frame(width: layout.width, alignment: .leading)
             }
+            .ignoresSafeArea(edges: .top)
         }
-        .ignoresSafeArea(edges: .top)
         .screenBackground()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -129,15 +140,45 @@ struct MediaDetailView: View {
         #endif
     }
 
-    // MARK: Header
+    // MARK: Layout
 
-    private var headerHeight: CGFloat {
-        #if os(tvOS)
-        return 700
+    /// Sizes for one layout pass, computed from the container (portrait, landscape, split view).
+    private struct DetailLayout {
+        /// Visible width (inside the horizontal safe area, so clear of the notch in landscape).
+        var width: CGFloat
+        var heroHeight: CGFloat
+        var showsHeroPoster: Bool
+        var episodeStillWidth: CGFloat
+    }
+
+    private var isRegularWidth: Bool {
+        #if os(iOS)
+        return horizontalSizeClass == .regular
         #else
-        return UIDevice.current.userInterfaceIdiom == .pad ? 560 : 440
+        return true
         #endif
     }
+
+    private func detailLayout(for geo: GeometryProxy) -> DetailLayout {
+        let width = max(geo.size.width, 1)
+        #if os(tvOS)
+        return DetailLayout(width: width, heroHeight: 700, showsHeroPoster: false, episodeStillWidth: 320)
+        #else
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let regular = isPad && isRegularWidth
+        // Same heights as before in portrait / full-screen iPad; in landscape (or any short
+        // window) the hero is capped so the title, actions and episodes are not pushed off screen.
+        let base: CGFloat = regular ? 560 : 440
+        let visibleHeight = geo.size.height + geo.safeAreaInsets.top
+        let hero = min(base, max(240, visibleHeight * 0.8))
+        // Narrow iPad split views get the phone-sized still; never more than ~40 % of the row.
+        let stillBase: CGFloat = regular ? 220 : 140
+        let still = min(stillBase, max(96, (width - 2 * Theme.gutter) * 0.42))
+        return DetailLayout(width: width, heroHeight: hero, showsHeroPoster: regular && hero >= 400, episodeStillWidth: still)
+        #endif
+    }
+
+    // MARK: Header
 
     private var trailerActive: Bool {
         pageVisible && heroVisible && scenePhase == .active
@@ -146,11 +187,10 @@ struct MediaDetailView: View {
             && TrailerPolicy.allowsAutoplay
     }
 
-    private var header: some View {
+    private func header(_ layout: DetailLayout) -> some View {
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
-                .frame(maxWidth: .infinity)
-                .frame(height: headerHeight)
+                .frame(width: layout.width, height: layout.heroHeight)
                 .overlay {
                     // Muted trailer over the artwork, edge to edge (setting: Player → Autoplay trailers).
                     TrailerSurface(controller: trailer)
@@ -158,10 +198,10 @@ struct MediaDetailView: View {
                 .clipped()
                 .overlay(LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
                                         startPoint: .top, endPoint: .bottom))
-                .background(HeroVisibilityReader(height: headerHeight, isVisible: $heroVisible))
+                .background(HeroVisibilityReader(height: layout.heroHeight, isVisible: $heroVisible))
             HStack(alignment: .bottom, spacing: 18) {
                 #if !os(tvOS)
-                if UIDevice.current.userInterfaceIdiom == .pad {
+                if layout.showsHeroPoster {
                     RemoteImage(url: item.poster, placeholderText: item.title)
                         .frame(width: 170, height: 255)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -182,8 +222,14 @@ struct MediaDetailView: View {
                     .animation(.easeInOut(duration: TrailerPolicy.fade), value: trailer.isRevealed)
                     metaLine
                     if !model.details.ratings.isEmpty {
-                        HStack(spacing: 8) {
-                            ForEach(model.details.ratings) { RatingBadgeView(badge: $0) }
+                        // One row of badges; shows fewer on a narrow screen instead of overflowing.
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) {
+                                ForEach(model.details.ratings) { RatingBadgeView(badge: $0) }
+                            }
+                            HStack(spacing: 8) {
+                                ForEach(model.details.ratings.prefix(2)) { RatingBadgeView(badge: $0) }
+                            }
                         }
                     }
                     if let tagline = model.details.tagline {
@@ -197,7 +243,9 @@ struct MediaDetailView: View {
                 TrailerControlButton(controller: trailer)
             }
             .padding(.horizontal, Theme.gutter)
+            .frame(width: layout.width, alignment: .leading)
         }
+        .frame(width: layout.width, alignment: .bottomLeading)
     }
 
     private var logoWidth: CGFloat {
@@ -333,7 +381,7 @@ struct MediaDetailView: View {
     // MARK: Series
 
     @ViewBuilder
-    private var seasonsAndEpisodes: some View {
+    private func seasonsAndEpisodes(_ layout: DetailLayout) -> some View {
         let seasons = model.details.seasons
         VStack(alignment: .leading, spacing: 12) {
             if seasons.count > 1 {
@@ -366,7 +414,8 @@ struct MediaDetailView: View {
                 LazyVStack(spacing: 10) {
                     ForEach(model.episodes) { ep in
                         EpisodeRow(item: item, episode: ep, onPlay: { play(episode: ep) },
-                                   onDownload: { downloadSheet = DownloadSheetContext(item: item, episode: ep) })
+                                   onDownload: { downloadSheet = DownloadSheetContext(item: item, episode: ep) },
+                                   stillWidth: layout.episodeStillWidth)
                     }
                 }
                 .padding(.horizontal, Theme.gutter)
@@ -509,6 +558,8 @@ struct EpisodeRow: View {
     var onPlay: () -> Void
     /// iOS: offers "Download Episode" in the context menu.
     var onDownload: (() -> Void)? = nil
+    /// Width of the episode still; the detail page sizes it from the available width. nil = default.
+    var stillWidth: CGFloat? = nil
     @Environment(LibraryStore.self) private var library
 
     var body: some View {
@@ -518,13 +569,14 @@ struct EpisodeRow: View {
             HStack(alignment: .top, spacing: 12) {
                 ZStack(alignment: .bottom) {
                     RemoteImage(url: episode.still ?? item.backdrop, placeholderSymbol: "play.rectangle")
-                        .frame(width: stillWidth, height: stillWidth * 9 / 16)
+                        .frame(width: still, height: still * 9 / 16)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     if let progress { ProgressLine(fraction: progress.fraction).padding(6) }
                     Image(systemName: "play.circle.fill").font(.title).foregroundStyle(.white.opacity(0.9))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(width: stillWidth, height: stillWidth * 9 / 16)
+                .frame(width: still, height: still * 9 / 16)
+                .clipped()
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("\(episode.episode). \(episode.title)").font(.subheadline.weight(.semibold)).lineLimit(2)
@@ -537,10 +589,13 @@ struct EpisodeRow: View {
                         if episode.dispatcharrEpisodeID != nil { Image(systemName: "server.rack") }
                     }
                     .font(.caption2).foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
                     if let o = episode.overview {
                         Text(o).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(3)
                     }
                 }
+                // Takes exactly the room left beside the still (long titles wrap/truncate here).
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(8)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -561,7 +616,9 @@ struct EpisodeRow: View {
         }
     }
 
-    private var stillWidth: CGFloat {
+    private var still: CGFloat { stillWidth ?? defaultStillWidth }
+
+    private var defaultStillWidth: CGFloat {
         #if os(tvOS)
         return 320
         #else

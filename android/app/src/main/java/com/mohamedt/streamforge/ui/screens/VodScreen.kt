@@ -15,6 +15,16 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Alignment
+import com.mohamedt.streamforge.ui.KeylineScroll
+import com.mohamedt.streamforge.ui.LocalShelfKey
+import com.mohamedt.streamforge.ui.PageTitle
+import com.mohamedt.streamforge.ui.SfTextField
+import com.mohamedt.streamforge.ui.TvRowCardOffset
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -72,12 +82,24 @@ fun applyFilter(f: VodFilter, items: List<MediaItem>): List<MediaItem> {
 }
 
 @Composable
-private fun FilterBar(kind: MediaType, filter: VodFilter, grid: Boolean?, onGrid: ((Boolean) -> Unit)?, onChange: (VodFilter) -> Unit) {
+private fun FilterBar(kind: MediaType, filter: VodFilter, grid: Boolean?, onGrid: ((Boolean) -> Unit)?, title: String? = null, padded: Boolean = true,
+                      onChange: (VodFilter) -> Unit) {
     val genres = if (kind == MediaType.SERIES) DispatcharrRepo.seriesGenres else DispatcharrRepo.movieGenres
+    val tv = isTv()
+    val inset = if (padded) Dims.gutter() else 0.dp
     Column {
-        OutlinedTextField(filter.query, { onChange(filter.copy(query = it)) }, Modifier.fillMaxWidth().padding(horizontal = Dims.gutter()),
-            placeholder = { Text("Search ${if (kind == MediaType.SERIES) "series" else "movies"}") }, singleLine = true)
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (tv) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = inset), verticalAlignment = Alignment.CenterVertically) {
+                if (title != null) PageTitle(title, Modifier.padding(end = 28.dp))
+                SfTextField(filter.query, { onChange(filter.copy(query = it)) }, "Search ${if (kind == MediaType.SERIES) "series" else "movies"}",
+                    Modifier.widthIn(max = 520.dp), icon = Icons.Filled.Search)
+            }
+        } else {
+            SfTextField(filter.query, { onChange(filter.copy(query = it)) }, "Search ${if (kind == MediaType.SERIES) "series" else "movies"}",
+                Modifier.padding(horizontal = inset))
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = inset, vertical = if (tv) 14.dp else 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (tv) 12.dp else 8.dp)) {
             if (grid != null && onGrid != null) Chip(if (grid) "Grid" else "Shelves", false) { onGrid(!grid) }
             VodSort.entries.forEach { s -> Chip(s.label, filter.sort == s) { onChange(filter.copy(sort = s)) } }
             Chip("Unwatched", filter.unwatched) { onChange(filter.copy(unwatched = !filter.unwatched)) }
@@ -93,11 +115,13 @@ fun PosterGrid(items: List<MediaItem>, header: @Composable (() -> Unit)? = null)
     // Unique ids only: duplicate lazy keys crash (addon catalogs and collections can repeat items).
     val unique = remember(items) { items.distinctBy { it.id } }
     var visible by remember(items) { mutableStateOf(150) }
+    val tv = isTv()
+    CompositionLocalProvider(LocalShelfKey provides "grid") {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(Dims.poster() + 8.dp),
-        contentPadding = PaddingValues(Dims.gutter()),
-        horizontalArrangement = Arrangement.spacedBy(if (isTv()) 22.dp else 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = if (tv) PaddingValues(start = Dims.gutter(), end = Dims.gutter(), top = Dims.overscanY, bottom = Dims.overscanY + 40.dp) else PaddingValues(Dims.gutter()),
+        horizontalArrangement = Arrangement.spacedBy(if (tv) 22.dp else 12.dp),
+        verticalArrangement = Arrangement.spacedBy(if (tv) 10.dp else 16.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
         if (header != null) item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) { header() }
@@ -106,6 +130,7 @@ fun PosterGrid(items: List<MediaItem>, header: @Composable (() -> Unit)? = null)
             PosterCard(item, { nav.push(Screen.Detail(item)) }, { Library.toggleFavorite(item) })
             if (item.id == shown.lastOrNull()?.id && visible < unique.size) LaunchedEffect(visible) { visible += 150 }
         }
+    }
     }
 }
 
@@ -129,8 +154,8 @@ fun VodScreen(kind: MediaType) {
         LaunchedEffect(filter, all) { results = withContext(Dispatchers.Default) { applyFilter(filter, all) } }
         PosterGrid(results) {
             Column {
-                FilterBar(kind, filter, grid, { grid = it }) { filter = it }
-                Text("${results.size} ${if (kind == MediaType.SERIES) "series" else "movies"}", fontSize = 12.sp, color = Palette.secondary)
+                FilterBar(kind, filter, grid, { grid = it }, title = if (isTv()) (if (kind == MediaType.SERIES) "Series" else "Movies") else null, padded = false) { filter = it }
+                Text("${results.size} ${if (kind == MediaType.SERIES) "series" else "movies"}", fontSize = if (isTv()) 16.sp else 12.sp, color = Palette.secondary)
             }
         }
         return
@@ -140,11 +165,13 @@ fun VodScreen(kind: MediaType) {
     val active = sections.firstOrNull { it.name == (section ?: sections.firstOrNull()?.name) }
     val open: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
 
-    LazyColumn(Modifier.fillMaxSize()) {
-        item { FilterBar(kind, filter, grid, { grid = it }) { filter = it } }
+    val tv = isTv()
+    KeylineScroll(TvRowCardOffset, enabled = tv) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = if (tv) Dims.overscanY else 0.dp, bottom = if (tv) 120.dp else 0.dp)) {
+        item { FilterBar(kind, filter, grid, { grid = it }, title = if (tv) (if (kind == MediaType.SERIES) "Series" else "Movies") else null) { filter = it } }
         item {
             val cont = Library.continueWatching.filter { it.item.type == kind && it.item.origin.kind.startsWith("xc") }
-            Shelf("Continue Watching", cont, key = { it.key }) { ContinueCard(it) }
+            Shelf("Continue Watching", cont.filter { !it.finished }, key = { it.key }) { ContinueCard(it) }
         }
         item { Shelf("Recently Added", all.sortedByDescending { it.added ?: 0 }.take(30), seeAll = { grid = true }, key = { it.id }) { PosterCard(it, { open(it) }) } }
         item { Shelf("Top Rated", all.filter { (it.rating ?: 0.0) >= 7.0 }.sortedByDescending { it.rating }.take(30), key = { it.id }) { PosterCard(it, { open(it) }) } }
@@ -152,7 +179,7 @@ fun VodScreen(kind: MediaType) {
         if (kind == MediaType.MOVIE) item { CollectionsShelf(all) }
         if (sections.size > 1) {
             item {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = if (tv) 14.dp else 8.dp), horizontalArrangement = Arrangement.spacedBy(if (tv) 12.dp else 8.dp)) {
                     sections.forEach { s -> Chip(s.name, active?.name == s.name) { section = s.name } }
                 }
             }
@@ -162,10 +189,11 @@ fun VodScreen(kind: MediaType) {
                 val items = if (kind == MediaType.SERIES) DispatcharrRepo.series(cat.id) else DispatcharrRepo.movies(cat.id)
                 val name = TitleCleaner.splitCategory(cat.name).second
                 Shelf(name, items.sortedByDescending { it.added ?: 0 }.take(20), subtitle = "${items.size} titles",
-                    seeAll = { nav.push(Screen.Category(kind, cat.id, name)) }, key = { it.id }) { PosterCard(it, { open(it) }) }
+                    seeAll = { nav.push(Screen.Category(kind, cat.id, name)) }, key = { it.id }, rowKey = "cat-${cat.id}") { PosterCard(it, { open(it) }) }
             }
         }
         item { Spacer(Modifier.height(30.dp)) }
+    }
     }
 }
 
@@ -205,8 +233,12 @@ fun CategoryScreen(kind: MediaType, categoryId: String, title: String) {
     LaunchedEffect(filter, items) { results = withContext(Dispatchers.Default) { applyFilter(filter, items) } }
     PosterGrid(results) {
         Column {
-            Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            FilterBar(kind, filter, null, null) { filter = it }
+            if (isTv()) {
+                FilterBar(kind, filter, null, null, title = title, padded = false) { filter = it }
+            } else {
+                Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                FilterBar(kind, filter, null, null, padded = false) { filter = it }
+            }
         }
     }
 }
@@ -233,10 +265,10 @@ fun CatalogScreen(entry: Addons.CatalogEntry) {
     }
     PosterGrid(items) {
         Column {
-            Text(entry.title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text(entry.addon.name, color = Palette.secondary)
+            PageTitle(entry.title)
+            Text(entry.addon.name, color = Palette.secondary, fontSize = if (isTv()) 17.sp else 14.sp)
             if (entry.catalog.genres.isNotEmpty()) {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = if (isTv()) 14.dp else 8.dp), horizontalArrangement = Arrangement.spacedBy(if (isTv()) 12.dp else 8.dp)) {
                     Chip("All", genre == null) { genre = null }
                     entry.catalog.genres.forEach { g -> Chip(g, genre == g) { genre = g } }
                 }

@@ -139,11 +139,12 @@ struct SourceRow: View {
                     Text(source.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                     if let d = source.detail { Text(d).font(.caption).foregroundStyle(Theme.secondaryText).lineLimit(2) }
                     if let e = estimate, e.rating != .instant || !source.isCached { estimateRow(e) }
-                    HStack(spacing: 5) {
-                        if source.isCached { Pill(text: "INSTANT", color: Color.green.opacity(0.3), icon: "bolt.fill") }
-                        ForEach(source.tags.prefix(5), id: \.self) { Pill(text: $0) }
-                        if let size = source.sizeBytes { Pill(text: size.byteText, color: .clear) }
-                        if let seeders = source.seeders { Pill(text: "\(seeders)", color: .clear, icon: "person.2.fill") }
+                    // A single non-wrapping row of pills can be wider than a narrow screen; drop tags
+                    // until it fits rather than stretching the row (and the page) past the edge.
+                    ViewThatFits(in: .horizontal) {
+                        pills(tagLimit: 5)
+                        pills(tagLimit: 2)
+                        pills(tagLimit: 0)
                     }
                 }
                 Spacer(minLength: 0)
@@ -153,6 +154,15 @@ struct SourceRow: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private func pills(tagLimit: Int) -> some View {
+        HStack(spacing: 5) {
+            if source.isCached { Pill(text: "INSTANT", color: Color.green.opacity(0.3), icon: "bolt.fill") }
+            ForEach(source.tags.prefix(tagLimit), id: \.self) { Pill(text: $0) }
+            if let size = source.sizeBytes { Pill(text: size.byteText, color: .clear) }
+            if let seeders = source.seeders { Pill(text: "\(seeders)", color: .clear, icon: "person.2.fill") }
+        }
     }
 
     private func estimateRow(_ e: StartEstimator.Estimate) -> some View {

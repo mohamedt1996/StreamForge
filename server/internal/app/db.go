@@ -89,7 +89,89 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
+	if err := migrateManaged(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate database: %w", err)
+	}
 	return db, nil
+}
+
+// migrateManaged (schema v2) adds admin-managed configuration: the records.managed flag,
+// Dispatcharr connections and their per-user assignments, the addon library and managed
+// settings. Every step is idempotent.
+func migrateManaged(db *sql.DB) error {
+	var has int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('records') WHERE name = 'managed'`).Scan(&has); err != nil {
+		return err
+	}
+	if has == 0 {
+		if _, err := db.Exec(`ALTER TABLE records ADD COLUMN managed INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS dispatcharr_servers (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			url        TEXT NOT NULL,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS dispatcharr_assignments (
+			server_id  TEXT NOT NULL REFERENCES dispatcharr_servers(id) ON DELETE CASCADE,
+			user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			auth_mode  TEXT NOT NULL,
+			username   TEXT NOT NULL DEFAULT '',
+			secret     TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (server_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS dispatcharr_assignments_user ON dispatcharr_assignments(user_id)`,
+		`CREATE TABLE IF NOT EXISTS addon_library (
+			id            TEXT PRIMARY KEY,
+			transport_url TEXT NOT NULL UNIQUE,
+			name          TEXT NOT NULL DEFAULT '',
+			manifest_name TEXT NOT NULL DEFAULT '',
+			manifest_id   TEXT NOT NULL DEFAULT '',
+			version       TEXT NOT NULL DEFAULT '',
+			description   TEXT NOT NULL DEFAULT '',
+			logo          TEXT NOT NULL DEFAULT '',
+			all_users     INTEGER NOT NULL DEFAULT 0,
+			sort_order    INTEGER NOT NULL DEFAULT 0,
+			fetched_at    INTEGER NOT NULL DEFAULT 0,
+			fetch_error   TEXT NOT NULL DEFAULT '',
+			created_at    INTEGER NOT NULL,
+			updated_at    INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS addon_assignments (
+			addon_id   TEXT NOT NULL REFERENCES addon_library(id) ON DELETE CASCADE,
+			user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (addon_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS addon_assignments_user ON addon_assignments(user_id)`,
+		`CREATE TABLE IF NOT EXISTS default_settings (
+			key        TEXT PRIMARY KEY,
+			value      TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS managed_settings (
+			user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			key        TEXT NOT NULL,
+			value      TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, key)
+		)`,
+		`INSERT INTO meta(key, value) VALUES ('schema_version', '2')
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(meta.value AS INTEGER) < 2`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---- users ----------------------------------------------------------------
@@ -173,6 +255,12 @@ func (a *App) createUser(username, password, role string) (User, error) {
 			return User{}, errUsernameTaken
 		}
 		return User{}, err
+	}
+	// "All users" configuration (default managed settings, addons for everyone) applies to
+	// users created later too. A failure here must not fail the sign-up; the next admin
+	// change to the configuration reconciles the user again.
+	if err := a.provisionUser(u.ID); err != nil {
+		a.log.Printf("provision managed configuration for %s: %v", u.Username, err)
 	}
 	return u, nil
 }

@@ -33,6 +33,8 @@ type Config struct {
 	Now func() time.Time
 	// Logger; nil = log.Default().
 	Logger *log.Logger
+	// HTTPClient is used to fetch addon manifests; nil = a client with a short timeout.
+	HTTPClient *http.Client
 }
 
 const (
@@ -50,10 +52,11 @@ const (
 
 // App is the sync server. Create it with New, serve Handler(), and Close it on shutdown.
 type App struct {
-	cfg  Config
-	db   *sql.DB
-	aead cipher.AEAD
-	log  *log.Logger
+	cfg        Config
+	db         *sql.DB
+	aead       cipher.AEAD
+	log        *log.Logger
+	httpClient *http.Client
 
 	hub   *hub
 	pairs *pairStore
@@ -94,6 +97,9 @@ func New(cfg Config) (*App, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
 	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: 2 * manifestTimeout}
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -114,6 +120,7 @@ func New(cfg Config) (*App, error) {
 		db:           db,
 		aead:         aead,
 		log:          cfg.Logger,
+		httpClient:   cfg.HTTPClient,
 		hub:          newHub(),
 		pairs:        newPairStore(),
 		loginLimiter: newLimiter(10, 15*time.Minute, cfg.Now),

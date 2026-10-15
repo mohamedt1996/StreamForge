@@ -6,10 +6,12 @@ Apple TV and Android — with user accounts and per-device access control.
 
 * Single static Go binary (or a ~10 MB distroless Docker image), SQLite in one data directory.
 * Every app keeps working offline; sync is a background exchange of records (see [PROTOCOL.md](PROTOCOL.md)).
-* Web admin at `/`: first-run setup, sign in, devices (rename / scopes / revoke), pair a TV, users,
-  account, activity log, overview.
+* Web admin at `/`: first-run setup, sign in, devices (rename / scopes / revoke), pair a TV, users
+  (with a per-user page), Dispatcharr, addons, default settings, account, activity log, overview.
 * Secrets (Dispatcharr passwords, API keys, PINs, Trakt token) are encrypted at rest with
   AES-256-GCM and only reach devices that have the `secrets` scope.
+* Admin-managed configuration: manage Dispatcharr connections (with per-user credentials), an
+  addon library and settings on the server and push them to chosen users (or everyone) — see below.
 
 ## Run it
 
@@ -142,6 +144,30 @@ admin's **Pair a TV** page, choosing what the TV may do:
 Scopes can be changed or the device revoked at any time under **Devices**. A revoked device is
 signed out immediately (its next request gets `401`) but keeps its local data.
 
+## Manage what your users get
+
+Admins can configure things once on the server and have them appear on every device a user signs
+in to — no typing Dispatcharr URLs or addon links on a TV:
+
+* **Dispatcharr** page — add connections (name + URL), then tick the users who should get each one.
+  Every assignment has that person's own Dispatcharr account: sign-in method (XC / web account /
+  API key), username and password or key. Credentials are encrypted at rest, never shown again in
+  the browser (only "set"/"not set"), and only reach devices with the **Secrets** scope.
+* **Addons** page — an addon library. Paste a manifest link (configured links and `stremio://`
+  work); the server reads the manifest to show its name and logo. Tick users in the matrix, or
+  give an addon to **all users**, including users created later.
+* **Default settings** page — synced app settings (§3 of the protocol) applied to every new user;
+  *Push to all existing users* applies them to everyone now.
+* **Users → Manage** — one page per user: devices, Dispatcharr assignments, addons (managed vs. their
+  own), current synced settings with managed overrides, record counts, and *Copy from user…* to give
+  them the same addons/servers/settings as someone else. When creating a user you can pick
+  connections and addons to assign right away.
+
+Managed items are **locked** on members' devices: if a device removes or changes one, the server
+refuses the change and sends the managed version back, so it reappears on the next sync. Removing
+an assignment removes it from the user's devices. Admins' own devices may change managed items of
+their own account. Details and the API: [PROTOCOL.md §5](PROTOCOL.md#5-admin-managed-configuration).
+
 ## Security notes
 
 * Device tokens are 256-bit random values (`sf_…`), stored only as SHA-256 hashes. Passwords use bcrypt.
@@ -166,6 +192,7 @@ The full contract is in [PROTOCOL.md](PROTOCOL.md). Additional endpoints used by
 | `POST /api/auth/signup` | Same body/response as login; only with `STREAMFORGE_OPEN_SIGNUP=true` (`403` otherwise). |
 | `GET /api/stats[?user=]` | Record counts per collection, `rev`, `lastSyncAt`, device count. |
 | `GET /api/audit[?limit=&before=&user=]` | Activity log (admins: everyone; members: own account). |
+| `/api/admin/…` | Admin-managed configuration (Dispatcharr connections and assignments, addon library, managed/default settings, per-user view, copy from user) — see [PROTOCOL.md §5](PROTOCOL.md#5-admin-managed-configuration). |
 
 ## Development
 

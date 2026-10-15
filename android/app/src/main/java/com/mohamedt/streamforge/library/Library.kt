@@ -106,6 +106,19 @@ object Library {
             return snap.progress.values.sortedByDescending { it.updatedAt }.filter { seen.add(it.item.id) }
         }
 
+    /** Series whose latest activity is a finished episode (newest first), for an "Up next" row. */
+    val upNext: List<Progress>
+        get() {
+            val inProgress = snap.progress.values.mapTo(HashSet()) { it.item.id }
+            val seen = HashSet<String>()
+            return snap.watchedInfo.values.filter { it.episode != null && it.item.id !in inProgress }
+                .sortedByDescending { it.updatedAt }.filter { seen.add(it.item.id) }.take(20)
+        }
+
+    /** The most recently finished episode of a series (null when none is recorded). */
+    fun lastWatchedEpisode(item: MediaItem): Progress? =
+        snap.watchedInfo.values.filter { it.item.id == item.id && it.episode != null }.maxByOrNull { it.updatedAt }
+
     fun latestEpisode(item: MediaItem): Progress? =
         snap.progress.values.filter { it.item.id == item.id && it.episode != null }.maxByOrNull { it.updatedAt }
 

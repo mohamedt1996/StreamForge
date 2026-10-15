@@ -6,10 +6,23 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.ButtonColors
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import com.mohamedt.streamforge.ui.PageTitle
+import com.mohamedt.streamforge.ui.SfTextField
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -58,28 +71,51 @@ import kotlinx.coroutines.launch
 
 @Composable
 private fun Section(title: String, footer: String? = null, content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth().widthIn(max = 900.dp).padding(vertical = 8.dp)) {
-        Text(title.uppercase(), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Palette.secondary, modifier = Modifier.padding(bottom = 6.dp))
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Palette.surface).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            content()
+    val tv = isTv()
+    Column(Modifier.fillMaxWidth().widthIn(max = 900.dp).padding(vertical = if (tv) 14.dp else 8.dp)) {
+        if (tv) {
+            Text(title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
+        } else {
+            Text(title.uppercase(), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Palette.secondary, modifier = Modifier.padding(bottom = 6.dp))
         }
-        footer?.let { Text(it, fontSize = 12.sp, color = Palette.secondary, modifier = Modifier.padding(top = 6.dp)) }
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(if (tv) 18.dp else 14.dp)).background(Palette.surface).padding(if (tv) 20.dp else 14.dp),
+            verticalArrangement = Arrangement.spacedBy(if (tv) 14.dp else 10.dp)) {
+            ProvideTextStyle(TextStyle(fontSize = if (tv) 18.sp else 16.sp)) { content() }
+        }
+        footer?.let { Text(it, fontSize = if (tv) 15.sp else 12.sp, color = Palette.secondary, modifier = Modifier.padding(top = 8.dp)) }
     }
 }
 
 @Composable
 private fun Toggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().card({ onChange(!value) }).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f))
-        Switch(checked = value, onCheckedChange = onChange)
+    if (!isTv()) {
+        Row(Modifier.fillMaxWidth().card({ onChange(!value) }).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, Modifier.weight(1f))
+            Switch(checked = value, onCheckedChange = onChange)
+        }
+        return
+    }
+    // TV: the whole row is one large focus target; the switch only shows the state.
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 60.dp)
+            .card({ onChange(!value) }, shape = RoundedCornerShape(14.dp), focusScale = 1.02f, border = false, glow = false, onFocus = { focused = it })
+            .background(if (focused) Color.White else Palette.surfaceHigh)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, Modifier.weight(1f), fontSize = 18.sp, color = if (focused) Palette.onFocus else Color.White)
+        Switch(checked = value, onCheckedChange = null)
     }
 }
 
 @Composable
 private fun <T> Choice(label: String, options: List<Pair<T, String>>, value: T, onChange: (T) -> Unit) {
+    val tv = isTv()
     Column {
         Text(label)
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = if (tv) 10.dp else 6.dp, bottom = if (tv) 4.dp else 0.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (tv) 12.dp else 8.dp)) {
             options.forEach { (v, name) -> Chip(name, v == value) { onChange(v) } }
         }
     }
@@ -87,9 +123,64 @@ private fun <T> Choice(label: String, options: List<Pair<T, String>>, value: T, 
 
 @Composable
 private fun Field(label: String, value: String, secret: Boolean = false, onChange: (String) -> Unit) {
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
-        visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-        keyboardOptions = if (secret) KeyboardOptions(keyboardType = KeyboardType.Password) else KeyboardOptions.Default)
+    SfTextField(value, onChange, if (isTv()) "Not set" else label, label = label, secret = secret)
+}
+
+/** Text-style action: a material text button on phones, a large focusable pill on TV. */
+@Composable
+private fun ActionText(onClick: () -> Unit, enabled: Boolean = true, content: @Composable RowScope.() -> Unit) {
+    if (!isTv()) {
+        TextButton(onClick = onClick, enabled = enabled, content = content)
+        return
+    }
+    TvAction(onClick, enabled, primary = false, content = content)
+}
+
+/** Filled action: a material button on phones, a gradient pill (white when focused) on TV. */
+@Composable
+private fun ActionPrimary(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    colors: ButtonColors = ButtonDefaults.buttonColors(),
+    content: @Composable RowScope.() -> Unit,
+) {
+    if (!isTv()) {
+        Button(onClick = onClick, enabled = enabled, colors = colors, content = content)
+        return
+    }
+    TvAction(onClick, enabled, primary = true, content = content)
+}
+
+@Composable
+private fun TvAction(onClick: () -> Unit, enabled: Boolean, primary: Boolean, content: @Composable RowScope.() -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(percent = 50)
+    val clickable = if (enabled) {
+        Modifier.card(onClick, shape = shape, focusScale = 1.05f, border = false, glow = primary, onFocus = { focused = it })
+    } else {
+        Modifier.clip(shape)
+    }
+    CompositionLocalProvider(LocalContentColor provides if (focused) Palette.onFocus else Color.White) {
+        ProvideTextStyle(TextStyle(fontSize = 17.sp, fontWeight = FontWeight.SemiBold)) {
+            Row(
+                Modifier.padding(end = 10.dp).height(50.dp).alpha(if (enabled) 1f else 0.4f).then(clickable)
+                    .background(if (focused) SolidColor(Color.White) else if (primary) Palette.gradient else SolidColor(Palette.surfaceHigh))
+                    .padding(horizontal = 22.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                content = content,
+            )
+        }
+    }
+}
+
+/** On/off control: a switch on phones, a focusable "On"/"Off" pill on TV. */
+@Composable
+private fun SettingSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
+    if (!isTv()) {
+        Switch(checked = checked, onCheckedChange = onChange)
+        return
+    }
+    TvAction({ onChange(!checked) }, enabled = true, primary = checked) { Text(if (checked) "On" else "Off") }
 }
 
 private fun upd(f: (SettingsValues) -> SettingsValues) = Settings.update(f)
@@ -97,8 +188,13 @@ private fun upd(f: (SettingsValues) -> SettingsValues) = Settings.update(f)
 @Composable
 fun SettingsScreen() {
     val s = Settings.values
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(Dims.gutter())) {
-        item { Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
+    val tv = isTv()
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = if (tv) PaddingValues(start = Dims.gutter(), end = Dims.gutter(), top = Dims.overscanY, bottom = Dims.overscanY + 40.dp)
+        else PaddingValues(Dims.gutter()),
+    ) {
+        item { PageTitle("Settings") }
         item { SyncServerSection() }
         item { DispatcharrSection() }
         item { AddonsSection() }
@@ -159,17 +255,17 @@ fun SettingsScreen() {
                 Choice("Guide days", listOf(1 to "1 day", 3 to "3 days", 7 to "7 days"), s.guideDays) { v -> upd { it.copy(guideDays = v) } }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (GuideRepo.updatedAt > 0) "Guide: ${GuideRepo.programmeCount} programmes, updated ${timeText(GuideRepo.updatedAt)}" else "Guide not downloaded yet",
-                        Modifier.weight(1f), fontSize = 13.sp, color = Palette.secondary)
-                    TextButton(onClick = { GuideRepo.refresh() }) { Text(if (GuideRepo.refreshing) "Updating…" else "Refresh guide") }
+                        Modifier.weight(1f), fontSize = if (isTv()) 16.sp else 13.sp, color = Palette.secondary)
+                    ActionText(onClick = { GuideRepo.refresh() }) { Text(if (GuideRepo.refreshing) "Updating…" else "Refresh guide") }
                 }
-                GuideRepo.lastError?.let { Text(it, color = Palette.live, fontSize = 12.sp) }
+                GuideRepo.lastError?.let { Text(it, color = Palette.live, fontSize = if (isTv()) 15.sp else 12.sp) }
             }
         }
         item {
             Section("About") {
                 Text("StreamForge for Android · ${com.mohamedt.streamforge.BuildConfig.VERSION_NAME}")
-                Text("Player: libmpv · Torrents: TorrServer", color = Palette.secondary, fontSize = 13.sp)
-                Text("StreamForge plays content from servers and addons you configure. It doesn't host or provide any content.", color = Palette.secondary, fontSize = 12.sp)
+                Text("Player: libmpv · Torrents: TorrServer", color = Palette.secondary, fontSize = if (isTv()) 16.sp else 13.sp)
+                Text("StreamForge plays content from servers and addons you configure. It doesn't host or provide any content.", color = Palette.secondary, fontSize = if (isTv()) 15.sp else 12.sp)
             }
         }
         item { Spacer(Modifier.height(40.dp)) }
@@ -195,17 +291,17 @@ private fun DispatcharrSection() {
                 Column(Modifier.weight(1f)) {
                     Text(server.name + if (server.id == DispatcharrRepo.active?.id) "  ✓" else "", fontWeight = FontWeight.Bold)
                     Text("${server.username} @ ${server.baseUrl} · ${server.authMode.name.lowercase().replace('_', ' ')}" +
-                        if (server.usesRestStreaming) " · API streaming (no catch-up)" else "", fontSize = 12.sp, color = Palette.secondary)
+                        if (server.usesRestStreaming) " · API streaming (no catch-up)" else "", fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
                 }
-                TextButton(onClick = { DispatcharrRepo.remove(server) }) { Text("Remove", color = Palette.live) }
+                ActionText(onClick = { DispatcharrRepo.remove(server) }) { Text("Remove", color = Palette.live) }
             }
         }
         if (DispatcharrRepo.isConfigured) {
             Text("${DispatcharrRepo.channels.size} channels · ${DispatcharrRepo.movieItems.size} movies · ${DispatcharrRepo.seriesItems.size} series",
-                fontSize = 13.sp, color = Palette.secondary)
+                fontSize = if (isTv()) 16.sp else 13.sp, color = Palette.secondary)
             Row {
-                TextButton(onClick = { DispatcharrRepo.refreshAll(true) }) { Text("Refresh library") }
-                TextButton(onClick = { adding = !adding }) { Text(if (adding) "Cancel" else "Add server") }
+                ActionText(onClick = { DispatcharrRepo.refreshAll(true) }) { Text("Refresh library") }
+                ActionText(onClick = { adding = !adding }) { Text(if (adding) "Cancel" else "Add server") }
             }
         }
         if (adding) {
@@ -220,7 +316,7 @@ private fun DispatcharrSection() {
                     Field("Web password (optional, for DVR)", password, secret = true) { password = it }
                 }
             }
-            Button(enabled = !busy && url.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+            ActionPrimary(enabled = !busy && url.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
                 busy = true
                 message = null
                 scope.launch {
@@ -231,7 +327,7 @@ private fun DispatcharrSection() {
                 }
             }) { Text(if (busy) "Connecting…" else "Connect") }
         }
-        message?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+        message?.let { Text(it, color = Palette.accent, fontSize = if (isTv()) 16.sp else 13.sp) }
     }
 }
 
@@ -242,23 +338,24 @@ private fun AddonsSection() {
     var message by remember { mutableStateOf<String?>(null) }
     Section("Stremio addons", "Paste any addon manifest link (https://…/manifest.json or stremio://…). Configure addons on their website first, then paste the configured link. Addons higher in the list are asked first.") {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(url, { url = it }, Modifier.weight(1f), placeholder = { Text("Addon URL") }, singleLine = true)
-            TextButton(onClick = {
+            SfTextField(url, { url = it }, "Addon URL", Modifier.weight(1f))
+            Spacer(Modifier.width(12.dp))
+            ActionText(onClick = {
                 scope.launch { message = runCatching { Addons.install(url) }.fold({ url = ""; "Installed ${it.name}" }, { it.message ?: "Couldn't install" }) }
             }) { Text("Install") }
         }
-        message?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+        message?.let { Text(it, color = Palette.accent, fontSize = if (isTv()) 16.sp else 13.sp) }
         Addons.addons.forEach { a ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(a.name, fontWeight = FontWeight.Bold)
                     Text(listOfNotNull(if (a.catalogs.isNotEmpty()) "Catalogs" else null, if (a.hasStreams) "Streams" else null,
-                        if (a.hasSubtitles) "Subtitles" else null).joinToString(" · ") + (a.version?.let { "  v$it" } ?: ""), fontSize = 12.sp, color = Palette.secondary)
+                        if (a.hasSubtitles) "Subtitles" else null).joinToString(" · ") + (a.version?.let { "  v$it" } ?: ""), fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
                 }
-                TextButton(onClick = { Addons.move(a, true) }) { Text("↑") }
-                TextButton(onClick = { Addons.move(a, false) }) { Text("↓") }
-                Switch(checked = a.enabled, onCheckedChange = { Addons.setEnabled(a, it) })
-                TextButton(onClick = { Addons.remove(a) }) { Text("✕", color = Palette.live) }
+                ActionText(onClick = { Addons.move(a, true) }) { Text("↑") }
+                ActionText(onClick = { Addons.move(a, false) }) { Text("↓") }
+                SettingSwitch(a.enabled) { Addons.setEnabled(a, it) }
+                ActionText(onClick = { Addons.remove(a) }) { Text("✕", color = Palette.live) }
             }
         }
     }
@@ -274,8 +371,10 @@ fun RecordingsScreen() {
         if (rest == null) error = "Sign in with your Dispatcharr account to see recordings."
         else runCatching { rest.recordings() }.onSuccess { list = it }.onFailure { error = it.message }
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(Dims.gutter()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { Text("Recordings", fontSize = 26.sp, fontWeight = FontWeight.Bold) }
+    val tv = isTv()
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = if (tv) PaddingValues(horizontal = Dims.gutter(), vertical = Dims.overscanY) else PaddingValues(Dims.gutter()),
+        verticalArrangement = Arrangement.spacedBy(if (tv) 10.dp else 8.dp)) {
+        item { PageTitle("Recordings") }
         error?.let { item { Text(it, color = Palette.live) } }
         items(list, key = { it.id }) { r ->
             val upcoming = r.start > System.currentTimeMillis()
@@ -288,7 +387,7 @@ fun RecordingsScreen() {
                 Column(Modifier.weight(1f)) {
                     Text(r.title, fontWeight = FontWeight.SemiBold)
                     Text((if (upcoming) "Scheduled · " else "") + java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date(r.start)),
-                        fontSize = 12.sp, color = Palette.secondary)
+                        fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
                 }
             }
         }
@@ -312,13 +411,13 @@ private fun SpeedSection() {
             color = Palette.secondary)
         if (est.sessions(tKey) > 0) Text("Torrent sessions learned: ${est.sessions(tKey)}", color = Palette.secondary)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
-            Button(onClick = {
+            ActionPrimary(onClick = {
                 testing = true; failed = false
                 scope.launch { failed = est.runSpeedTest() == null; testing = false }
             }, enabled = !testing) { Text(if (testing) "Testing…" else "Test connection speed") }
-            TextButton(onClick = { est.reset() }) { Text("Reset learned speeds") }
+            ActionText(onClick = { est.reset() }) { Text("Reset learned speeds") }
         }
-        if (failed) Text("Speed test failed. Check your connection.", color = androidx.compose.ui.graphics.Color(0xFFF87171), fontSize = 12.sp)
+        if (failed) Text("Speed test failed. Check your connection.", color = androidx.compose.ui.graphics.Color(0xFFF87171), fontSize = if (isTv()) 15.sp else 12.sp)
     }
 }
 
@@ -361,30 +460,30 @@ private fun SyncSignIn() {
     val pairing = ServerSync.pairing
 
     Section("Sync server", SYNC_FOOTER) {
-        ServerSync.signOutReason?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+        ServerSync.signOutReason?.let { Text(it, color = Palette.live, fontSize = if (isTv()) 16.sp else 13.sp) }
         if (pairing != null) {
             Text("Pairing code", color = Palette.secondary)
             Text(pairing.code, fontSize = if (tv) 64.sp else 44.sp, fontWeight = FontWeight.Black, letterSpacing = 6.sp)
             Text("On your phone open StreamForge → Settings → Sync server → Approve a TV code, or open ${pairing.serverUrl} in a browser, sign in and approve the code there.",
-                fontSize = 13.sp, color = Palette.secondary)
-            Text(pairing.failed ?: "Waiting for approval…", color = if (pairing.failed != null) Palette.live else Palette.accent, fontSize = 13.sp)
+                fontSize = if (isTv()) 16.sp else 13.sp, color = Palette.secondary)
+            Text(pairing.failed ?: "Waiting for approval…", color = if (pairing.failed != null) Palette.live else Palette.accent, fontSize = if (isTv()) 16.sp else 13.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (pairing.failed != null) {
-                    Button(onClick = { ServerSync.startPairing(pairing.serverUrl) }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) {
+                    ActionPrimary(onClick = { ServerSync.startPairing(pairing.serverUrl) }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) {
                         Text("Get a new code")
                     }
                 }
-                TextButton(onClick = { ServerSync.cancelPairing() }) { Text("Cancel") }
+                ActionText(onClick = { ServerSync.cancelPairing() }) { Text("Cancel") }
             }
         } else {
             Field("Server address, e.g. http://192.168.1.10:8484", url) { url = it }
             if (pairMode) {
-                Button(enabled = url.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent),
+                ActionPrimary(enabled = url.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent),
                     onClick = { message = null; ServerSync.startPairing(url) }) { Text("Get a pairing code") }
             } else {
                 Field("Username", user) { user = it }
                 Field("Password", password, secret = true) { password = it }
-                Button(enabled = !busy && url.isNotBlank() && user.isNotBlank() && password.isNotEmpty(),
+                ActionPrimary(enabled = !busy && url.isNotBlank() && user.isNotBlank() && password.isNotEmpty(),
                     colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
                         busy = true
                         message = null
@@ -395,11 +494,11 @@ private fun SyncSignIn() {
                         }
                     }) { Text(if (busy) "Signing in…" else "Sign in") }
             }
-            TextButton(onClick = { pairMode = !pairMode; message = null }) {
+            ActionText(onClick = { pairMode = !pairMode; message = null }) {
                 Text(if (pairMode) "Sign in with username and password instead" else "Use a pairing code instead (approve it from another device)")
             }
         }
-        (message ?: ServerSync.pairMessage)?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+        (message ?: ServerSync.pairMessage)?.let { Text(it, color = Palette.live, fontSize = if (isTv()) 16.sp else 13.sp) }
     }
 }
 
@@ -415,18 +514,18 @@ private fun SyncSignedIn() {
 
     Section("Sync server", SYNC_FOOTER) {
         Text("Signed in as ${ServerSync.username}" + if (ServerSync.userRole == "admin") " (admin)" else "", fontWeight = FontWeight.Bold)
-        Text("${ServerSync.serverName.ifEmpty { ServerSync.serverUrl }} · this device: ${ServerSync.deviceName}", fontSize = 12.sp, color = Palette.secondary)
-        Text("Status: ${ServerSync.status}", fontSize = 13.sp)
-        Text("Last sync: " + if (ServerSync.lastSyncAt > 0) dateTimeText(ServerSync.lastSyncAt) else "never", fontSize = 13.sp, color = Palette.secondary)
+        Text("${ServerSync.serverName.ifEmpty { ServerSync.serverUrl }} · this device: ${ServerSync.deviceName}", fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
+        Text("Status: ${ServerSync.status}", fontSize = if (isTv()) 16.sp else 13.sp)
+        Text("Last sync: " + if (ServerSync.lastSyncAt > 0) dateTimeText(ServerSync.lastSyncAt) else "never", fontSize = if (isTv()) 16.sp else 13.sp, color = Palette.secondary)
         if (!ServerSync.canReadSecrets) {
-            Text("This device doesn't send or receive passwords and API keys (no secrets access).", fontSize = 12.sp, color = Palette.secondary)
+            Text("This device doesn't send or receive passwords and API keys (no secrets access).", fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
         }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = { ServerSync.syncNow() }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) { Text("Sync now") }
-            TextButton(onClick = { toggle(SyncPanel.DEVICES) }) { Text("Devices") }
-            TextButton(onClick = { toggle(SyncPanel.APPROVE) }) { Text("Approve a TV code") }
-            TextButton(onClick = { toggle(SyncPanel.PASSWORD) }) { Text("Change password") }
-            TextButton(onClick = { scope.launch { ServerSync.signOut() } }) { Text("Sign out", color = Palette.live) }
+            ActionPrimary(onClick = { ServerSync.syncNow() }, colors = ButtonDefaults.buttonColors(containerColor = Palette.accent)) { Text("Sync now") }
+            ActionText(onClick = { toggle(SyncPanel.DEVICES) }) { Text("Devices") }
+            ActionText(onClick = { toggle(SyncPanel.APPROVE) }) { Text("Approve a TV code") }
+            ActionText(onClick = { toggle(SyncPanel.PASSWORD) }) { Text("Change password") }
+            ActionText(onClick = { scope.launch { ServerSync.signOut() } }) { Text("Sign out", color = Palette.live) }
         }
         when (panel) {
             SyncPanel.DEVICES -> SyncDevicesPanel()
@@ -434,7 +533,7 @@ private fun SyncSignedIn() {
             SyncPanel.PASSWORD -> SyncPasswordPanel { done -> panel = null; message = done }
             null -> Unit
         }
-        message?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+        message?.let { Text(it, color = Palette.accent, fontSize = if (isTv()) 16.sp else 13.sp) }
     }
 }
 
@@ -450,26 +549,26 @@ private fun SyncDevicesPanel() {
         error = runCatching { ServerSync.loadDevices() }.exceptionOrNull()?.message
         loaded = true
     }
-    if (!loaded) Text("Loading devices…", color = Palette.secondary, fontSize = 13.sp)
+    if (!loaded) Text("Loading devices…", color = Palette.secondary, fontSize = if (isTv()) 16.sp else 13.sp)
     ServerSync.devices.forEach { d: SyncDevice ->
         val isThis = d.current || d.id == ServerSync.deviceId
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Palette.surface).padding(10.dp)) {
             Text(d.name + if (isThis) "  (this device)" else "", fontWeight = FontWeight.Bold)
             Text(listOfNotNull(platformLabel(d.platform), d.scopes.joinToString(" / ").ifEmpty { null },
                 d.lastSeenAt.takeIf { it > 0 }?.let { "seen ${dateTimeText(it)}" }, d.lastIp).joinToString(" · "),
-                fontSize = 12.sp, color = Palette.secondary)
+                fontSize = if (isTv()) 15.sp else 12.sp, color = Palette.secondary)
             if (editing == d.id) {
                 Field("Device name", newName) { newName = it }
                 Row {
-                    TextButton(onClick = {
+                    ActionText(onClick = {
                         scope.launch { error = runCatching { ServerSync.renameDevice(d.id, newName) }.fold({ editing = null; null }, { it.message }) }
                     }) { Text("Save") }
-                    TextButton(onClick = { editing = null }) { Text("Cancel") }
+                    ActionText(onClick = { editing = null }) { Text("Cancel") }
                 }
             } else {
                 Row {
-                    TextButton(onClick = { editing = d.id; newName = d.name; confirmRevoke = null }) { Text("Rename") }
-                    TextButton(onClick = {
+                    ActionText(onClick = { editing = d.id; newName = d.name; confirmRevoke = null }) { Text("Rename") }
+                    ActionText(onClick = {
                         if (confirmRevoke != d.id) {
                             confirmRevoke = d.id
                         } else {
@@ -483,8 +582,8 @@ private fun SyncDevicesPanel() {
             }
         }
     }
-    if (loaded && ServerSync.devices.isEmpty() && error == null) Text("No devices.", color = Palette.secondary, fontSize = 13.sp)
-    error?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+    if (loaded && ServerSync.devices.isEmpty() && error == null) Text("No devices.", color = Palette.secondary, fontSize = if (isTv()) 16.sp else 13.sp)
+    error?.let { Text(it, color = Palette.live, fontSize = if (isTv()) 16.sp else 13.sp) }
 }
 
 @Composable
@@ -494,10 +593,10 @@ private fun SyncApprovePanel() {
     var secrets by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
-    Text("Enter the code your TV shows. The TV joins your account.", fontSize = 13.sp, color = Palette.secondary)
+    Text("Enter the code your TV shows. The TV joins your account.", fontSize = if (isTv()) 16.sp else 13.sp, color = Palette.secondary)
     Field("Code, e.g. K7Q-4MX", code) { code = it }
     Toggle("Also share passwords and API keys with it", secrets) { secrets = it }
-    Button(enabled = !busy && code.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+    ActionPrimary(enabled = !busy && code.isNotBlank(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
         busy = true
         result = null
         scope.launch {
@@ -505,7 +604,7 @@ private fun SyncApprovePanel() {
             busy = false
         }
     }) { Text(if (busy) "Approving…" else "Approve") }
-    result?.let { Text(it, color = Palette.accent, fontSize = 13.sp) }
+    result?.let { Text(it, color = Palette.accent, fontSize = if (isTv()) 16.sp else 13.sp) }
 }
 
 @Composable
@@ -519,7 +618,7 @@ private fun SyncPasswordPanel(onDone: (String) -> Unit) {
     Field("Current password", current, secret = true) { current = it }
     Field("New password", new, secret = true) { new = it }
     Field("Repeat new password", confirm, secret = true) { confirm = it }
-    Button(enabled = !busy && current.isNotEmpty() && new.isNotEmpty(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
+    ActionPrimary(enabled = !busy && current.isNotEmpty() && new.isNotEmpty(), colors = ButtonDefaults.buttonColors(containerColor = Palette.accent), onClick = {
         if (new != confirm) {
             error = "The new passwords don't match"
         } else {
@@ -533,5 +632,5 @@ private fun SyncPasswordPanel(onDone: (String) -> Unit) {
             }
         }
     }) { Text(if (busy) "Saving…" else "Change password") }
-    error?.let { Text(it, color = Palette.live, fontSize = 13.sp) }
+    error?.let { Text(it, color = Palette.live, fontSize = if (isTv()) 16.sp else 13.sp) }
 }
