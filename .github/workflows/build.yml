@@ -166,9 +166,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
-        if: steps.cache.outputs.cache-hit != 'true'
-        continue-on-error: true
       - name: Build engine
         if: steps.cache.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -203,7 +200,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
       - name: Build release APKs
         env:
