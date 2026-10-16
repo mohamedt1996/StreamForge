@@ -148,6 +148,30 @@ fun KeylineScroll(keyline: Dp, enabled: Boolean = true, content: @Composable () 
     CompositionLocalProvider(LocalBringIntoViewSpec provides spec, content = content)
 }
 
+/**
+ * Scrolls only when the focused element is (partly) off screen, and then only as far as needed.
+ * Compose's default on TV devices moves every focused element to ~30 % from the top, which made a
+ * detail page slide up by itself as soon as its Play button (low on the screen) took focus.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private object MinimalSpec : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val trailing = offset + size
+        return when {
+            offset >= 0f && trailing <= containerSize -> 0f
+            offset < 0f || size >= containerSize -> offset
+            else -> trailing - containerSize
+        }
+    }
+}
+
+/** Lists inside [content] scroll minimally to show the focused element (see [MinimalSpec]). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun MinimalScroll(content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalBringIntoViewSpec provides MinimalSpec, content = content)
+}
+
 // MARK: Buttons
 
 enum class ButtonKind { PRIMARY, SECONDARY, GHOST, DANGER }

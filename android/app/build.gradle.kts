@@ -24,6 +24,23 @@ android {
         versionName = "1.0.$buildNumber"
     }
 
+    // Two separate apps from one codebase:
+    //  - "tv":     Android TV / Google TV (Chromecast with Google TV, Shield, TV boxes). Always the
+    //              10-foot remote interface, shows in the TV launcher.
+    //  - "mobile": phones and tablets. Always the touch interface (phone or tablet layout).
+    // Same application id and signing key, so either one updates an existing install in place.
+    flavorDimensions += "device"
+    productFlavors {
+        create("mobile") {
+            dimension = "device"
+            buildConfigField("boolean", "TV_BUILD", "false")
+        }
+        create("tv") {
+            dimension = "device"
+            buildConfigField("boolean", "TV_BUILD", "true")
+        }
+    }
+
     signingConfigs {
         create("release") {
             // A real keystore can be supplied via CI secrets; otherwise the repo's sideload key
@@ -48,11 +65,15 @@ android {
         }
     }
 
+    // ARM only: every phone, tablet and TV box we target is ARM (Intel Chromebooks run ARM apps
+    // through translation). Dropping the x86 / x86_64 copies of mpv/ffmpeg roughly halves the
+    // universal APK. Per-ABI APKs: armeabi-v7a is the one for the Chromecast with Google TV
+    // (its Android is 32-bit), arm64-v8a for 64-bit phones, tablets and newer TV devices.
     splits {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            include("armeabi-v7a", "arm64-v8a")
             isUniversalApk = true
         }
     }
@@ -63,7 +84,10 @@ android {
     }
 
     packaging {
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += setOf("lib/x86/**", "lib/x86_64/**")
+        }
     }
 
     dependenciesInfo {

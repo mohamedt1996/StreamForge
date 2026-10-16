@@ -7,6 +7,8 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
+import coil3.memory.MemoryCache
+import coil3.request.allowRgb565
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
@@ -14,6 +16,7 @@ import com.mohamedt.streamforge.dispatcharr.GuideRepo
 import com.mohamedt.streamforge.stremio.Addons
 import com.mohamedt.streamforge.sync.ServerSync
 import com.mohamedt.streamforge.torrent.TorrServer
+import com.mohamedt.streamforge.ui.Perf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,8 +51,15 @@ class App : Application(), SingletonImageLoader.Factory {
         })
     }
 
-    override fun newImageLoader(context: PlatformContext): ImageLoader =
-        ImageLoader.Builder(context)
+    override fun newImageLoader(context: PlatformContext): ImageLoader {
+        // Low-end devices (Chromecast with Google TV, 2 GB RAM): a smaller in-memory image cache so
+        // rows don't push the app into garbage-collection pauses, and opaque artwork (posters,
+        // backdrops) decoded as RGB_565, half the memory. Logos keep their transparency.
+        val lowEnd = Perf.lowEnd(context)
+        return ImageLoader.Builder(context)
             .components { add(OkHttpNetworkFetcherFactory()) }
+            .memoryCache { MemoryCache.Builder().maxSizePercent(context, if (lowEnd) 0.15 else 0.25).build() }
+            .allowRgb565(lowEnd)
             .build()
+    }
 }

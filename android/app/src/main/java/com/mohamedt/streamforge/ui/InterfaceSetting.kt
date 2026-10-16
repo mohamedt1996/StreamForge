@@ -21,19 +21,21 @@ import androidx.compose.ui.unit.sp
 import com.mohamedt.streamforge.core.Settings
 
 /**
- * Settings → Interface: Automatic / TV (remote) / Touch. Self-contained so it can sit at the top of
- * the settings list; styled like the other settings sections.
+ * Settings → Interface (phone/tablet app only): Automatic / TV (remote) / Touch. Self-contained so
+ * it can sit at the top of the settings list; styled like the other settings sections. The TV app
+ * is always in the TV interface, so it has no such setting.
  */
 @Composable
 fun InterfaceSetting() {
+    if (DeviceInput.tvBuild) return
     val tv = isTv()
     val context = LocalContext.current
     val mode = InterfaceMode.of(Settings.values.interfaceMode)
     val hardware = DeviceInput.isTvHardware(context)
     val detected = when {
-        hardware -> "This device was detected as a TV."
-        DeviceInput.remoteSeen == true -> "A remote was used, so the TV layout is on."
-        else -> "This device was detected as a phone or tablet."
+        hardware -> "This device looks like a TV: the StreamForge TV app is made for it."
+        formFactor() == FormFactor.TABLET -> "This device was detected as a tablet."
+        else -> "This device was detected as a phone."
     }
     Column(Modifier.fillMaxWidth().widthIn(max = 900.dp).padding(vertical = if (tv) 14.dp else 8.dp)) {
         if (tv) {
@@ -57,8 +59,8 @@ fun InterfaceSetting() {
             }
         }
         Text(
-            "Automatic uses the TV layout on Android TV, Google TV and Fire TV devices and switches to it as soon as a remote's " +
-                "arrow keys are used; touching the screen switches back. $detected",
+            "Automatic uses the touch layout (phone or tablet). Choose TV (remote) only if this app is " +
+                "running on a TV box; for Android TV and Google TV install the StreamForge TV app instead. $detected",
             fontSize = if (tv) 15.sp else 12.sp, color = Palette.secondary, modifier = Modifier.padding(top = 8.dp),
         )
     }

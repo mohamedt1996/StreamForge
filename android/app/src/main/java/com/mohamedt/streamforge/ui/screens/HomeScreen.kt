@@ -104,7 +104,9 @@ import com.mohamedt.streamforge.ui.SfButton
 import com.mohamedt.streamforge.ui.Shelf
 import com.mohamedt.streamforge.ui.TvRowCardOffset
 import com.mohamedt.streamforge.ui.card
+import com.mohamedt.streamforge.ui.isLowEnd
 import com.mohamedt.streamforge.ui.isTv
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -359,7 +361,18 @@ private fun HomeTv(onSettings: () -> Unit) {
     val movies = recentMovies()
     val series = recentSeries()
     val open: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
-    val focus: (Hero) -> Unit = { heroState.focused = it }
+    // The billboard (backdrop crossfade, logo, text) follows focus only once it rests on a card for a
+    // moment. Updating it on every D-pad press while scrolling a row was the main cause of lag on
+    // the Chromecast: each press decoded and crossfaded a full-screen backdrop.
+    val lowEnd = isLowEnd()
+    val heroJob = remember { arrayOfNulls<Job>(1) }
+    val focus: (Hero) -> Unit = { h ->
+        heroJob[0]?.cancel()
+        heroJob[0] = scope.launch {
+            delay(if (lowEnd) 280L else 160L)
+            heroState.focused = h
+        }
+    }
 
     val featured: Hero? = resume.firstOrNull()?.let { heroOf(it) }
         ?: (Library.favorites + HomeData.trendingMovies + HomeData.catalogs.flatMap { it.second } + movies)
@@ -477,7 +490,7 @@ private fun HeroEnricher(state: HeroState, featured: Hero?) {
 private fun HeroBackdrop(state: HeroState, featured: Hero?, modifier: Modifier) {
     val backdrop = state.view(featured).backdrop
     Box(modifier) {
-        Crossfade(targetState = backdrop, animationSpec = tween(650), label = "home-backdrop") { url ->
+        Crossfade(targetState = backdrop, animationSpec = tween(if (isLowEnd()) 260 else 380), label = "home-backdrop") { url ->
             if (url != null) {
                 AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {

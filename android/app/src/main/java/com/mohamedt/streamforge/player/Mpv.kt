@@ -33,13 +33,22 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
     var destroyed = false
         private set
 
+    /**
+     * Low-end devices (Chromecast with Google TV: Mali-G31 GPU drawing a 4K surface) use mpv's
+     * classic "gpu" renderer with cheap bilinear scaling and no debanding/dithering/peak detection.
+     * The default gpu-next path with high-quality scalers drops frames there, which shows as
+     * stutter on 4K and HDR streams. Decoding stays in hardware (MediaCodec) either way.
+     */
+    private val lowEnd = com.mohamedt.streamforge.ui.Perf.lowEnd(context)
+    private val videoOutput = if (lowEnd) "gpu" else "gpu-next"
+
     init {
         val config = File(context.filesDir, "mpv").apply { mkdirs() }
         val cache = File(context.cacheDir, "mpv").apply { mkdirs() }
         val s = Settings.values
         val opts = listOf(
             "config" to "yes", "config-dir" to config.path, "gpu-shader-cache-dir" to cache.path,
-            "vo" to "gpu-next", "gpu-context" to "android", "opengl-es" to "yes", "ao" to "audiotrack,opensles",
+            "vo" to videoOutput, "gpu-context" to "android", "opengl-es" to "yes", "ao" to "audiotrack,opensles",
             "hwdec" to s.hwdec, "hwdec-codecs" to "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1",
             "tls-verify" to "no", "cache" to "yes", "demuxer-max-bytes" to "${s.cacheMb}MiB",
             "demuxer-max-back-bytes" to "${maxOf(32, s.cacheMb / 3)}MiB", "network-timeout" to "30",
@@ -51,6 +60,14 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
             "sub-scale-with-window" to "yes", "sub-use-margins" to "no",
         )
         for ((k, v) in opts) lib.setOptionString(k, v)
+        if (lowEnd) {
+            for ((k, v) in listOf(
+                "scale" to "bilinear", "cscale" to "bilinear", "dscale" to "bilinear",
+                "dither-depth" to "no", "correct-downscaling" to "no", "linear-downscaling" to "no",
+                "sigmoid-upscaling" to "no", "deband" to "no", "hdr-compute-peak" to "no",
+                "interpolation" to "no", "video-sync" to "audio",
+            )) lib.setOptionString(k, v)
+        }
         lib.init()
         lib.addObserver(this)
         for ((name, fmt) in listOf(
@@ -72,7 +89,7 @@ class Mpv(context: Context, private val listener: MpvListener) : MPVLib.EventObs
         if (destroyed) return
         lib.attachSurface(surface)
         lib.setOptionString("force-window", "yes")
-        lib.setOptionString("vo", "gpu-next")
+        lib.setOptionString("vo", videoOutput)
         surfaceAttached = true
         pendingLoad?.let { pendingLoad = null; it() }
     }

@@ -296,7 +296,13 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
             Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
                 // A focused "Skip intro" / "Up next" card handles OK itself.
                 if (!rootFocused) return false
-                if (down && repeat == 0) controls = true
+                if (down && repeat == 0) {
+                    // The Chromecast with Google TV remote has no play/pause key, so OK pauses
+                    // (like YouTube and Netflix on Google TV) and brings up the controls with focus on
+                    // Play; OK again resumes. Live TV just shows the controls.
+                    if (!c.isLive && c.started) c.togglePause()
+                    controls = true
+                }
                 return true
             }
             else -> return false

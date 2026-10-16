@@ -3,8 +3,6 @@ package com.mohamedt.streamforge
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
-import android.view.KeyEvent
-import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -91,7 +89,6 @@ import com.mohamedt.streamforge.player.Player
 import com.mohamedt.streamforge.player.SourceKind
 import com.mohamedt.streamforge.stremio.Addons
 import com.mohamedt.streamforge.torrent.TorrentSource
-import com.mohamedt.streamforge.ui.DeviceInput
 import com.mohamedt.streamforge.ui.Dims
 import com.mohamedt.streamforge.ui.LocalFocusMemory
 import com.mohamedt.streamforge.ui.LocalNav
@@ -154,7 +151,6 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
-        DeviceInput.init(this)
         handleIntent(intent)
         val permissionPrefs = getSharedPreferences("network-permission", MODE_PRIVATE)
         if (android.os.Build.VERSION.SDK_INT >= 37 &&
@@ -170,18 +166,6 @@ class MainActivity : ComponentActivity() {
                 com.mohamedt.streamforge.sync.ManagedSyncPrompts()
             }
         }
-    }
-
-    /** Remote D-pad input switches "Automatic" to the TV interface (TV boxes that don't say they're TVs). */
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        DeviceInput.onKey(event)
-        return super.dispatchKeyEvent(event)
-    }
-
-    /** A finger on the screen switches "Automatic" back to the touch interface. */
-    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        DeviceInput.onTouch(ev)
-        return super.dispatchTouchEvent(ev)
     }
 
     override fun onNewIntent(intent: Intent) {

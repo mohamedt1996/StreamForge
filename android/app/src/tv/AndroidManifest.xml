@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV app only (Android TV / Google TV, e.g. Chromecast with Google TV 4K). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- A TV app: Google TV launchers and stores treat it as one. -->
+    <uses-feature android:name="android.software.leanback" android:required="true"
+        tools:replace="android:required" />
+
+    <application>
+        <activity android:name=".MainActivity">
+            <!-- Shows the app (with its banner) in the Google TV / Android TV launcher. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

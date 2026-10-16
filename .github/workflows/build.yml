@@ -223,14 +223,21 @@ jobs:
           bash scripts/gradle-annotate.sh :app:assembleRelease
       - name: Collect APKs
         run: |
+          # Two apps: tv (Android TV / Google TV) and mobile (phones + tablets), each per ABI + universal.
+          # app-tv-armeabi-v7a-release.apk -> StreamForge-tv-armeabi-v7a.apk
           mkdir -p apk
-          for f in android/app/build/outputs/apk/release/*.apk; do
-            name=$(basename "$f" | sed 's/app-/StreamForge-/; s/-release//')
+          find android/app/build/outputs/apk -path "*release*" -name "*.apk" | while read -r f; do
+            name=$(basename "$f" | sed 's/^app-/StreamForge-/; s/-release//')
             cp "$f" "apk/$name"
           done
           ls -lh apk
-          unzip -l apk/StreamForge-universal.apk | grep -q "libmpv.so" && echo "::notice::libmpv packaged" || echo "::error::libmpv missing from APK"
-          unzip -l apk/StreamForge-universal.apk | grep -qi "libgojni.so" && echo "::notice::TorrServer engine packaged" || echo "::warning::On-device torrent engine not packaged (remote TorrServer only)"
+          for app in tv mobile; do
+            u="apk/StreamForge-$app-universal.apk"
+            [ -f "$u" ] || { echo "::error::$u was not built"; continue; }
+            unzip -l "$u" | grep -q "libmpv.so" && echo "::notice::$app: libmpv packaged" || echo "::error::$app: libmpv missing from APK"
+            unzip -l "$u" | grep -qi "libgojni.so" && echo "::notice::$app: TorrServer engine packaged" || echo "::warning::$app: on-device torrent engine not packaged (remote TorrServer only)"
+            if unzip -l "$u" | grep -q "lib/x86"; then echo "::error::$app: x86 libraries should not be packaged"; fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: StreamForge-Android
@@ -352,7 +359,8 @@ jobs:
             Unsigned builds of ${{ github.sha }}. Sign and sideload with AltStore, SideStore, Sideloadly or similar.
             - `StreamForge-unsigned.ipa`: iPhone and iPad (iOS 17+)
             - `StreamForgeTV-unsigned.ipa`: Apple TV (tvOS 17+)
-            - `StreamForge-universal.apk`: Android phones, tablets and Android TV (Android 8+). Per-ABI APKs are smaller: `arm64-v8a` for most modern devices, `armeabi-v7a` for older TV boxes.
+            - Android TV / Google TV (Android 8+): `StreamForge-tv-armeabi-v7a.apk` for Chromecast with Google TV (4K and HD) and most TV boxes; `StreamForge-tv-arm64-v8a.apk` for 64-bit TV devices (Shield, Google TV Streamer); `StreamForge-tv-universal.apk` if unsure.
+            - Android phones and tablets (Android 8+): `StreamForge-mobile-arm64-v8a.apk` for most devices, `StreamForge-mobile-armeabi-v7a.apk` for older 32-bit ones, `StreamForge-mobile-universal.apk` if unsure.
             - `streamforge-sync-*`: self-hosted sync server binaries (Linux amd64/arm64, macOS arm64, Windows amd64). Docker: `ghcr.io/mohamedt1996/streamforge-sync:0.1.${{ github.run_number }}`.
           files: |
             StreamForge-unsigned.ipa

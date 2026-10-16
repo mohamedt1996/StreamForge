@@ -1,3 +1,39 @@
+StreamForge — Android: separate TV app, Chromecast with Google TV performance
+
+ANDROID (this update)
+- Two apps from one codebase (Gradle product flavors in android/app/build.gradle.kts):
+  - tv: Android TV / Google TV. Always the 10-foot remote interface (it can no longer fall into
+    the tablet layout), appears in the Google TV launcher (LEANBACK_LAUNCHER, src/tv manifest).
+    No Interface setting.
+  - mobile: phones and tablets. Touch interface, phone or tablet layout by screen size. The old
+    "a D-pad press switches to TV" behaviour is gone; TV only if chosen in Settings → Interface.
+  - Same application id and signing key: either APK updates an existing install in place.
+  - Width checks (isWide / isMediumWidth / isExpandedWidth) are always false on TV, so no tablet
+    rail or two-pane layout can appear on a TV screen.
+- Smaller APKs: ARM only (x86 / x86_64 copies of mpv/ffmpeg dropped). CI now publishes
+  StreamForge-tv-armeabi-v7a.apk  <- Chromecast with Google TV 4K (its Android is 32-bit)
+  StreamForge-tv-arm64-v8a.apk, StreamForge-tv-universal.apk,
+  StreamForge-mobile-arm64-v8a.apk, StreamForge-mobile-armeabi-v7a.apk, StreamForge-mobile-universal.apk
+- Less lag on low-end devices (Perf.lowEnd: low-RAM, under ~3 GB RAM or 32-bit only, which
+  includes the Chromecast with Google TV):
+  - Home (TV): the billboard follows focus only after it rests on a card (280 ms) instead of
+    decoding and crossfading a full-screen backdrop on every D-pad press; shorter crossfade.
+  - Focused cards: no coloured elevation glow (white border only), faster scale animation.
+  - Images: smaller in-memory cache and RGB_565 for opaque artwork (logos keep transparency).
+  - Player: mpv "gpu" renderer with bilinear scaling and no debanding/dithering/peak detection
+    instead of gpu-next with high-quality scalers; decoding stays hardware (MediaCodec).
+- Trailers autoplay on detail pages exactly as before, on every device (setting unchanged).
+- TV detail page no longer scrolls up by itself when it opens. Compose's default on TV moves
+  the focused element to ~30 % from the top, so focusing Play (low on the page) pushed the title
+  off screen. The page now scrolls only when focus goes to a row that is off screen (MinimalScroll
+  in ui/Tv.kt), and moving back to the buttons returns to the top with the whole title visible.
+- Chromecast remote (no play/pause key): in the player, OK pauses and shows the controls with
+  focus on Play; OK again resumes. Left/Right still skip, Up/Down show controls (or change
+  channel / open the channel list on live TV). Media keys from CEC remotes still work.
+- Validation here: tree-sitter Kotlin parse of every changed file (HomeScreen.kt shows the same
+  parser-only errors as the original). Gradle could not run in this workspace (Google Maven is
+  blocked), so the GitHub Actions build is the first compile.
+
 StreamForge — cinematic titles and trailer fallback
 
 LATEST CHANGES (on top of the notes below)

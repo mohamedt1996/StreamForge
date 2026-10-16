@@ -51,6 +51,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -94,6 +96,7 @@ import com.mohamedt.streamforge.ui.Chip
 import com.mohamedt.streamforge.ui.Dims
 import com.mohamedt.streamforge.ui.InitialFocus
 import com.mohamedt.streamforge.ui.KeylineScroll
+import com.mohamedt.streamforge.ui.MinimalScroll
 import com.mohamedt.streamforge.ui.Loading
 import com.mohamedt.streamforge.ui.LocalNav
 import com.mohamedt.streamforge.ui.LocalShelfKey
@@ -479,6 +482,7 @@ private fun DetailTv(
     val nav = LocalNav.current
     val item = d.item
     val playFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
     InitialFocus(playFocus)
     val scrolled by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 60 } }
     val deep by animateFloatAsState(if (scrolled) 1f else 0f, tween(400), label = "detail-dim")
@@ -491,10 +495,17 @@ private fun DetailTv(
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Palette.background)))
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = deep }.background(Palette.background.copy(alpha = 0.82f)))
 
+        // The page opens at the top and stays there: it only scrolls when focus moves to a row that
+        // is off screen, and returning to the buttons brings the whole title back into view.
+        MinimalScroll {
         LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 48.dp)) {
             item(key = "info") {
                 Column(
-                    Modifier.fillParentMaxHeight(0.8f).fillMaxWidth(0.58f)
+                    Modifier.onFocusChanged { f ->
+                        if (f.hasFocus && (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)) {
+                            scope.launch { listState.animateScrollToItem(0) }
+                        }
+                    }.fillParentMaxHeight(0.8f).fillMaxWidth(0.58f)
                         .padding(start = Dims.gutter(), top = Dims.overscanY + 12.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.Bottom,
                 ) {
@@ -600,6 +611,7 @@ private fun DetailTv(
                 Shelf("Cast", d.cast, key = { it.id }, rowKey = "cast") { person -> CastCard(person) }
             }
             item(key = "similar") { Shelf("More like this", d.similar, key = { it.id }, rowKey = "similar") { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
+        }
         }
     }
 }

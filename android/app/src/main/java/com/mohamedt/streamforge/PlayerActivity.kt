@@ -102,16 +102,6 @@ class PlayerActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        com.mohamedt.streamforge.ui.DeviceInput.onKey(event)
-        return super.dispatchKeyEvent(event)
-    }
-
-    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
-        com.mohamedt.streamforge.ui.DeviceInput.onTouch(ev)
-        return super.dispatchTouchEvent(ev)
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // singleTask: a second Player.play() (e.g. while in PiP) lands here instead of onCreate.

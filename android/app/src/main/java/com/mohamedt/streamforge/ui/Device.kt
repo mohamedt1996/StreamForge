@@ -1,17 +1,13 @@
 package com.mohamedt.streamforge.ui
 
+import android.app.ActivityManager
 import android.app.UiModeManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
-import android.view.InputDevice
-import android.view.KeyEvent
-import android.view.MotionEvent
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.mohamedt.streamforge.BuildConfig
 import com.mohamedt.streamforge.core.Settings
 
 /** Settings → Interface. Stored as its [key] so an unknown value never breaks settings decoding. */
@@ -28,30 +24,21 @@ enum class InterfaceMode(val key: String, val label: String) {
 /**
  * Decides between the 10-foot (remote) interface and the touch interface.
  *
- * Hardware detection alone isn't enough: plenty of Android TV boxes, projectors and Google TV /
- * Fire TV variants don't report UI_MODE_TYPE_TELEVISION (and some even claim a touchscreen). So:
- *  1. the hardware signals below are checked once,
- *  2. in Automatic mode a D-pad press from a remote switches to the TV interface (and a real touch
- *     switches back); the last one is remembered across launches,
- *  3. Settings → Interface can force either one.
+ * StreamForge ships as two apps (Gradle flavors, see app/build.gradle.kts):
+ *  - the TV app ([BuildConfig.TV_BUILD]) always uses the TV interface, whatever the device reports
+ *    and whatever a synced or old setting says, so a Google TV can never end up in the tablet layout;
+ *  - the phone/tablet app always uses the touch interface (phone or tablet layout by width). Only an
+ *    explicit "TV (remote)" choice in Settings → Interface switches it, e.g. for a TV box that the
+ *    phone app was installed on by mistake. A stray D-pad / keyboard / gamepad press no longer flips it.
  */
 object DeviceInput {
-    private const val PREFS = "device_input"
-    private const val KEY_REMOTE = "remote_seen"
-
     @Volatile private var hardwareTv: Boolean? = null
-    private var prefs: android.content.SharedPreferences? = null
 
-    /** Automatic mode: true after remote (D-pad) input, false after a touch, null before either. */
-    var remoteSeen by mutableStateOf<Boolean?>(null)
-        private set
+    /** Kept for call sites that initialise early; nothing to load any more. */
+    fun init(context: Context) = Unit
 
-    fun init(context: Context) {
-        if (prefs != null) return
-        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        prefs = p
-        if (p.contains(KEY_REMOTE)) remoteSeen = p.getBoolean(KEY_REMOTE, false)
-    }
+    /** True in the TV app (Android TV / Google TV build). */
+    val tvBuild: Boolean get() = BuildConfig.TV_BUILD
 
     /** Hardware/system signals that this is a television-style device. Computed once per process. */
     fun isTvHardware(context: Context): Boolean {
@@ -69,56 +56,54 @@ object DeviceInput {
                 pm.hasSystemFeature("amazon.hardware.fire_tv") ||
                 (Build.MODEL ?: "").startsWith("AFT") ||
                 !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN) ||
-                config.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH ||
-                (config.navigation == Configuration.NAVIGATION_DPAD && config.touchscreen != Configuration.TOUCHSCREEN_FINGER)
+                config.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH
         }.getOrDefault(false)
         hardwareTv = result
         return result
     }
 
     /** The resolved choice, for code outside composition (e.g. picture-in-picture). */
-    fun isTv(context: Context): Boolean {
-        init(context)
-        return resolve(InterfaceMode.of(Settings.values.interfaceMode), isTvHardware(context))
-    }
+    fun isTv(context: Context): Boolean = resolve(InterfaceMode.of(Settings.values.interfaceMode), isTvHardware(context))
 
-    fun resolve(mode: InterfaceMode, hardware: Boolean): Boolean = when (mode) {
-        InterfaceMode.TV -> true
-        InterfaceMode.TOUCH -> false
-        InterfaceMode.AUTO -> hardware || remoteSeen == true
-    }
-
-    /** Call for every key event: a D-pad press from a remote / gamepad switches Automatic mode to TV. */
-    fun onKey(event: KeyEvent) {
-        if (event.action != KeyEvent.ACTION_DOWN || remoteSeen == true) return
-        val dpad = when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT,
-            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER -> true
-            else -> false
-        }
-        if (!dpad) return
-        // Arrow keys of a real (alphabetic) keyboard on a tablet don't count.
-        val device = event.device
-        if (device != null && device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC && event.keyCode != KeyEvent.KEYCODE_DPAD_CENTER) return
-        store(true)
-    }
-
-    /** Call for touch events: a finger on a touchscreen switches Automatic mode back to touch. */
-    fun onTouch(event: MotionEvent) {
-        if (event.actionMasked != MotionEvent.ACTION_DOWN || remoteSeen != true) return
-        if (!event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) return
-        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER) return
-        store(false)
-    }
-
-    private fun store(remote: Boolean) {
-        remoteSeen = remote
-        prefs?.edit()?.putBoolean(KEY_REMOTE, remote)?.apply()
+    fun resolve(mode: InterfaceMode, hardware: Boolean): Boolean = when {
+        tvBuild -> true
+        mode == InterfaceMode.TV -> true
+        mode == InterfaceMode.TOUCH -> false
+        // Phone/tablet app on "Automatic": touch, unless it really is running on TV hardware.
+        else -> hardware
     }
 
     /** PackageManager.FEATURE_TELEVISION (deprecated in the SDK, still reported by older TV builds). */
     private const val FEATURE_TELEVISION = "android.hardware.type.television"
 }
+
+/** Phone, tablet or TV: picks the layout family. Provided by [StreamForgeTheme]. */
+enum class FormFactor { PHONE, TABLET, TV }
+
+val LocalFormFactor = staticCompositionLocalOf { FormFactor.PHONE }
+
+/**
+ * Low-end device (Chromecast with Google TV: 2 GB RAM, 32-bit Android, small GPU; low-RAM phones).
+ * Expensive eye candy (focus glows, autoplaying trailer WebViews, the heavier video renderer) is
+ * switched off on these so scrolling and playback stay smooth.
+ */
+object Perf {
+    @Volatile private var cached: Boolean? = null
+
+    fun lowEnd(context: Context): Boolean {
+        cached?.let { return it }
+        val am = context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val info = ActivityManager.MemoryInfo()
+        runCatching { am?.getMemoryInfo(info) }
+        val result = am?.isLowRamDevice == true ||
+            (info.totalMem in 1 until 3_200_000_000L) ||
+            Build.SUPPORTED_64_BIT_ABIS.isEmpty()
+        cached = result
+        return result
+    }
+}
+
+val LocalLowEnd = staticCompositionLocalOf { false }
 
 /** True when the 10-foot (remote) interface is active. Provided by [StreamForgeTheme]. */
 val LocalTvMode = staticCompositionLocalOf { false }

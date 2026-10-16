@@ -126,11 +126,16 @@ private val colors = darkColorScheme(
 @Composable
 fun StreamForgeTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val hardware = remember {
-        DeviceInput.init(context)
-        DeviceInput.isTvHardware(context)
-    }
+    val hardware = remember { DeviceInput.isTvHardware(context) }
+    val lowEnd = remember { Perf.lowEnd(context) }
     val tv = DeviceInput.resolve(InterfaceMode.of(Settings.values.interfaceMode), hardware)
+    // Phone vs tablet by the smallest screen side (stable across rotation); TV always wins.
+    val smallestWidth = LocalConfiguration.current.smallestScreenWidthDp
+    val formFactor = when {
+        tv -> FormFactor.TV
+        smallestWidth >= 600 -> FormFactor.TABLET
+        else -> FormFactor.PHONE
+    }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val toggleSaved: (MediaItem) -> Unit = { item ->
@@ -144,7 +149,12 @@ fun StreamForgeTheme(content: @Composable () -> Unit) {
             }
         }
     }
-    CompositionLocalProvider(LocalTvMode provides tv, LocalWatchlistAction provides toggleSaved) {
+    CompositionLocalProvider(
+        LocalTvMode provides tv,
+        LocalFormFactor provides formFactor,
+        LocalLowEnd provides lowEnd,
+        LocalWatchlistAction provides toggleSaved,
+    ) {
         MaterialTheme(colorScheme = colors, typography = typography) {
             Box(Modifier.fillMaxSize()) {
                 content()
@@ -158,17 +168,28 @@ fun StreamForgeTheme(content: @Composable () -> Unit) {
 @Composable
 fun isTv(): Boolean = LocalTvMode.current
 
+/** Phone, tablet or TV (see [StreamForgeTheme]). */
+@Composable
+fun formFactor(): FormFactor = LocalFormFactor.current
+
+/** Low-end device: skip costly effects (see [Perf]). */
+@Composable
+fun isLowEnd(): Boolean = LocalLowEnd.current
+
+// The width checks below pick phone vs tablet layouts. They are always false on TV: a TV screen
+// is ~960 dp wide, which would otherwise pull in the tablet layouts (rails, two-pane pages).
+
 /** Wide window (large tablet, landscape tablet): poster sizes and two-column layouts. */
 @Composable
-fun isWide(): Boolean = LocalConfiguration.current.screenWidthDp >= 720
+fun isWide(): Boolean = !isTv() && LocalConfiguration.current.screenWidthDp >= 720
 
 /** Medium or wider window (tablet, phone in landscape): navigation rail instead of a bottom bar. */
 @Composable
-fun isMediumWidth(): Boolean = LocalConfiguration.current.screenWidthDp >= 600
+fun isMediumWidth(): Boolean = !isTv() && LocalConfiguration.current.screenWidthDp >= 600
 
 /** Expanded window (tablet in landscape, large foldables): two-pane layouts. */
 @Composable
-fun isExpandedWidth(): Boolean = LocalConfiguration.current.screenWidthDp >= 840
+fun isExpandedWidth(): Boolean = !isTv() && LocalConfiguration.current.screenWidthDp >= 840
 
 object Dims {
     @Composable fun poster(): Dp = if (isTv()) 140.dp else if (isWide()) 140.dp else 112.dp
@@ -205,11 +226,13 @@ fun Modifier.card(
     onFocus: ((Boolean) -> Unit)? = null,
 ): Modifier {
     val tv = isTv()
+    val lowEnd = isLowEnd()
     var focused by remember { mutableStateOf(false) }
     val memory = LocalFocusMemory.current
     val restore = remember { FocusRequester() }
     val target = if (focused) (focusScale ?: if (tv) 1.08f else 1.04f) else 1f
-    val scale by animateFloatAsState(target, tween(if (tv) 180 else 120), label = "card-scale")
+    // Short and snappy on TV: a long scale animation on every D-pad press reads as lag.
+    val scale by animateFloatAsState(target, tween(if (tv) (if (lowEnd) 110 else 150) else 120), label = "card-scale")
     val restoring = focusKey != null && memory != null
     if (restoring) {
         val pending = memory?.pending
@@ -224,7 +247,9 @@ fun Modifier.card(
         scaleX = scale
         scaleY = scale
     }
-    if (focused && tv && glow) m = m.shadow(18.dp, shape, clip = false, ambientColor = Palette.accent, spotColor = Palette.accent)
+    // The coloured elevation glow is re-rendered on every frame of the scale animation; low-end TVs
+    // (Chromecast with Google TV) get the white border alone, which reads just as clearly at 3 m.
+    if (focused && tv && glow && !lowEnd) m = m.shadow(18.dp, shape, clip = false, ambientColor = Palette.accent, spotColor = Palette.accent)
     if (border) {
         m = m.border(if (focused) BorderStroke(if (tv) 3.dp else 2.dp, Color.White) else BorderStroke(0.dp, Color.Transparent), shape)
     }
