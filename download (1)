@@ -1,0 +1,5 @@
+data/
+dist/
+/streamforge-sync
+*.db
+*.db-*
