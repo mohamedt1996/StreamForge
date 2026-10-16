@@ -31,11 +31,12 @@ enum Theme {
 
 // MARK: - Device
 
-/// What the app is running on. Detected once from the hardware model identifier
-/// ("iPhone16,1"; the simulator reports the model it simulates), with the live safe area as
-/// a fallback for phones newer than this table. Layout uses it to size the hero and title
-/// and to keep trailers clear of the Dynamic Island / notch.
-struct DeviceProfile: Equatable {
+/// What the app is running on, read once from the hardware model identifier ("iPhone17,1";
+/// the simulator reports the model it simulates) and the screen size. The model table gives
+/// the exact iPhone and whether it has a Dynamic Island, notch or Home button; phones newer
+/// than the table are classified from their real safe area instead. `HeroMetrics` turns this
+/// plus the live window size into the trailer, header and title sizes for every device.
+struct DeviceProfile: Equatable, CustomStringConvertible {
     enum Kind: Equatable {
         /// iPhone 14 Pro and later Dynamic Island models.
         case phoneDynamicIsland
@@ -49,23 +50,54 @@ struct DeviceProfile: Equatable {
         case tv
     }
 
+    /// Screen width class: drives title, header and trailer sizes.
+    enum SizeClass: Equatable {
+        /// 320–375 pt wide: SE, 8, mini, X/XS/11 Pro.
+        case compact
+        /// 390–402 pt: 12–17, Pro models.
+        case regular
+        /// 414 pt and up: Plus, Pro Max, XR/11, Air.
+        case large
+        case pad
+        case tv
+    }
+
     let kind: Kind
     /// Hardware identifier, e.g. "iPhone17,1" (empty when unavailable).
     let model: String
+    /// Marketing name when the model is known ("iPhone 16 Pro"), otherwise the identifier.
+    let name: String
     /// Portrait screen size in points.
     let screen: CGSize
 
-    @MainActor static let current = DeviceProfile.detect()
+    @MainActor static let current: DeviceProfile = {
+        let profile = DeviceProfile.detect()
+        #if DEBUG
+        print("StreamForge device:", profile)
+        #endif
+        return profile
+    }()
 
     var isPhone: Bool { [.phoneDynamicIsland, .phoneNotch, .phoneHomeButton].contains(kind) }
+    var isPadLike: Bool { kind == .pad || kind == .mac }
     var hasDynamicIsland: Bool { kind == .phoneDynamicIsland }
-    /// Plus / Pro Max / Air-sized phones.
-    var isLargePhone: Bool { isPhone && screen.width >= 428 }
-    /// SE / mini-sized phones.
-    var isSmallPhone: Bool { isPhone && (kind == .phoneHomeButton || screen.height <= 812) }
 
-    /// Portrait height to keep video and overlays below: the Dynamic Island ends ~48 pt down
-    /// (its safe area is 59–62 pt), a notch at ~30 pt (44–50 pt safe area).
+    var sizeClass: SizeClass {
+        switch kind {
+        case .tv: return .tv
+        case .pad, .mac: return .pad
+        default: return screen.width >= 414 ? .large : screen.width >= 390 ? .regular : .compact
+        }
+    }
+    var isLargePhone: Bool { isPhone && sizeClass == .large }
+    var isSmallPhone: Bool { isPhone && (sizeClass == .compact || screen.height <= 700) }
+
+    var description: String {
+        "\(name) [\(model.isEmpty ? "?" : model)] \(kind) \(sizeClass) \(Int(screen.width))×\(Int(screen.height))pt"
+    }
+
+    /// Portrait height to keep video and overlays below when nothing better is known: the
+    /// Dynamic Island ends ~48 pt down (safe area 59–62 pt), a notch ~30 pt (safe area 44–50 pt).
     var minimumTopClearance: CGFloat {
         switch kind {
         case .phoneDynamicIsland: return 59
@@ -84,55 +116,81 @@ struct DeviceProfile: Equatable {
         return max(safeTop, minimumTopClearance)
     }
 
-    /// Refines an unknown phone once a real safe area is known (portrait top inset).
+    /// The window's own top inset: just the status bar / Dynamic Island / notch. A view's
+    /// GeometryProxy inset also counts the navigation bar, which would push a trailer that
+    /// should sit right under the island down below the back button.
+    @MainActor static var windowSafeTop: CGFloat? {
+        #if os(iOS)
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }
+            .flatMap(\.windows)
+        return (windows.first(where: \.isKeyWindow) ?? windows.first)?.safeAreaInsets.top
+        #else
+        return 0
+        #endif
+    }
+
+    /// Refines a phone the table doesn't know once a real portrait safe area is known.
     func refined(withPortraitSafeTop top: CGFloat) -> DeviceProfile {
-        guard isPhone, Self.phoneKind(for: model) == nil, top > 0 else { return self }
+        guard isPhone, Self.knownPhones[model] == nil, top > 0 else { return self }
         let kind: Kind = top >= 55 ? .phoneDynamicIsland : top >= 40 ? .phoneNotch : .phoneHomeButton
-        return DeviceProfile(kind: kind, model: model, screen: screen)
+        return DeviceProfile(kind: kind, model: model, name: name, screen: screen)
     }
 
     @MainActor private static func detect() -> DeviceProfile {
         let model = hardwareModel()
-        #if os(tvOS)
-        return DeviceProfile(kind: .tv, model: model, screen: UIScreen.main.bounds.size)
-        #else
         let bounds = UIScreen.main.bounds.size
         let screen = CGSize(width: min(bounds.width, bounds.height), height: max(bounds.width, bounds.height))
+        #if os(tvOS)
+        return DeviceProfile(kind: .tv, model: model, name: "Apple TV", screen: bounds)
+        #else
         if ProcessInfo.processInfo.isiOSAppOnMac || ProcessInfo.processInfo.isMacCatalystApp {
-            return DeviceProfile(kind: .mac, model: model, screen: screen)
+            return DeviceProfile(kind: .mac, model: model, name: "Mac", screen: screen)
         }
         if UIDevice.current.userInterfaceIdiom != .phone {
-            return DeviceProfile(kind: .pad, model: model, screen: screen)
+            return DeviceProfile(kind: .pad, model: model, name: model.isEmpty ? "iPad" : model, screen: screen)
         }
-        if let kind = phoneKind(for: model) {
-            return DeviceProfile(kind: kind, model: model, screen: screen)
+        if let known = knownPhones[model] {
+            return DeviceProfile(kind: known.kind, model: model, name: known.name, screen: screen)
         }
-        // Unknown (newer) phone: every iPhone since the 14 Pro line has the Dynamic Island;
-        // `refined(withPortraitSafeTop:)` corrects this from the real safe area.
-        return DeviceProfile(kind: .phoneDynamicIsland, model: model, screen: screen)
+        let kind = phoneKind(for: model) ?? .phoneDynamicIsland
+        return DeviceProfile(kind: kind, model: model, name: model.isEmpty ? "iPhone" : model, screen: screen)
         #endif
     }
 
-    /// Known iPhone identifiers → kind; nil for unknown models.
+    /// Kind for an iPhone identifier: the table first, then older-model rules; nil if unknown.
     static func phoneKind(for model: String) -> Kind? {
+        if let known = knownPhones[model] { return known.kind }
         guard model.hasPrefix("iPhone") else { return nil }
         let numbers = model.dropFirst("iPhone".count).split(separator: ",").compactMap { Int($0) }
-        guard numbers.count == 2 else { return nil }
-        let (major, minor) = (numbers[0], numbers[1])
-        switch (major, minor) {
-        case (10, 3), (10, 6): return .phoneNotch                       // X
-        case (...10, _): return .phoneHomeButton                        // 8 and earlier
-        case (12, 8), (14, 6): return .phoneHomeButton                  // SE 2nd / 3rd gen
-        case (11, _), (12, _), (13, _), (14, _): return .phoneNotch     // XS – 14 (incl. 13 mini)
-        case (15, 2), (15, 3): return .phoneDynamicIsland               // 14 Pro / Pro Max
-        case (15, _): return .phoneDynamicIsland                        // 15 / 15 Plus (15,4 / 15,5)
-        case (16, _): return .phoneDynamicIsland                        // 15 Pro / Pro Max
-        case (17, 5): return .phoneNotch                                // 16e
-        case (17, _): return .phoneDynamicIsland                        // 16 / Plus / Pro / Pro Max
-        case (18, 1), (18, 2), (18, 3), (18, 4): return .phoneDynamicIsland // 17 / Air / 17 Pro / Pro Max
-        default: return nil
-        }
+        guard numbers.count == 2, numbers[0] < 10 else { return nil }
+        return .phoneHomeButton // iPhone 7 and earlier
     }
+
+    static let knownPhones: [String: (name: String, kind: Kind)] = [
+        "iPhone10,1": ("iPhone 8", .phoneHomeButton), "iPhone10,4": ("iPhone 8", .phoneHomeButton),
+        "iPhone10,2": ("iPhone 8 Plus", .phoneHomeButton), "iPhone10,5": ("iPhone 8 Plus", .phoneHomeButton),
+        "iPhone10,3": ("iPhone X", .phoneNotch), "iPhone10,6": ("iPhone X", .phoneNotch),
+        "iPhone11,2": ("iPhone XS", .phoneNotch), "iPhone11,4": ("iPhone XS Max", .phoneNotch),
+        "iPhone11,6": ("iPhone XS Max", .phoneNotch), "iPhone11,8": ("iPhone XR", .phoneNotch),
+        "iPhone12,1": ("iPhone 11", .phoneNotch), "iPhone12,3": ("iPhone 11 Pro", .phoneNotch),
+        "iPhone12,5": ("iPhone 11 Pro Max", .phoneNotch), "iPhone12,8": ("iPhone SE (2nd gen)", .phoneHomeButton),
+        "iPhone13,1": ("iPhone 12 mini", .phoneNotch), "iPhone13,2": ("iPhone 12", .phoneNotch),
+        "iPhone13,3": ("iPhone 12 Pro", .phoneNotch), "iPhone13,4": ("iPhone 12 Pro Max", .phoneNotch),
+        "iPhone14,4": ("iPhone 13 mini", .phoneNotch), "iPhone14,5": ("iPhone 13", .phoneNotch),
+        "iPhone14,2": ("iPhone 13 Pro", .phoneNotch), "iPhone14,3": ("iPhone 13 Pro Max", .phoneNotch),
+        "iPhone14,6": ("iPhone SE (3rd gen)", .phoneHomeButton),
+        "iPhone14,7": ("iPhone 14", .phoneNotch), "iPhone14,8": ("iPhone 14 Plus", .phoneNotch),
+        "iPhone15,2": ("iPhone 14 Pro", .phoneDynamicIsland), "iPhone15,3": ("iPhone 14 Pro Max", .phoneDynamicIsland),
+        "iPhone15,4": ("iPhone 15", .phoneDynamicIsland), "iPhone15,5": ("iPhone 15 Plus", .phoneDynamicIsland),
+        "iPhone16,1": ("iPhone 15 Pro", .phoneDynamicIsland), "iPhone16,2": ("iPhone 15 Pro Max", .phoneDynamicIsland),
+        "iPhone17,3": ("iPhone 16", .phoneDynamicIsland), "iPhone17,4": ("iPhone 16 Plus", .phoneDynamicIsland),
+        "iPhone17,1": ("iPhone 16 Pro", .phoneDynamicIsland), "iPhone17,2": ("iPhone 16 Pro Max", .phoneDynamicIsland),
+        "iPhone17,5": ("iPhone 16e", .phoneNotch),
+        "iPhone18,3": ("iPhone 17", .phoneDynamicIsland), "iPhone18,4": ("iPhone Air", .phoneDynamicIsland),
+        "iPhone18,1": ("iPhone 17 Pro", .phoneDynamicIsland), "iPhone18,2": ("iPhone 17 Pro Max", .phoneDynamicIsland),
+    ]
 
     private static func hardwareModel() -> String {
         if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], !simulated.isEmpty {
@@ -142,6 +200,113 @@ struct DeviceProfile: Equatable {
         uname(&info)
         return withUnsafeBytes(of: &info.machine) { raw in
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+}
+
+// MARK: - Hero metrics
+
+/// Every size the hero headers need, worked out per device from `DeviceProfile` and the live
+/// window (rotation, iPad split view / Stage Manager). The phone detail header is built from
+/// the trailer outwards: status bar / Dynamic Island clearance, then an exact 16:9 video, then
+/// just enough room under it for the title, meta row and genre chips, so the title only
+/// overlaps the bottom edge of the video and nothing is pushed off or cut on any iPhone.
+struct HeroMetrics: Equatable {
+    /// Total header height (artwork / trailer area).
+    var height: CGFloat
+    /// Where the trailer picture starts (below the status bar / Dynamic Island).
+    var videoTop: CGFloat
+    /// Trailer sized 16:9 under `videoTop` (phones) instead of centred in the header (iPad).
+    var pinsVideoToTop: Bool
+    /// Fraction of the header height where the trailer picture ends (for the fade-to-page gradient).
+    var videoBottomFraction: CGFloat
+    /// Title logo box.
+    var title: CGSize
+    /// Point size of the text title when there's no logo.
+    var titleFont: CGFloat
+    /// Lines the text title may wrap to.
+    var titleLines: Int
+    var showsPoster: Bool
+    /// Tagline under the genres (iPad / Apple TV; phones keep the header compact like Stremio).
+    var showsTagline: Bool
+
+    /// Detail page header. `container` is the page's safe-area size and `safeTop` its top
+    /// inset (status bar + navigation bar); `statusTop` is the window's own inset (status bar /
+    /// Dynamic Island only), which is where the trailer can start.
+    static func detail(device: DeviceProfile, container: CGSize, safeTop: CGFloat, statusTop: CGFloat, regularWidth: Bool) -> HeroMetrics {
+        let width = max(container.width, 1)
+        let landscape = container.width > container.height
+        let fullHeight = container.height + safeTop
+
+        if device.kind == .tv {
+            return HeroMetrics(height: 700, videoTop: 0, pinsVideoToTop: false, videoBottomFraction: 1,
+                               title: CGSize(width: 600, height: 200), titleFont: 64, titleLines: 2,
+                               showsPoster: false, showsTagline: true)
+        }
+
+        if device.isPadLike && regularWidth {
+            let height = min(560, max(320, fullHeight * 0.62))
+            return HeroMetrics(height: height, videoTop: statusTop, pinsVideoToTop: false, videoBottomFraction: 1,
+                               title: CGSize(width: 420, height: 150), titleFont: 48, titleLines: 2,
+                               showsPoster: height >= 400, showsTagline: true)
+        }
+
+        let (title, font): (CGSize, CGFloat) = {
+            switch device.sizeClass {
+            case .compact: return (CGSize(width: 240, height: 84), 30)
+            case .large: return (CGSize(width: 320, height: 112), 40)
+            default: return (CGSize(width: 290, height: 100), 36)
+            }
+        }()
+
+        if landscape {
+            // Short and wide: keep the actions on screen; the video fills the header height.
+            let height = min(width * 9 / 16, max(220, fullHeight * 0.78))
+            let short = CGSize(width: min(title.width, 260), height: min(title.height, 84))
+            return HeroMetrics(height: height, videoTop: statusTop, pinsVideoToTop: true, videoBottomFraction: 1,
+                               title: short, titleFont: min(font, 32), titleLines: 1,
+                               showsPoster: false, showsTagline: false)
+        }
+
+        // Portrait phone (or a narrow iPad window): trailer first, then the title band.
+        let videoTop = device.topClearance(safeTop: statusTop, isLandscape: false)
+        let videoHeight = width * 9 / 16
+        // Title box + 12 + meta row (~24) + 12 + chips (~28) + a little air.
+        let content = title.height + 12 + 24 + 12 + 28 + 8
+        let overlap = title.height * 0.4
+        let height = max(videoTop + videoHeight + content - overlap, device.isSmallPhone ? 330 : 380)
+        return HeroMetrics(height: height, videoTop: videoTop, pinsVideoToTop: true,
+                           videoBottomFraction: min(1, (videoTop + videoHeight) / height),
+                           title: title, titleFont: font, titleLines: device.sizeClass == .compact ? 2 : 3,
+                           showsPoster: false, showsTagline: false)
+    }
+
+    /// Home billboard (sits under the navigation bar, so no status-bar clearance needed).
+    static func home(device: DeviceProfile, width: CGFloat) -> HeroMetrics {
+        switch device.sizeClass {
+        case .tv:
+            return HeroMetrics(height: 620, videoTop: 0, pinsVideoToTop: false, videoBottomFraction: 1,
+                               title: CGSize(width: 480, height: 160), titleFont: 56, titleLines: 2,
+                               showsPoster: false, showsTagline: false)
+        case .pad:
+            return HeroMetrics(height: 340, videoTop: 0, pinsVideoToTop: false, videoBottomFraction: 1,
+                               title: CGSize(width: 320, height: 110), titleFont: 40, titleLines: 2,
+                               showsPoster: false, showsTagline: false)
+        default:
+            let (title, font): (CGSize, CGFloat) = {
+                switch device.sizeClass {
+                case .compact: return (CGSize(width: 230, height: 80), 28)
+                case .large: return (CGSize(width: 290, height: 100), 34)
+                default: return (CGSize(width: 260, height: 90), 32)
+                }
+            }()
+            let video = max(1, width) * 9 / 16
+            // 16:9 trailer at the top, plus room for the meta line and the page dots below it.
+            let height = min(340, max(device.isSmallPhone ? 230 : 250, video + 64))
+            return HeroMetrics(height: height, videoTop: 0, pinsVideoToTop: true,
+                               videoBottomFraction: min(1, video / height),
+                               title: title, titleFont: font, titleLines: 2,
+                               showsPoster: false, showsTagline: false)
         }
     }
 }
@@ -220,6 +385,8 @@ struct CinematicTitle: View {
     var height: CGFloat
     /// Point size for the text fallback; scaled down to fit the box when the title is long.
     var fallbackSize: CGFloat? = nil
+    /// Lines the text title may wrap to (fewer on small phones / landscape).
+    var fallbackLines = 3
     /// Holds the text back for a moment while a logo loads, so a disk-cached logo doesn't flash text first.
     @State private var fallbackDue = false
 
@@ -260,7 +427,7 @@ struct CinematicTitle: View {
         Text(item.title)
             .font(.system(size: fallbackSize ?? min(40, height * 0.42), weight: .heavy))
             .tracking(-0.5)
-            .lineLimit(3)
+            .lineLimit(fallbackLines)
             .minimumScaleFactor(0.5)
             .multilineTextAlignment(.leading)
             .frame(maxWidth: width, maxHeight: height, alignment: .bottomLeading)

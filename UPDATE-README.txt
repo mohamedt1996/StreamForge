@@ -23,6 +23,24 @@ LATEST CHANGES (on top of the notes below)
   Mac and Apple TV, with a safe-area fallback for phones newer than the table. It sizes the
   hero and title logo per device (SE/mini, standard, Plus/Pro Max/Air, iPad) and keeps the
   trailer at least 59 pt below the top on Dynamic Island phones in portrait.
+- iPhone detail trailer is pinned to the top: an exact 16:9 picture starting right under the
+  Dynamic Island / notch (no black gap above it); the title sits over the dark area below.
+  iPad keeps the centred fit; landscape fills the hero height.
+- Per-device layout (HeroMetrics in Theme.swift), driven by DeviceProfile:
+  - DeviceProfile now names every iPhone from 8/X to the 17 family (Dynamic Island / notch /
+    Home button), classifies screens as compact (SE, mini, 375 pt), regular (390–402 pt) or
+    large (Plus, Pro Max, Air), and logs e.g. "iPhone 16 Pro [iPhone17,1] …" in debug builds.
+  - The trailer starts under the window's own status bar / Dynamic Island inset, not the
+    page's safe area (which also counts the navigation bar and pushed it below the back button).
+  - Phone detail header height = island clearance + exact 16:9 trailer + room for the title,
+    meta row and genre chips, so the title only overlaps the bottom edge of the video and the
+    Play button stays on the first screen on every iPhone. The fade-to-page gradient starts
+    where the picture ends. Tagline is shown on iPad/Apple TV only.
+  - Title box, text-title font size and line count per device (compact 240×84 / 30 pt,
+    regular 290×100 / 36 pt, large 320×112 / 40 pt; landscape one line).
+  - Home billboard: 16:9 trailer pinned to the top, height from the live width; small phones
+    hide the overview line. iPad keeps its centred layout.
+  - XCTest checks the header math for SE, 13 mini, 15 Pro and 16 Pro Max, portrait and landscape.
 - Title shadow: a soft, wide dark halo plus a tight contact shadow on the logo/text (drawn once
   on the flattened title so it follows the logo's shape), and a light shadow on the meta row.
 - Tests updated: YouTube-only source tests; Tests/TrailerBridgeTests.cjs now exercises the

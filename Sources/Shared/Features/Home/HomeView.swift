@@ -359,16 +359,16 @@ struct HeroCarousel: View {
     @State private var enriched: [String: MediaItem] = [:]
     @State private var heroVisible = true
     @State private var pageVisible = false
+    /// Live width of the billboard (rotation, iPad split view); 0 until first measured.
+    @State private var heroWidth: CGFloat = 0
 
-    private var height: CGFloat {
-        #if os(tvOS)
-        return 620
-        #else
+    /// Billboard sizes for this device and width (see `HeroMetrics.home`).
+    private var metrics: HeroMetrics {
         let device = DeviceProfile.current
-        if device.kind == .pad || device.kind == .mac { return 340 }
-        return device.isSmallPhone ? 250 : device.isLargePhone ? 300 : 280
-        #endif
+        return HeroMetrics.home(device: device, width: heroWidth > 0 ? heroWidth : device.screen.width)
     }
+
+    private var height: CGFloat { metrics.height }
 
     private var trailerActive: Bool {
         pageVisible && heroVisible && scenePhase == .active
@@ -382,7 +382,7 @@ struct HeroCarousel: View {
         TabView(selection: $index) {
             ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                 Button { onSelect(enriched[item.id] ?? item) } label: {
-                    HeroSlide(item: enriched[item.id] ?? item, height: height, trailer: i == index ? trailer : nil)
+                    HeroSlide(item: enriched[item.id] ?? item, metrics: metrics, trailer: i == index ? trailer : nil)
                 }
                 .buttonStyle(.plain)
                 .tag(i)
@@ -394,6 +394,11 @@ struct HeroCarousel: View {
         .tabViewStyle(.page)
         #endif
         .frame(height: height)
+        .background(GeometryReader { geo in
+            Color.clear
+                .onAppear { heroWidth = geo.size.width }
+                .onChange(of: geo.size.width) { _, width in heroWidth = width }
+        })
         #if os(iOS)
         .overlay(alignment: .bottomTrailing) {
             // Outside the slide buttons so a tap mutes instead of opening the title.
@@ -429,7 +434,7 @@ struct HeroCarousel: View {
                 guard !Task.isCancelled else { return }
                 enriched[neighbour.id] = more.item
                 if let logo = more.item.logo {
-                    _ = try? await ImagePipeline.shared.image(for: ImageRequest(url: logo, processors: [.resize(width: HeroSlide.titleSize.width)]))
+                    _ = try? await ImagePipeline.shared.image(for: ImageRequest(url: logo, processors: [.resize(width: metrics.title.width)]))
                 }
             }
         }
@@ -458,7 +463,8 @@ struct HeroCarousel: View {
 
 struct HeroSlide: View {
     var item: MediaItem
-    var height: CGFloat
+    /// Device-specific billboard sizes (height, title box, trailer placement).
+    var metrics: HeroMetrics
     /// Set only on the visible slide.
     var trailer: TrailerController?
 
@@ -468,14 +474,21 @@ struct HeroSlide: View {
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(maxWidth: .infinity)
-                .frame(height: height)
+                .frame(height: metrics.height)
                 .overlay {
-                    if let trailer { TrailerSurface(controller: trailer) }
+                    // Phones: 16:9 trailer at the top, the title band below it; iPad: centred.
+                    if let trailer { TrailerSurface(controller: trailer, pinsToTop: metrics.pinsVideoToTop) }
                 }
                 .clipped()
-            LinearGradient(colors: [.clear, Theme.background.opacity(0.6), Theme.background], startPoint: .top, endPoint: .bottom)
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .clear, location: max(0, metrics.videoBottomFraction - 0.45)),
+                .init(color: Theme.background.opacity(0.6), location: max(0.05, metrics.videoBottomFraction - 0.12)),
+                .init(color: Theme.background, location: 1),
+            ], startPoint: .top, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
-                CinematicTitle(item: item, width: Self.titleSize.width, height: Self.titleSize.height)
+                CinematicTitle(item: item, width: metrics.title.width, height: metrics.title.height,
+                               fallbackSize: metrics.titleFont, fallbackLines: metrics.titleLines)
                     .scaleEffect(playing ? 0.86 : 1, anchor: .bottomLeading)
                     .animation(TrailerPolicy.titleAnimation, value: playing)
                 HStack(spacing: 8) {
@@ -486,8 +499,10 @@ struct HeroSlide: View {
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.secondaryText)
+                .lineLimit(1)
                 .metaShadow()
-                if let overview = item.overview {
+                // Small phones skip the overview so the title and meta never crowd the trailer.
+                if let overview = item.overview, !DeviceProfile.current.isSmallPhone {
                     Text(overview).font(.subheadline).foregroundStyle(.white.opacity(0.8)).lineLimit(2).frame(maxWidth: 560, alignment: .leading)
                         .metaShadow()
                         .opacity(playing ? 0 : 1)
@@ -497,19 +512,8 @@ struct HeroSlide: View {
             .padding(.horizontal, Theme.gutter)
             .padding(.bottom, 34)
         }
+        .frame(height: metrics.height)
+        .clipped()
         .contentShape(Rectangle())
-    }
-
-    /// Title logo box for the hero, per device.
-    static var titleSize: CGSize {
-        let device = DeviceProfile.current
-        switch device.kind {
-        case .tv: return CGSize(width: 480, height: 160)
-        case .pad, .mac: return CGSize(width: 320, height: 110)
-        default:
-            if device.isSmallPhone { return CGSize(width: 230, height: 80) }
-            if device.isLargePhone { return CGSize(width: 290, height: 100) }
-            return CGSize(width: 260, height: 90)
-        }
     }
 }

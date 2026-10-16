@@ -610,27 +610,42 @@ struct TrailerWebHost: UIViewRepresentable {
 }
 
 /// The video layer: goes over the artwork, fades in when frames flow and out at the end.
-/// `insets` keeps the picture (and YouTube's own top overlay) clear of the status bar /
-/// Dynamic Island when the hero runs edge to edge under it; the artwork still fills that area.
+///
+/// `insets` keeps the picture (and YouTube's own top bar) clear of the status bar / Dynamic
+/// Island when the hero runs edge to edge under it. With `pinsToTop` (iOS detail hero) the
+/// video is sized to exactly 16:9 and placed right under that inset instead of being centred in
+/// the whole hero, so there is no black gap between the Dynamic Island and the picture; the
+/// rest of the hero stays dark behind the title. When the hero is shorter than 16:9 (landscape)
+/// the video simply fills the available height.
 struct TrailerSurface: View {
     let controller: TrailerController
     var insets = EdgeInsets()
+    var pinsToTop = false
 
     var body: some View {
-        ZStack {
-            #if os(iOS)
-            // The iOS video is fitted (letterboxed), so the inset strip matches its black bars.
-            Color.black
-            #else
-            Color.clear
-            #endif
-            if let player = controller.player {
-                TrailerPlayerSurface(player: player)
-                    .padding(insets)
-            }
-            if let webView = controller.webView {
-                TrailerWebHost(webView: webView)
-                    .padding(insets)
+        GeometryReader { geo in
+            let width = max(1, geo.size.width - insets.leading - insets.trailing)
+            let available = max(1, geo.size.height - insets.top - insets.bottom)
+            let height = pinsToTop ? min(available, width * 9 / 16) : available
+            ZStack(alignment: .top) {
+                #if os(iOS)
+                // The iOS video is fitted, so everything around it matches its black bars.
+                Color.black
+                #else
+                Color.clear
+                #endif
+                ZStack {
+                    if let player = controller.player {
+                        TrailerPlayerSurface(player: player)
+                    }
+                    if let webView = controller.webView {
+                        TrailerWebHost(webView: webView)
+                    }
+                }
+                .frame(width: width, height: height)
+                .padding(.top, insets.top)
+                .padding(.leading, insets.leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: pinsToTop ? .topLeading : .center)
             }
         }
         .opacity(controller.isRevealed ? 1 : 0)

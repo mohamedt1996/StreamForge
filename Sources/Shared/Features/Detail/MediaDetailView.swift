@@ -148,15 +148,15 @@ struct MediaDetailView: View {
 
     // MARK: Layout
 
-    /// Sizes for one layout pass, computed from the container (portrait, landscape, split view).
+    /// Sizes for one layout pass, computed from the device and the container (portrait,
+    /// landscape, split view): see `HeroMetrics.detail`.
     private struct DetailLayout {
         /// Visible width (inside the horizontal safe area, so clear of the notch in landscape).
         var width: CGFloat
-        var heroHeight: CGFloat
-        var showsHeroPoster: Bool
+        var hero: HeroMetrics
         var episodeStillWidth: CGFloat
-        /// Status bar / Dynamic Island height above the edge-to-edge hero (0 in landscape and on tvOS).
-        var topInset: CGFloat = 0
+        var heroHeight: CGFloat { hero.height }
+        var showsHeroPoster: Bool { hero.showsPoster }
     }
 
     private var isRegularWidth: Bool {
@@ -170,22 +170,19 @@ struct MediaDetailView: View {
     private func detailLayout(for geo: GeometryProxy) -> DetailLayout {
         let width = max(geo.size.width, 1)
         #if os(tvOS)
-        return DetailLayout(width: width, heroHeight: 700, showsHeroPoster: false, episodeStillWidth: 320)
+        let hero = HeroMetrics.detail(device: DeviceProfile.current, container: geo.size, safeTop: 0, statusTop: 0, regularWidth: true)
+        return DetailLayout(width: width, hero: hero, episodeStillWidth: 320)
         #else
-        let isLandscape = geo.size.width > geo.size.height
-        let device = isLandscape ? DeviceProfile.current : DeviceProfile.current.refined(withPortraitSafeTop: geo.safeAreaInsets.top)
-        let isPad = device.kind == .pad || device.kind == .mac
-        let regular = isPad && isRegularWidth
-        // Hero height per device: SE/mini phones get a shorter hero so the actions stay on the
-        // first screen; in landscape (or any short window) it is capped further.
-        let base: CGFloat = regular ? 560 : device.isSmallPhone ? 380 : device.isLargePhone ? 470 : 440
-        let visibleHeight = geo.size.height + geo.safeAreaInsets.top
-        let hero = min(base, max(240, visibleHeight * 0.8))
+        let landscape = geo.size.width > geo.size.height
+        let safeTop = geo.safeAreaInsets.top
+        // Status bar / Dynamic Island only (not the navigation bar); 0 in landscape.
+        let statusTop = min(safeTop, DeviceProfile.windowSafeTop ?? safeTop)
+        let device = landscape ? DeviceProfile.current : DeviceProfile.current.refined(withPortraitSafeTop: statusTop)
+        let hero = HeroMetrics.detail(device: device, container: geo.size, safeTop: safeTop, statusTop: statusTop, regularWidth: isRegularWidth)
         // Narrow iPad split views get the phone-sized still; never more than ~40 % of the row.
-        let stillBase: CGFloat = regular ? 220 : 140
+        let stillBase: CGFloat = device.isPadLike && isRegularWidth ? 220 : device.isSmallPhone ? 120 : 140
         let still = min(stillBase, max(96, (width - 2 * Theme.gutter) * 0.42))
-        return DetailLayout(width: width, heroHeight: hero, showsHeroPoster: regular && hero >= 400, episodeStillWidth: still,
-                            topInset: device.topClearance(safeTop: geo.safeAreaInsets.top, isLandscape: isLandscape))
+        return DetailLayout(width: width, hero: hero, episodeStillWidth: still)
         #endif
     }
 
@@ -210,11 +207,11 @@ struct MediaDetailView: View {
                 .overlay {
                     // Muted trailer over the artwork (setting: Player → Autoplay trailers). The
                     // picture starts below the status bar / Dynamic Island so nothing hides under it.
-                    TrailerSurface(controller: trailer, insets: EdgeInsets(top: layout.topInset, leading: 0, bottom: 0, trailing: 0))
+                    TrailerSurface(controller: trailer, insets: EdgeInsets(top: layout.hero.videoTop, leading: 0, bottom: 0, trailing: 0),
+                                   pinsToTop: layout.hero.pinsVideoToTop)
                 }
                 .clipped()
-                .overlay(LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
-                                        startPoint: .top, endPoint: .bottom))
+                .overlay(heroGradient(layout.hero))
                 .overlay(LinearGradient(colors: [Theme.background.opacity(0.55), .clear],
                                         startPoint: .leading, endPoint: UnitPoint(x: 0.65, y: 0.5)))
                 .background(HeroVisibilityReader(height: layout.heroHeight, isVisible: $heroVisible))
@@ -228,13 +225,14 @@ struct MediaDetailView: View {
                 }
                 #endif
                 VStack(alignment: .leading, spacing: 12) {
-                    CinematicTitle(item: item, width: titleWidth(layout), height: titleHeight)
+                    CinematicTitle(item: item, width: titleWidth(layout), height: layout.hero.title.height,
+                                   fallbackSize: layout.hero.titleFont, fallbackLines: layout.hero.titleLines)
                         // A small, quick settle while the trailer plays (no slow shrink).
                         .scaleEffect(revealed ? 0.86 : 1, anchor: .bottomLeading)
                         .animation(TrailerPolicy.titleAnimation, value: revealed)
                     metaRow.metaShadow()
                     genreChips
-                    if let tagline = model.details.tagline, !tagline.isEmpty {
+                    if layout.hero.showsTagline, let tagline = model.details.tagline, !tagline.isEmpty {
                         Text(tagline).font(.subheadline.italic()).foregroundStyle(Theme.secondaryText)
                             .lineLimit(2)
                             .metaShadow()
@@ -251,34 +249,32 @@ struct MediaDetailView: View {
         .frame(width: layout.width, alignment: .bottomLeading)
     }
 
-    /// Room for the logo: capped, and never wider than what's left beside the poster and mute button.
+    /// Room for the logo: the device's title box, never wider than what's left beside the
+    /// poster and the mute button.
     private func titleWidth(_ layout: DetailLayout) -> CGFloat {
         var room = layout.width - 2 * Theme.gutter
         #if os(iOS)
         room -= 36 + 18 // mute / replay button
         #endif
         if layout.showsHeroPoster { room -= 170 + 18 }
-        return max(1, min(logoWidth, room))
+        return max(1, min(layout.hero.title.width, room))
     }
 
-    private var logoWidth: CGFloat {
-        #if os(tvOS)
-        return 600
-        #else
-        let device = DeviceProfile.current
-        if device.kind == .pad || device.kind == .mac { return isRegularWidth ? 420 : 290 }
-        return device.isSmallPhone ? 250 : device.isLargePhone ? 320 : 290
-        #endif
-    }
-
-    private var titleHeight: CGFloat {
-        #if os(tvOS)
-        return 200
-        #else
-        let device = DeviceProfile.current
-        if device.kind == .pad || device.kind == .mac { return isRegularWidth ? 150 : 104 }
-        return device.isSmallPhone ? 90 : device.isLargePhone ? 114 : 104
-        #endif
+    /// Light at the top (status bar legibility), clear over the trailer picture, then fading
+    /// into the page from just above where the picture ends, behind the title.
+    private func heroGradient(_ hero: HeroMetrics) -> LinearGradient {
+        guard hero.pinsVideoToTop else {
+            return LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
+                                  startPoint: .top, endPoint: .bottom)
+        }
+        let end = max(0.3, min(0.95, hero.videoBottomFraction))
+        return LinearGradient(stops: [
+            .init(color: .black.opacity(0.35), location: 0),
+            .init(color: .clear, location: min(0.18, end - 0.2)),
+            .init(color: .clear, location: end - 0.18),
+            .init(color: Theme.background.opacity(0.85), location: min(0.97, end + 0.06)),
+            .init(color: Theme.background, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
     }
 
     /// "2010 · 2h 28m · PG-13 · IMDb 8.8": one line, dropping rating badges before it would wrap.
