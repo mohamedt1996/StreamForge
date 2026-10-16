@@ -13,6 +13,11 @@ extension PlayerScreen {
                 centerButtons
                 Spacer()
                 bottomBar
+                    // Empty space between buttons must not reach the movie tap gesture.
+                    .background {
+                        Color.black.opacity(0.001).contentShape(Rectangle())
+                            .onTapGesture { showControls() }
+                    }
             }
             .padding(.horizontal, edgePadding)
             .padding(.vertical, 12)
@@ -144,6 +149,20 @@ extension PlayerScreen {
             } else {
                 timeline
             }
+            #if os(iOS)
+            ScrollView(.horizontal, showsIndicators: false) {
+                bottomActions
+            }
+            .frame(height: 48)
+            .simultaneousGesture(DragGesture().onChanged { _ in hideTask?.cancel() }
+                .onEnded { _ in scheduleHide() })
+            #else
+            bottomActions
+            #endif
+        }
+    }
+
+    var bottomActions: some View {
             HStack(spacing: 18) {
                 if model.isLive {
                     toolbarButton("list.bullet", "Channels") { panel = .channels }
@@ -171,7 +190,6 @@ extension PlayerScreen {
                 toolbarButton("chart.bar.xaxis", "Stats") { model.showStats.toggle() }
                 #endif
             }
-        }
     }
 
     // MARK: VOD timeline
@@ -293,7 +311,7 @@ extension PlayerScreen {
                         Label("Go Live", systemImage: "forward.end.fill")
                             .font(.caption.weight(.bold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PlayerControlButtonStyle(onPress: { hideTask?.cancel() }, onRelease: { scheduleHide() }))
                     .foregroundStyle(Theme.live)
                 } else {
                     LiveBadge()
@@ -316,7 +334,7 @@ extension PlayerScreen {
         #if os(tvOS)
         .buttonStyle(.plain)
         #else
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerControlButtonStyle(onPress: { hideTask?.cancel() }, onRelease: { scheduleHide() }))
         .foregroundStyle(.white)
         #endif
     }
@@ -326,10 +344,10 @@ extension PlayerScreen {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.body.weight(.semibold))
-                .frame(width: 40, height: 44)
+                .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerControlButtonStyle(onPress: { hideTask?.cancel() }, onRelease: { scheduleHide() }))
         .foregroundStyle(.white)
     }
 
@@ -341,11 +359,24 @@ extension PlayerScreen {
             #if os(tvOS)
             Label(label, systemImage: symbol).font(.callout.weight(.semibold))
             #else
-            Image(systemName: symbol).font(.title3).frame(width: 36, height: 36)
+            Image(systemName: symbol).font(.title3).frame(width: 48, height: 48).contentShape(Rectangle())
             #endif
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerControlButtonStyle(onPress: { hideTask?.cancel() }, onRelease: { scheduleHide() }))
         .foregroundStyle(.white)
         .accessibilityLabel(label)
+    }
+}
+
+/// Observe button presses without installing a competing tap recognizer.
+private struct PlayerControlButtonStyle: ButtonStyle {
+    let onPress: () -> Void
+    let onRelease: () -> Void
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.65 : 1)
+            .onChange(of: configuration.isPressed) { _, pressed in
+                if pressed { onPress() } else { onRelease() }
+            }
     }
 }

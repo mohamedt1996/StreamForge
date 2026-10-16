@@ -4,8 +4,9 @@ import SwiftUI
 extension PlayerScreen {
     @ViewBuilder
     func panelView(_ panel: PlayerPanel) -> some View {
+        GeometryReader { geometry in
         HStack {
-            Spacer()
+            Spacer(minLength: 0)
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text(panelTitle(panel)).font(.headline)
@@ -22,24 +23,25 @@ extension PlayerScreen {
                         case .settings: settingsPanel
                         case .channels: channelPanel
                         case .chapters: chapterPanel
+                        case .report: reportPanel
                         }
                     }
                     .padding(.horizontal, 10)
                     .padding(.bottom, 20)
                 }
             }
-            .frame(width: panelWidth)
+            .frame(width: min(panelWidth, geometry.size.width))
             .frame(maxHeight: .infinity)
             .background(.ultraThinMaterial)
         }
-        .ignoresSafeArea()
+        }
     }
 
     var panelWidth: CGFloat {
         #if os(tvOS)
         return 640
         #else
-        return min(380, UIScreen.main.bounds.width * 0.9)
+        return 420
         #endif
     }
 
@@ -50,6 +52,7 @@ extension PlayerScreen {
         case .settings: return "Playback"
         case .channels: return "Channels"
         case .chapters: return "Chapters"
+        case .report: return "Playback report"
         }
     }
 
@@ -200,9 +203,32 @@ extension PlayerScreen {
             optionRow("Jump to live", subtitle: model.behindLive > 3 ? "−\(model.behindLive.clockText) behind" : "You're live",
                       selected: false) { model.goLive() }
         }
+        sectionLabel("Help")
+        if model.canTryAnotherSource {
+            optionRow(model.isFindingAlternative ? "Finding another source…" : "Try another source", selected: false) {
+                model.tryAnotherSource()
+            }.disabled(model.isFindingAlternative)
+        }
+        optionRow("Report a playback problem", selected: false) { panel = .report }
         sectionLabel("Info")
         optionRow("Show statistics", selected: model.showStats) { model.showStats.toggle() }
-        optionRow("Source: \(request.source.provider)", subtitle: request.source.title, selected: false) {}
+        optionRow("Source: \(model.request.source.provider)", subtitle: model.request.source.title, selected: false) {}
+    }
+
+    var reportPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Share this report with a description of what happened. It excludes stream addresses, credentials, media titles and raw error messages.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Text(model.playbackReport).font(.caption.monospaced())
+                #if os(iOS)
+                .textSelection(.enabled)
+                #endif
+            #if os(iOS)
+            Button("Copy report") { UIPasteboard.general.string = model.playbackReport; flash("Report copied") }
+                .buttonStyle(.borderedProminent)
+            ShareLink(item: model.playbackReport) { Label("Share report", systemImage: "square.and.arrow.up") }
+            #endif
+        }.padding(10)
     }
 
     func markerIntroSubtitle(pending: Double?, manual: IntroMemory.Manual?) -> String? {

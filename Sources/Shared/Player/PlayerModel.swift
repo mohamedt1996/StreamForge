@@ -147,6 +147,9 @@ final class PlayerModel: MPVPlayerDelegate {
     private(set) var statusText: String?
     private(set) var errorText: String?
     private(set) var ended = false
+    private(set) var isFindingAlternative = false
+    @ObservationIgnored private var alternativeTask: Task<Void, Never>?
+    @ObservationIgnored private var attemptedSources: Set<String> = []
     private(set) var isHDR = false
     private(set) var speed: Double = 1
 
@@ -352,6 +355,8 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     func stop() {
+        alternativeTask?.cancel()
+        isFindingAlternative = false
         loadGeneration += 1
         #if os(iOS)
         stopPictureInPicture()
@@ -386,6 +391,11 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     private func load(_ req: PlaybackRequest) {
+        alternativeTask?.cancel()
+        alternativeTask = nil
+        isFindingAlternative = false
+        if req.item.id != request.item.id || req.episode != request.episode { attemptedSources = [] }
+        attemptedSources.insert(req.source.id)
         request = req
         resetState()
         loadGeneration += 1
@@ -841,6 +851,68 @@ final class PlayerModel: MPVPlayerDelegate {
         }
     }
 
+    var canTryAnotherSource: Bool {
+        !isLive && request.catchup == nil && (request.item.type == .movie || request.item.type == .series)
+    }
+
+    /// Explicit fallback after retries fail; never repeatedly cycles through failed sources.
+    func tryAnotherSource() {
+        guard canTryAnotherSource, !isFindingAlternative else { return }
+        isFindingAlternative = true
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        let generation = loadGeneration
+        let original = request
+        let resumeAt = hasStarted ? max(0, position - 2) : (request.startPosition ?? resumePosition(for: request))
+        attemptedSources.insert(original.source.id)
+        alternativeTask = Task { [weak self] in
+            guard let self else { return }
+            let sources = SourcesModel(item: original.item, episode: original.episode)
+            await sources.load()
+            guard !Task.isCancelled, generation == self.loadGeneration else { return }
+            self.isFindingAlternative = false
+            guard let replacement = sources.sorted.first(where: {
+                if case .external = $0.kind { return false }
+                return !self.attemptedSources.contains($0.id) && $0.kind != original.source.kind
+            }) else {
+                self.errorText = "No other playable source is available. Try again later or check your providers."
+                return
+            }
+            self.saveProgress(force: true)
+            var next = original
+            next.source = replacement
+            next.startPosition = resumeAt
+            self.load(next)
+        }
+    }
+
+    /// Only fixed labels, booleans and numeric measurements leave the player in a report.
+    var playbackReport: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+        let kind: String
+        switch request.source.kind {
+        case .direct: kind = "Direct"
+        case .torrent: kind = "Torrent"
+        case .dispatcharrRecording: kind = "Recording"
+        case .external: kind = "External"
+        }
+        return """
+        StreamForge playback report
+        App: \(version) (\(build))
+        OS: \(UIDevice.current.systemName) \(UIDevice.current.systemVersion)
+        Device class: \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : (UIDevice.current.userInterfaceIdiom == .tv ? "TV" : "Phone"))
+        Source type: \(kind)
+        Live: \(isLive), started: \(hasStarted), paused: \(isPaused)
+        Buffering: \(isBuffering), error present: \(errorText != nil)
+        Position: \(position.isFinite ? String(format: "%.1f", position) : "unknown")
+        Duration: \(duration.isFinite ? String(format: "%.1f", duration) : "unknown")
+        Recovery attempts: \(recoveryAttempts)
+        Video size: \(player.int("video-params/w") ?? 0) × \(player.int("video-params/h") ?? 0)
+        Audio tracks: \(audioTracks.count), subtitle tracks: \(subtitleTracks.count)
+        """
+    }
+
     // MARK: Episodes / channels
 
     func playNextEpisode() {
@@ -1119,6 +1191,7 @@ final class PlayerModel: MPVPlayerDelegate {
         guard force || abs(position - lastSavedPosition) >= 10 else { return }
         lastSavedPosition = position
         LibraryStore.shared.updateProgress(item: request.item, episode: request.episode, position: position, duration: duration)
+        LibraryStore.shared.queueNextEpisode(item: request.item, after: request.episode, next: request.upcoming.first)
     }
 
     private func scrobble(_ action: TraktService.ScrobbleAction) {
@@ -1292,8 +1365,8 @@ final class PlayerModel: MPVPlayerDelegate {
             healthyTicks = 0
         }
 
-        // Stall watchdog: only after returning from the background, only while the user wants it to play.
-        guard unhealthySinceBackground, !isInBackground, recoveryTask == nil, !isResolving, !handoffActive, !pipBusy,
+        // Stall watchdog: only while foreground playback is expected to advance.
+        guard !isInBackground, recoveryTask == nil, !isFindingAlternative, !isResolving, !handoffActive, !pipBusy,
               !userPaused, !pausedByInterruption, !ended, errorText == nil, resolvedURL != nil,
               hasStarted || isLive else { return }
         let limit: TimeInterval = isLive ? 15 : (resolvedTorrentHash != nil ? 30 : 20)
@@ -1307,7 +1380,7 @@ final class PlayerModel: MPVPlayerDelegate {
     /// (a timeshift buffer starts over). Keeps the user's pause state. After
     /// `maxRecoveryAttempts` failures in a row the error is shown.
     private func scheduleRecovery(reason: String, delay: Double? = nil) {
-        guard recoveryTask == nil, !handoffActive else { return }
+        guard recoveryTask == nil, !handoffActive, !isFindingAlternative else { return }
         recoveryAttempts += 1
         guard recoveryAttempts <= Self.maxRecoveryAttempts else {
             isBuffering = false
