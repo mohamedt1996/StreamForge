@@ -54,6 +54,15 @@ final class ServerSync {
     private(set) var pairingError: String?
     private(set) var devices: [SyncDevice] = []
     private(set) var isSyncingNow = false
+    /// Admin-managed items the user removed on this device that sync brought back: the app asks
+    /// "Restore from sync" / "Continue without it" (see ManagedConfig.swift).
+    var restorePrompt: [ManagedItem] = []
+    /// Admin-managed settings the user just changed: the app asks before taking them over.
+    var settingPrompt: [ManagedItem] = []
+    /// The restore prompt was dismissed without an answer; asked again when sync brings news.
+    var restorePromptSnoozed = false
+    /// Managed items this account continues without (restorable from Settings → Sync Server).
+    var dismissedItems: [ManagedItem] = []
 
     // MARK: Persistent sync state
 
@@ -71,6 +80,15 @@ final class ServerSync {
         var order: Int?
     }
 
+    /// A managed record held back from the stores until the user answers the restore prompt.
+    struct HeldRecord: Codable {
+        var collection: String
+        var id: String
+        var data: SyncJSON?
+        var updatedAt: Int64
+        var rev: Int64
+    }
+
     struct State: Codable {
         var initialized = false
         var lastRev: Int64 = 0
@@ -82,10 +100,27 @@ final class ServerSync {
         var pendingAddons: [String: PendingAddon] = [:]
         /// Dispatcharr server whose favorite channels the known map describes.
         var channelServer: String?
+        /// Record keys (collection + "\n" + id) the server admin manages for this user.
+        var managed: Set<String> = []
+        /// Values of managed settings (to put back when the user keeps the managed value).
+        var managedSettings: [String: SyncJSON] = [:]
+        /// Active dismissals: "<collection>|<id>" → dismissedAt (ms). Synced as `dismissed` records.
+        var dismissed: [String: Int64] = [:]
+        /// Managed servers/addons removed on this device without a dismissal (record keys).
+        var locallyRemoved: Set<String> = []
+        /// Managed records sync brought back after a local removal, waiting for the user's answer.
+        var held: [String: HeldRecord] = [:]
+        /// The managed set is complete (false for state saved before it existed: pull again from 0).
+        var managedTracked = false
+        /// Display names of managed items (record key → name), for prompts and dismissed items.
+        var managedNames: [String: String] = [:]
 
         init() {}
 
-        enum CodingKeys: String, CodingKey { case initialized, lastRev, known, legacyWatched, pendingAddons, channelServer }
+        enum CodingKeys: String, CodingKey {
+            case initialized, lastRev, known, legacyWatched, pendingAddons, channelServer
+            case managed, managedSettings, dismissed, locallyRemoved, held, managedTracked, managedNames
+        }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -95,6 +130,13 @@ final class ServerSync {
             legacyWatched = (try? c.decodeIfPresent([String: String].self, forKey: .legacyWatched)) ?? [:]
             pendingAddons = (try? c.decodeIfPresent([String: PendingAddon].self, forKey: .pendingAddons)) ?? [:]
             channelServer = try? c.decodeIfPresent(String.self, forKey: .channelServer)
+            managed = (try? c.decodeIfPresent(Set<String>.self, forKey: .managed)) ?? []
+            managedSettings = (try? c.decodeIfPresent([String: SyncJSON].self, forKey: .managedSettings)) ?? [:]
+            dismissed = (try? c.decodeIfPresent([String: Int64].self, forKey: .dismissed)) ?? [:]
+            locallyRemoved = (try? c.decodeIfPresent(Set<String>.self, forKey: .locallyRemoved)) ?? []
+            held = (try? c.decodeIfPresent([String: HeldRecord].self, forKey: .held)) ?? [:]
+            managedTracked = (try? c.decodeIfPresent(Bool.self, forKey: .managedTracked)) ?? false
+            managedNames = (try? c.decodeIfPresent([String: String].self, forKey: .managedNames)) ?? [:]
         }
     }
 
@@ -108,6 +150,8 @@ final class ServerSync {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var pairTask: Task<Void, Never>?
     @ObservationIgnored private var pushing = false
+    /// True while server records are written into the stores (their change callbacks aren't edits).
+    @ObservationIgnored var applyingRemote = false
 
     private static let tokenKey = "serversync.token"
     private static let stateFile = "serversync-state.json"
@@ -198,6 +242,14 @@ final class ServerSync {
         }
         CloudSync.shared.pauseForServerSync()
         prepareFirstSyncIfNeeded()
+        if state.initialized, !state.managedTracked {
+            // State from before managed records were tracked: pull everything once more to learn
+            // which records are managed (records already applied are skipped by their updatedAt).
+            state.lastRev = 0
+            state.managedTracked = true
+            saveNow()
+        }
+        refreshManagedPrompts()
         Task { await refreshMe() }
         if foreground { startLoop() }
         if !outbox.isEmpty { schedulePush(delay: 1) }
@@ -221,7 +273,9 @@ final class ServerSync {
 
     /// Any store changed; scans and pushes about 3 s later (throttled, not reset by further changes).
     func noteLocalChange() {
-        guard isSignedIn, scanTask == nil else { return }
+        guard isSignedIn else { return }
+        checkManagedSettingEdits()
+        guard scanTask == nil else { return }
         scanTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard let self else { return }
@@ -287,12 +341,19 @@ final class ServerSync {
     /// First sign-in (or lost state): queue every local record, then pull everything from rev 0.
     private func prepareFirstSyncIfNeeded(previous: [String: Known] = [:]) {
         guard isSignedIn, !state.initialized else { return }
-        let legacyWatched = state.legacyWatched
-        let pendingAddons = state.pendingAddons
+        let old = state
         state = State()
-        // Resolutions that keep record ids stable, and addons still waiting to be installed.
-        state.legacyWatched = legacyWatched
-        state.pendingAddons = pendingAddons
+        // Resolutions that keep record ids stable, addons still waiting to be installed, and what
+        // this device knows about managed records and dismissals.
+        state.legacyWatched = old.legacyWatched
+        state.pendingAddons = old.pendingAddons
+        state.managed = old.managed
+        state.managedSettings = old.managedSettings
+        state.dismissed = old.dismissed
+        state.locallyRemoved = old.locallyRemoved
+        state.held = old.held
+        state.managedNames = old.managedNames
+        state.managedTracked = true
         outbox = [:]
         scan(baseline: true, previous: previous)
         state.initialized = true
@@ -386,7 +447,7 @@ final class ServerSync {
 
     // MARK: Push
 
-    private func schedulePush(delay: Double) {
+    func schedulePush(delay: Double) {
         guard isSignedIn, pushTask == nil else { return }
         pushTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
@@ -494,6 +555,10 @@ final class ServerSync {
             let h = Self.fingerprint(rec.data)
             let known = state.known[key]
             if let known, !known.d, known.h == h { continue }
+            // A changed managed setting waits for the user's answer (settingPrompt); the server
+            // would refuse it anyway.
+            if !baseline, rec.collection == "settings", isManagedForUser(key), known != nil { continue }
+            if state.locallyRemoved.contains(key) { state.locallyRemoved.remove(key) }
             var t: Int64
             if baseline {
                 t = rec.stamp ?? 1
@@ -512,6 +577,10 @@ final class ServerSync {
                 let t = max(now, known.t + 1)
                 state.known[key] = Known(h: "", t: t, d: true)
                 let parts = Self.splitKey(key)
+                // Removed here without "Remove from this account": if sync brings it back, ask.
+                if parts.collection == "servers" || parts.collection == "addons", isManagedForUser(key) {
+                    state.locallyRemoved.insert(key)
+                }
                 outbox[key] = OutboxEntry(collection: parts.collection, id: parts.id, data: nil, deleted: true, updatedAt: t)
                 queued += 1
             }
@@ -577,7 +646,7 @@ final class ServerSync {
 
     // MARK: Persistence
 
-    private func saveSoon() {
+    func saveSoon() {
         guard saveTask == nil else { return }
         saveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -661,6 +730,10 @@ final class ServerSync {
         FileStore.remove(Self.stateFile)
         FileStore.remove(Self.outboxFile)
         pendingCount = 0
+        restorePrompt = []
+        settingPrompt = []
+        dismissedItems = []
+        restorePromptSnoozed = false
         devices = []
         deviceID = nil
         scopes = []

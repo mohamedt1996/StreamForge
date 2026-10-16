@@ -61,7 +61,7 @@ class PlayerActivity : ComponentActivity() {
     private val supportsPip: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
-            (resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) != Configuration.UI_MODE_TYPE_TELEVISION
+            !com.mohamedt.streamforge.ui.DeviceInput.isTv(this)
 
     fun enterPip() {
         if (!supportsPip) return
@@ -81,7 +81,10 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val c = controller ?: return super.onKeyDown(keyCode, event)
-        interaction = System.currentTimeMillis()
+        // Back and volume keys must not pop the controls up (Back would then only hide them again).
+        val passive = keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
+        if (!passive) interaction = System.currentTimeMillis()
         val step = Settings.values.seekStep * 1000L
         when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> { c.togglePause(); return true }
@@ -99,12 +102,28 @@ class PlayerActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        com.mohamedt.streamforge.ui.DeviceInput.onKey(event)
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        com.mohamedt.streamforge.ui.DeviceInput.onTouch(ev)
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // singleTask: a second Player.play() (e.g. while in PiP) lands here instead of onCreate.
         val request = Player.pending ?: return
         Player.pending = null
         controller?.open(request)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Back from Home / another app: reload whatever died meanwhile (stays paused if it was paused).
+        controller?.onForeground()
     }
 
     override fun onStop() {

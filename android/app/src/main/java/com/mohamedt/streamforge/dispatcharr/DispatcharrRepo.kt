@@ -10,6 +10,7 @@ import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.core.TitleCleaner
 import com.mohamedt.streamforge.sync.RemoteSync
 import java.security.SecureRandom
+import java.text.Normalizer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +40,52 @@ private data class DiskCache(
     val savedAt: Long,
 )
 
+/** O(1) lookups behind matchMovie / matchSeries (detail pages, sources, person and collection screens). */
+private class MatchIndex<T>(
+    val byTmdb: Map<Int, T> = emptyMap(),
+    val byImdb: Map<String, T> = emptyMap(),
+    /** normalizedTitle(cleaned title) → (year, item), in library order. */
+    val byTitle: Map<String, List<Pair<Int?, T>>> = emptyMap(),
+)
+
+/** Lower-case letters and digits only, accents folded: "Amélie" / "amelie", "Spider-Man" / "Spiderman". */
+internal fun normalizedTitle(raw: String): String {
+    val decomposed = Normalizer.normalize(raw.lowercase(), Normalizer.Form.NFD)
+    val sb = StringBuilder(decomposed.length)
+    for (ch in decomposed) if (ch.isLetterOrDigit()) sb.append(ch)
+    return sb.toString()
+}
+
+/** The live lineup, ready to publish (built on Dispatchers.Default). */
+private class LiveBuild(
+    val channels: List<Channel>,
+    val byCategory: Map<String, List<Channel>>,
+    val categories: List<Category>,
+    val index: Map<Long, Channel>,
+)
+
+/** The VOD library and everything derived from it, ready to publish (built on Dispatchers.Default). */
+private class VodBuild(
+    val movies: List<Movie>,
+    val series: List<Series>,
+    val movieItems: List<MediaItem>,
+    val seriesItems: List<MediaItem>,
+    val moviesByCategory: Map<String, List<MediaItem>>,
+    val seriesByCategory: Map<String, List<MediaItem>>,
+    val recentMovies: List<MediaItem>,
+    val recentSeries: List<MediaItem>,
+    val topMovies: List<MediaItem>,
+    val topSeries: List<MediaItem>,
+    val movieCategories: List<Category>,
+    val seriesCategories: List<Category>,
+    val movieSections: List<CategorySection>,
+    val seriesSections: List<CategorySection>,
+    val movieGenres: List<String>,
+    val seriesGenres: List<String>,
+    val movieIndex: MatchIndex<Movie>,
+    val seriesIndex: MatchIndex<Series>,
+)
+
 /** Everything loaded from the active Dispatcharr server, cached on disk for an instant start. */
 object DispatcharrRepo {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -62,15 +109,49 @@ object DispatcharrRepo {
     var liveState by mutableStateOf<LoadState>(LoadState.Idle); private set
     var vodState by mutableStateOf<LoadState>(LoadState.Idle); private set
     var lastRefresh by mutableStateOf(0L); private set
+    /** Newest 30 movies / series (by added / last update), for Home and the VOD shelves. */
+    var recentMovies by mutableStateOf<List<MediaItem>>(emptyList()); private set
+    var recentSeries by mutableStateOf<List<MediaItem>>(emptyList()); private set
+    /** Best rated (7+) 30 movies / series. */
+    var topMovies by mutableStateOf<List<MediaItem>>(emptyList()); private set
+    var topSeries by mutableStateOf<List<MediaItem>>(emptyList()); private set
+
+    // Derived lookups, published together with the lists above (state, so composition readers recompose).
+    private var moviesByCategory by mutableStateOf<Map<String, List<MediaItem>>>(emptyMap())
+    private var seriesByCategory by mutableStateOf<Map<String, List<MediaItem>>>(emptyMap())
+    private var channelIndex by mutableStateOf<Map<Long, Channel>>(emptyMap())
+    private var movieCategoryNames by mutableStateOf<Map<String, String>>(emptyMap())
+    private var seriesCategoryNames by mutableStateOf<Map<String, String>>(emptyMap())
+    private var liveCategoryNames by mutableStateOf<Map<String, String>>(emptyMap())
+    private var movieIndex by mutableStateOf(MatchIndex<Movie>())
+    private var seriesIndex by mutableStateOf(MatchIndex<Series>())
 
     private var rawMovies: List<Movie> = emptyList()
     private var rawSeries: List<Series> = emptyList()
+    // Generations: a build that finishes after a newer load (or a server switch) is dropped. Cached data
+    // never replaces data that already came from the network.
+    private var liveGen = 0
+    private var liveFromNetwork = false
+    private var vodGen = 0
+    private var vodFromNetwork = false
     private var rest: DispatcharrRest? = null
     private var credentialsSyncedFor: String? = null
 
     val active: Server? get() = servers.firstOrNull { it.id == activeId } ?: servers.firstOrNull()
     val client: XtreamClient? get() = active?.let { XtreamClient(it, if (it.usesRestStreaming) restClient() else null) }
     val isConfigured: Boolean get() = active != null
+
+    /** Resolve retained/synced items against their origin, not the current browsing server. */
+    fun playbackClient(item: MediaItem): XtreamClient? {
+        if (!item.origin.kind.startsWith("xc-")) return client
+        val server = item.origin.serverId?.let { id -> servers.firstOrNull { it.id == id } }
+            ?: if (item.origin.serverId == null) {
+                // Older records stored only the first eight UUID characters in the item ID.
+                val prefix = item.id.split(":").getOrNull(1)
+                servers.filter { prefix != null && it.id.take(8) == prefix }.singleOrNull()
+            } else null
+        return server?.let { XtreamClient(it, if (it.usesRestStreaming && it.hasRest) DispatcharrRest(it) else null) }
+    }
 
     fun restClient(): DispatcharrRest? {
         val s = active ?: return null
@@ -205,6 +286,12 @@ object DispatcharrRepo {
         movieCategories = emptyList(); seriesCategories = emptyList(); movieItems = emptyList(); seriesItems = emptyList()
         movieSections = emptyList(); seriesSections = emptyList(); movieGenres = emptyList(); seriesGenres = emptyList()
         rawMovies = emptyList(); rawSeries = emptyList()
+        recentMovies = emptyList(); recentSeries = emptyList(); topMovies = emptyList(); topSeries = emptyList()
+        moviesByCategory = emptyMap(); seriesByCategory = emptyMap(); channelIndex = emptyMap()
+        movieCategoryNames = emptyMap(); seriesCategoryNames = emptyMap(); liveCategoryNames = emptyMap()
+        movieIndex = MatchIndex(); seriesIndex = MatchIndex()
+        liveGen++; vodGen++
+        liveFromNetwork = false; vodFromNetwork = false
         liveState = LoadState.Idle; vodState = LoadState.Idle
     }
 
@@ -222,10 +309,15 @@ object DispatcharrRepo {
             val vod = async(Dispatchers.IO) {
                 runCatching { listOf(c.vodCategories(), c.seriesCategories()) to (c.movies() to c.series()) }
             }
-            live.await().onSuccess { (cats, ch) -> applyLive(cats, ch); liveState = LoadState.Loaded }
+            val liveResult = live.await()
+            if (active?.id != server.id) return@launch
+            liveResult.onSuccess { (cats, ch) -> if (applyLive(cats, ch)) liveState = LoadState.Loaded }
                 .onFailure { if (channels.isEmpty()) liveState = LoadState.Failed(loadError(it, c, "Couldn't load channels")) }
-            vod.await().onSuccess { (cats, data) -> applyVod(cats[0], data.first, cats[1], data.second); vodState = LoadState.Loaded }
-                .onFailure { if (movieItems.isEmpty()) vodState = LoadState.Failed(loadError(it, c, "Couldn't load the library")) }
+            val vodResult = vod.await()
+            if (active?.id != server.id) return@launch
+            vodResult.onSuccess { (cats, data) -> if (applyVod(cats[0], data.first, cats[1], data.second)) vodState = LoadState.Loaded }
+                .onFailure { if (movieItems.isEmpty() && seriesItems.isEmpty()) vodState = LoadState.Failed(loadError(it, c, "Couldn't load the library")) }
+            if (active?.id != server.id) return@launch
             lastRefresh = System.currentTimeMillis()
             saveDiskCache()
             GuideRepo.refreshIfStale()
@@ -241,12 +333,28 @@ object DispatcharrRepo {
             e.message ?: fallback
         }
 
-    private fun applyLive(cats: List<Category>, list: List<Channel>) {
+    /**
+     * Filters, sorts and groups the lineup on Dispatchers.Default and publishes it on Main. False when
+     * the result was dropped (a newer load or a server switch superseded it).
+     */
+    private suspend fun applyLive(cats: List<Category>, list: List<Channel>, fromCache: Boolean = false): Boolean {
+        val gen = if (fromCache) liveGen else ++liveGen
         val hideAdult = Settings.values.hideAdult
+        val built = withContext(Dispatchers.Default) { buildLive(cats, list, hideAdult) }
+        if (gen != liveGen || (fromCache && liveFromNetwork)) return false
+        channels = built.channels
+        channelsByCategory = built.byCategory
+        liveCategories = built.categories
+        channelIndex = built.index
+        liveCategoryNames = built.categories.associate { it.id to it.name }
+        if (!fromCache) liveFromNetwork = true
+        return true
+    }
+
+    private fun buildLive(cats: List<Category>, list: List<Channel>, hideAdult: Boolean): LiveBuild {
         // Channel ids are used as LazyColumn keys everywhere: a duplicate would crash the list.
         val visible = list.distinctBy { it.id }.filter { !(hideAdult && it.isAdult) }
             .sortedWith(compareBy<Channel> { it.number ?: Int.MAX_VALUE }.thenBy { it.name })
-        channels = visible
         val grouped = visible.groupBy { it.categoryId }.toMutableMap()
         val known = cats.filter { grouped[it.id]?.isNotEmpty() == true }.toMutableList()
         val knownIds = known.map { it.id }.toSet()
@@ -255,50 +363,116 @@ object DispatcharrRepo {
             grouped["__other"] = orphans
             known.add(Category("__other", "Other"))
         }
-        channelsByCategory = grouped
-        liveCategories = known
+        val index = HashMap<Long, Channel>(visible.size * 2)
+        for (ch in visible) index[ch.id] = ch
+        return LiveBuild(visible, grouped, known, index)
     }
 
-    private suspend fun applyVod(mc: List<Category>, movies: List<Movie>, sc: List<Category>, series: List<Series>) {
-        val sid = active?.id ?: return
+    /** Builds the library (dedupe, items, per-category slices, shelves, match indexes) off the main thread. */
+    private suspend fun applyVod(mc: List<Category>, movies: List<Movie>, sc: List<Category>, series: List<Series>, fromCache: Boolean = false): Boolean {
+        val sid = active?.id ?: return false
+        val gen = if (fromCache) vodGen else ++vodGen
         val hideAdult = Settings.values.hideAdult
-        val result = withContext(Dispatchers.Default) {
-            // Same stream id can be listed under several categories; item ids must stay unique (lazy keys).
-            val m = dedupeMovies(movies.distinctBy { it.id }.filter { !(hideAdult && it.isAdult) })
-            val s = dedupeSeries(series.distinctBy { it.id })
-            val mItems = m.map { it.toItem(sid) }
-            val sItems = s.map { it.toItem(sid) }
-            val mCats = m.map { it.categoryId }.toSet()
-            val sCats = s.map { it.categoryId }.toSet()
-            Triple(m to s, mItems to sItems, mc.filter { it.id in mCats } to sc.filter { it.id in sCats })
-        }
-        rawMovies = result.first.first
-        rawSeries = result.first.second
-        movieItems = result.second.first
-        seriesItems = result.second.second
-        movieCategories = result.third.first
-        seriesCategories = result.third.second
-        movieSections = sections(movieCategories)
-        seriesSections = sections(seriesCategories)
-        movieGenres = genres(rawMovies.mapNotNull { it.genre })
-        seriesGenres = genres(rawSeries.mapNotNull { it.genre })
+        val b = withContext(Dispatchers.Default) { buildVod(sid, mc, movies, sc, series, hideAdult) }
+        if (gen != vodGen || (fromCache && vodFromNetwork) || active?.id != sid) return false
+        rawMovies = b.movies
+        rawSeries = b.series
+        movieIndex = b.movieIndex
+        seriesIndex = b.seriesIndex
+        moviesByCategory = b.moviesByCategory
+        seriesByCategory = b.seriesByCategory
+        recentMovies = b.recentMovies
+        recentSeries = b.recentSeries
+        topMovies = b.topMovies
+        topSeries = b.topSeries
+        movieCategories = b.movieCategories
+        seriesCategories = b.seriesCategories
+        movieCategoryNames = b.movieCategories.associate { it.id to it.name }
+        seriesCategoryNames = b.seriesCategories.associate { it.id to it.name }
+        movieSections = b.movieSections
+        seriesSections = b.seriesSections
+        movieGenres = b.movieGenres
+        seriesGenres = b.seriesGenres
+        movieItems = b.movieItems
+        seriesItems = b.seriesItems
+        if (!fromCache) vodFromNetwork = true
+        return true
     }
 
-    /** Providers list the same film in several categories; keep one per id or title+year. */
-    private fun dedupeMovies(list: List<Movie>): List<Movie> {
-        val seen = HashSet<String>()
-        return list.filter { m ->
-            val key = m.tmdbId?.let { "tmdb$it" } ?: m.imdbId?.takeIf { it.isNotEmpty() }
-                ?: TitleCleaner.clean(m.name).let { (t, y) -> "${t.lowercase()}|${y ?: m.year ?: 0}" }
-            seen.add(key)
+    /** Pure: runs on Dispatchers.Default. Every title is cleaned (regex) exactly once. */
+    private fun buildVod(sid: String, mc: List<Category>, movies: List<Movie>, sc: List<Category>, series: List<Series>, hideAdult: Boolean): VodBuild {
+        // Same stream id can be listed under several categories; item ids must stay unique (lazy keys).
+        // Providers also list the same film in several categories: keep one per id or title+year.
+        val mVisible = movies.distinctBy { it.id }.filter { !(hideAdult && it.isAdult) }
+        val m = ArrayList<Movie>(mVisible.size)
+        val mClean = ArrayList<Pair<String, Int?>>(mVisible.size)
+        val seenM = HashSet<String>()
+        for (mv in mVisible) {
+            val c = TitleCleaner.clean(mv.name)
+            val key = mv.tmdbId?.let { "tmdb$it" } ?: mv.imdbId?.takeIf { it.isNotEmpty() }
+                ?: "${c.first.lowercase()}|${c.second ?: mv.year ?: 0}"
+            if (seenM.add(key)) { m += mv; mClean += c }
         }
+        val sVisible = series.distinctBy { it.id }
+        val s = ArrayList<Series>(sVisible.size)
+        val sClean = ArrayList<Pair<String, Int?>>(sVisible.size)
+        val seenS = HashSet<String>()
+        for (sv in sVisible) {
+            val c = TitleCleaner.clean(sv.name)
+            if (seenS.add(sv.tmdbId?.let { "tmdb$it" } ?: "${c.first.lowercase()}|${sv.year ?: 0}")) { s += sv; sClean += c }
+        }
+        val mItems = m.mapIndexed { i, mv -> mv.toItem(sid, mClean[i]) }
+        val sItems = s.mapIndexed { i, sv -> sv.toItem(sid, sClean[i]) }
+
+        val mCats = m.mapTo(HashSet()) { it.categoryId }
+        val sCats = s.mapTo(HashSet()) { it.categoryId }
+        val movieCats = mc.filter { it.id in mCats }
+        val seriesCats = sc.filter { it.id in sCats }
+
+        val byAdded = compareByDescending<MediaItem> { it.added ?: 0L }
+        val byRating = compareByDescending<MediaItem> { it.rating ?: 0.0 }
+        return VodBuild(
+            movies = m,
+            series = s,
+            movieItems = mItems,
+            seriesItems = sItems,
+            // Pre-sorted newest first: shelves just take a prefix.
+            moviesByCategory = mItems.groupBy { it.categoryId ?: "0" }.mapValues { (_, v) -> v.sortedWith(byAdded) },
+            seriesByCategory = sItems.groupBy { it.categoryId ?: "0" }.mapValues { (_, v) -> v.sortedWith(byAdded) },
+            recentMovies = mItems.sortedWith(byAdded).take(30),
+            recentSeries = sItems.sortedWith(byAdded).take(30),
+            topMovies = mItems.filter { (it.rating ?: 0.0) >= 7.0 }.sortedWith(byRating).take(30),
+            topSeries = sItems.filter { (it.rating ?: 0.0) >= 7.0 }.sortedWith(byRating).take(30),
+            movieCategories = movieCats,
+            seriesCategories = seriesCats,
+            movieSections = sections(movieCats),
+            seriesSections = sections(seriesCats),
+            movieGenres = genres(m.mapNotNull { it.genre }),
+            seriesGenres = genres(s.mapNotNull { it.genre }),
+            movieIndex = matchIndex(m, mClean, { it.tmdbId }, { it.imdbId }, { mv, c -> c.second ?: mv.year }),
+            seriesIndex = matchIndex(s, sClean, { it.tmdbId }, { it.imdbId }, { sv, c -> c.second ?: sv.year }),
+        )
     }
 
-    private fun dedupeSeries(list: List<Series>): List<Series> {
-        val seen = HashSet<String>()
-        return list.filter { s ->
-            seen.add(s.tmdbId?.let { "tmdb$it" } ?: "${TitleCleaner.clean(s.name).first.lowercase()}|${s.year ?: 0}")
+    private fun <T> matchIndex(
+        list: List<T>,
+        cleaned: List<Pair<String, Int?>>,
+        tmdb: (T) -> Int?,
+        imdb: (T) -> String?,
+        year: (T, Pair<String, Int?>) -> Int?,
+    ): MatchIndex<T> {
+        val byTmdb = HashMap<Int, T>()
+        val byImdb = HashMap<String, T>()
+        val byTitle = HashMap<String, MutableList<Pair<Int?, T>>>()
+        for (i in list.indices) {
+            val item = list[i]
+            // First one wins, like the linear search this replaces.
+            tmdb(item)?.let { if (it !in byTmdb) byTmdb[it] = item }
+            imdb(item)?.takeIf { it.isNotEmpty() }?.let { if (it !in byImdb) byImdb[it] = item }
+            val key = normalizedTitle(cleaned[i].first)
+            if (key.isNotEmpty()) byTitle.getOrPut(key) { ArrayList(1) }.add(year(item, cleaned[i]) to item)
         }
+        return MatchIndex(byTmdb, byImdb, byTitle)
     }
 
     private fun genres(raw: List<String>): List<String> {
@@ -323,32 +497,35 @@ object DispatcharrRepo {
         return order.map { CategorySection(it, groups[it] ?: emptyList()) }
     }
 
-    // MARK: Lookups
+    // MARK: Lookups (all O(1): they run per row and per composition)
 
-    fun channel(id: Long): Channel? = channels.firstOrNull { it.id == id }
-    fun movies(categoryId: String) = movieItems.filter { it.categoryId == categoryId }
-    fun series(categoryId: String) = seriesItems.filter { it.categoryId == categoryId }
+    fun channel(id: Long): Channel? = channelIndex[id]
+    /** A category's items, newest first. */
+    fun movies(categoryId: String): List<MediaItem> = moviesByCategory[categoryId] ?: emptyList()
+    fun series(categoryId: String): List<MediaItem> = seriesByCategory[categoryId] ?: emptyList()
 
     fun matchMovie(tmdbId: Int?, imdbId: String?, title: String, year: Int?): Movie? {
-        tmdbId?.let { id -> rawMovies.firstOrNull { it.tmdbId == id }?.let { return it } }
-        imdbId?.let { id -> rawMovies.firstOrNull { it.imdbId == id }?.let { return it } }
-        val wanted = title.lowercase()
-        return rawMovies.firstOrNull { m ->
-            val (t, y) = TitleCleaner.clean(m.name)
-            t.lowercase() == wanted && (year == null || (y ?: m.year) == null || (y ?: m.year) == year)
-        }
+        val idx = movieIndex
+        tmdbId?.let { id -> idx.byTmdb[id]?.let { return it } }
+        imdbId?.takeIf { it.isNotEmpty() }?.let { id -> idx.byImdb[id]?.let { return it } }
+        val key = normalizedTitle(title)
+        if (key.isEmpty()) return null
+        return idx.byTitle[key]?.firstOrNull { (y, _) -> year == null || y == null || y == year }?.second
     }
 
     fun matchSeries(tmdbId: Int?, imdbId: String?, title: String): Series? {
-        tmdbId?.let { id -> rawSeries.firstOrNull { it.tmdbId == id }?.let { return it } }
-        imdbId?.let { id -> rawSeries.firstOrNull { it.imdbId == id }?.let { return it } }
-        val wanted = title.lowercase()
-        return rawSeries.firstOrNull { TitleCleaner.clean(it.name).first.lowercase() == wanted }
+        val idx = seriesIndex
+        tmdbId?.let { id -> idx.byTmdb[id]?.let { return it } }
+        imdbId?.takeIf { it.isNotEmpty() }?.let { id -> idx.byImdb[id]?.let { return it } }
+        val key = normalizedTitle(title)
+        if (key.isEmpty()) return null
+        return idx.byTitle[key]?.firstOrNull()?.second
     }
 
     fun categoryName(id: String?): String {
-        val all = movieCategories + seriesCategories + liveCategories
-        return TitleCleaner.splitCategory(all.firstOrNull { it.id == id }?.name ?: "").second
+        if (id == null) return ""
+        val raw = movieCategoryNames[id] ?: seriesCategoryNames[id] ?: liveCategoryNames[id] ?: ""
+        return TitleCleaner.splitCategory(raw).second
     }
 
     // MARK: Disk cache
@@ -357,17 +534,17 @@ object DispatcharrRepo {
 
     private fun loadDiskCache() {
         val id = active?.id ?: return
-        // The cache holds the whole VOD library (can be tens of MB): decode it off the main thread.
+        // The cache holds the whole VOD library (can be tens of MB): streamed + decoded off the main thread.
         scope.launch {
-            val cache = withContext(Dispatchers.IO) { Store.load(DiskCache.serializer(), cacheName(id)) } ?: return@launch
+            val cache = withContext(Dispatchers.IO) { Store.loadLarge(DiskCache.serializer(), cacheName(id)) } ?: return@launch
             if (active?.id != id) return@launch
-            // A network refresh that finished first wins.
-            if (channels.isEmpty()) {
-                applyLive(cache.liveCategories, cache.channels)
+            // A network refresh that finished first wins (applyLive / applyVod also re-check after building).
+            if (channels.isEmpty() && applyLive(cache.liveCategories, cache.channels, fromCache = true)) {
                 liveState = LoadState.Loaded
             }
-            if (movieItems.isEmpty() && seriesItems.isEmpty()) {
-                applyVod(cache.movieCategories, cache.movies, cache.seriesCategories, cache.series)
+            if (movieItems.isEmpty() && seriesItems.isEmpty() &&
+                applyVod(cache.movieCategories, cache.movies, cache.seriesCategories, cache.series, fromCache = true)
+            ) {
                 vodState = LoadState.Loaded
             }
         }
@@ -378,6 +555,6 @@ object DispatcharrRepo {
         if (channels.isEmpty() && rawMovies.isEmpty() && rawSeries.isEmpty()) return
         val cache = DiskCache(liveCategories.filter { it.id != "__other" }, channels, movieCategories, rawMovies,
             seriesCategories, rawSeries, System.currentTimeMillis())
-        scope.launch(Dispatchers.IO) { Store.save(DiskCache.serializer(), cache, cacheName(id)) }
+        scope.launch(Dispatchers.IO) { Store.saveLarge(DiskCache.serializer(), cache, cacheName(id)) }
     }
 }

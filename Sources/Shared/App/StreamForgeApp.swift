@@ -76,17 +76,22 @@ struct StreamForgeApp: App {
                 .environment(downloads)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .managedSyncPrompts()
                 .onOpenURL { router.handle($0) }
                 .task { await startup() }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active:
                         ServerSync.shared.setForeground(true)
+                        // Drop connections that died while suspended and revive the torrent engine,
+                        // so playing (or starting) anything after returning works.
+                        torrents.returnedToForeground()
                         Task {
                             await guide.refreshIfStale()
                             await trakt.refreshUpNext()
                         }
                     case .background:
+                        torrents.noteBackground()
                         library.flush()
                         SnapshotPublisher.publish()
                         CloudSync.shared.push()
@@ -230,7 +235,7 @@ final class AppRouter {
     /// Resumes a continue-watching entry: offline copy, server copy, else the detail page.
     func resume(_ entry: WatchProgress) {
         // REST streaming servers need the stream's UUID, which this device may not have seen yet.
-        if let client = DispatcharrStore.shared.client, client.server.usesRESTStreaming {
+        if let client = DispatcharrStore.shared.playbackClient(for: entry.item), client.server.usesRESTStreaming {
             var movieID: Int?
             if case .dispatcharrMovie(_, let id, _) = entry.item.origin { movieID = id }
             let episodeID = entry.episode?.dispatcharrEpisodeID
@@ -247,6 +252,7 @@ final class AppRouter {
 
     private func resumeNow(_ entry: WatchProgress) {
         let store = DispatcharrStore.shared
+        let client = store.playbackClient(for: entry.item)
         let start = max(0, entry.position - 5)
         if let rec = DownloadManager.shared.record(for: entry.item, episode: entry.episode), rec.state == .completed,
            let url = DownloadManager.shared.localURL(rec) {
@@ -254,11 +260,11 @@ final class AppRouter {
                                                           source: PlaybackSource(id: "offline:\(rec.id)", kind: .direct(url, headers: [:]),
                                                                                  title: entry.item.title, provider: "Downloaded"),
                                                           startPosition: start))
-        } else if case .dispatcharrMovie(_, let id, let ext) = entry.item.origin, let url = store.client?.movieURL(id, ext: ext) {
+        } else if case .dispatcharrMovie(_, let id, let ext) = entry.item.origin, let url = client?.movieURL(id, ext: ext) {
             PlayerCoordinator.shared.play(PlaybackRequest(item: entry.item, episode: nil,
                                                           source: PlaybackSource(id: "resume", kind: .direct(url, headers: [:]), title: entry.item.title, provider: "Server"),
                                                           startPosition: start))
-        } else if let ep = entry.episode, let eid = ep.dispatcharrEpisodeID, let url = store.client?.episodeURL(eid, ext: ep.ext ?? "mp4") {
+        } else if let ep = entry.episode, let eid = ep.dispatcharrEpisodeID, let url = client?.episodeURL(eid, ext: ep.ext ?? "mp4") {
             PlayerCoordinator.shared.play(PlaybackRequest(item: entry.item, episode: ep,
                                                           source: PlaybackSource(id: "resume", kind: .direct(url, headers: [:]), title: entry.item.title, provider: "Server"),
                                                           startPosition: start))

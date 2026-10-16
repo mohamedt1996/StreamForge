@@ -16,6 +16,7 @@ struct DownloadRecord: Codable, Identifiable, Hashable {
     var torrent: TorrentSource?
     var state: State = .queued
     var usesBackgroundSession = true
+    var activeTaskToken: String?
     var bytesWritten: Int64 = 0
     var bytesExpected: Int64 = 0
     var fileName: String?
@@ -52,7 +53,10 @@ final class DownloadManager {
 
     private(set) var records: [DownloadRecord] = []
 
+    @ObservationIgnored private var legacyBackgroundIDs: Set<String> = []
     @ObservationIgnored private var tasks: [String: URLSessionDownloadTask] = [:]
+    @ObservationIgnored private var pausingTasks: [String: URLSessionDownloadTask] = [:]
+    @ObservationIgnored private var pendingResumes: Set<String> = []
     @ObservationIgnored private var backgroundSession: URLSession?
     @ObservationIgnored private var foregroundSession: URLSession?
     @ObservationIgnored private let delegate = DownloadSessionDelegate()
@@ -96,6 +100,9 @@ final class DownloadManager {
         fg.timeoutIntervalForRequest = 120
         foregroundSession = URLSession(configuration: fg, delegate: delegate, delegateQueue: nil)
         #endif
+        legacyBackgroundIDs = Set(records.filter {
+            $0.usesBackgroundSession && $0.activeTaskToken == nil && [.queued, .preparing, .downloading].contains($0.state)
+        }.map(\.id))
         // Fix up records whose files vanished or whose foreground tasks died with the app.
         for i in records.indices {
             if records[i].state == .completed, localURL(records[i]) == nil {
@@ -117,27 +124,35 @@ final class DownloadManager {
     private func reattachBackgroundTasks() {
         backgroundSession?.getAllTasks { tasks in
             let pairs: [(String, URLSessionDownloadTask)] = tasks.compactMap { t in
-                guard let d = t as? URLSessionDownloadTask, let id = d.taskDescription else { return nil }
-                return (id, d)
+                guard let d = t as? URLSessionDownloadTask, let description = d.taskDescription else { return nil }
+                return (description.components(separatedBy: "|task|")[0], d)
             }
             Task { @MainActor in
                 let manager = DownloadManager.shared
                 for (id, task) in pairs {
+                    guard manager.ownsTask(id: id, task: task),
+                          let i = manager.records.firstIndex(where: { $0.id == id }),
+                          manager.records[i].state != .completed else { continue }
                     manager.tasks[id] = task
-                    if let i = manager.records.firstIndex(where: { $0.id == id }), manager.records[i].state != .completed {
-                        manager.records[i].state = .downloading
-                    }
+                    manager.records[i].state = .downloading
                 }
                 manager.save()
             }
         }
     }
 
+    /// Downloads are shared on disk, but kids may only see and play positively classified content.
+    var visibleRecords: [DownloadRecord] { records.filter { isAllowed($0) } }
+
+    private func isAllowed(_ record: DownloadRecord) -> Bool {
+        !ProfileStore.shared.isKidsMode || KidsFilter.allows(record.item)
+    }
+
     // MARK: Queries
 
     func record(for item: MediaItem, episode: EpisodeRef? = nil) -> DownloadRecord? {
         let key = LibraryStore.key(item, episode)
-        return records.first { $0.id == key }
+        return visibleRecords.first { $0.id == key }
     }
 
     func localURL(_ record: DownloadRecord) -> URL? {
@@ -177,7 +192,9 @@ final class DownloadManager {
     /// Only direct HTTP and torrent sources can be downloaded.
     static func canDownload(_ source: PlaybackSource) -> Bool {
         switch source.kind {
-        case .direct(let url, _): return url.scheme?.hasPrefix("http") == true
+        case .direct(let url, _):
+            return ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+                && !["m3u8", "m3u", "mpd"].contains(url.pathExtension.lowercased())
         case .torrent: return true
         default: return false
         }
@@ -243,28 +260,47 @@ final class DownloadManager {
             }
             task = session.downloadTask(with: request)
         }
-        task.taskDescription = id
+        let token = id + "|task|" + UUID().uuidString
+        task.taskDescription = token
         tasks[id] = task
-        update(id) { $0.state = .downloading; $0.error = nil }
+        update(id) { $0.state = .downloading; $0.error = nil; $0.activeTaskToken = token }
         task.resume()
     }
 
     func pause(_ record: DownloadRecord) {
+        legacyBackgroundIDs.remove(record.id)
         guard let task = tasks[record.id] else {
-            update(record.id) { $0.state = .paused }
+            update(record.id) { $0.state = .paused; $0.activeTaskToken = nil }
             return
         }
-        update(record.id) { $0.state = .paused }
+        update(record.id) { $0.state = .paused; $0.activeTaskToken = nil }
         let id = record.id
+        tasks[id] = nil // Invalidate callbacks from the cancelled task immediately.
+        pausingTasks[id] = task
         task.cancel(byProducingResumeData: { data in
-            guard let data else { return }
-            let url = DownloadManager.directory.appendingPathComponent(DownloadManager.safeName(id) + ".resume")
-            try? data.write(to: url, options: .atomic)
+            Task { @MainActor in
+                let manager = DownloadManager.shared
+                guard manager.pausingTasks[id] === task else { return }
+                manager.pausingTasks[id] = nil
+                if let data {
+                    let url = Self.directory.appendingPathComponent(Self.safeName(id) + ".resume")
+                    try? data.write(to: url, options: .atomic)
+                }
+                if manager.pendingResumes.remove(id) != nil,
+                   let current = manager.records.first(where: { $0.id == id }) {
+                    manager.resume(current)
+                }
+            }
         })
-        tasks[record.id] = nil
     }
 
     func resume(_ record: DownloadRecord) {
+        guard let current = records.first(where: { $0.id == record.id }),
+              current.state == .paused || current.state == .failed else { return }
+        if pausingTasks[record.id] != nil {
+            pendingResumes.insert(record.id)
+            return
+        }
         let resumeURL = Self.directory.appendingPathComponent(Self.safeName(record.id) + ".resume")
         let data = try? Data(contentsOf: resumeURL)
         try? FileManager.default.removeItem(at: resumeURL)
@@ -284,6 +320,9 @@ final class DownloadManager {
     }
 
     func delete(_ record: DownloadRecord) {
+        legacyBackgroundIDs.remove(record.id)
+        pausingTasks[record.id] = nil
+        pendingResumes.remove(record.id)
         tasks[record.id]?.cancel()
         tasks[record.id] = nil
         let fm = FileManager.default
@@ -296,7 +335,7 @@ final class DownloadManager {
 
     /// Plays a finished download from disk (mpv plays file:// URLs).
     func play(_ record: DownloadRecord) {
-        guard let url = localURL(record) else { return }
+        guard isAllowed(record), let url = localURL(record) else { return }
         var item = record.item
         item.poster = posterURL(record)
         let source = PlaybackSource(id: "offline:\(record.id)", kind: .direct(url, headers: [:]),
@@ -321,10 +360,17 @@ final class DownloadManager {
         save()
     }
 
+    private func ownsTask(id: String, task: URLSessionTask) -> Bool {
+        guard let record = records.first(where: { $0.id == id }) else { return false }
+        if let token = record.activeTaskToken { return token == task.taskDescription }
+        return tasks[id] === task || (legacyBackgroundIDs.contains(id) && task.taskDescription == id)
+    }
+
     // MARK: Delegate callbacks (hopped to the main actor)
 
-    fileprivate func didProgress(id: String, written: Int64, expected: Int64) {
+    fileprivate func didProgress(id: String, task: URLSessionTask, written: Int64, expected: Int64) {
         guard let i = records.firstIndex(where: { $0.id == id }), records[i].state == .downloading else { return }
+        guard ownsTask(id: id, task: task) else { return }
         let now = Date()
         if let last = lastProgressUpdate[id], now.timeIntervalSince(last) < 0.5 { return }
         lastProgressUpdate[id] = now
@@ -332,9 +378,15 @@ final class DownloadManager {
         if expected > 0 { records[i].bytesExpected = expected }
     }
 
-    fileprivate func didFinish(id: String, fileName: String, size: Int64) {
+    fileprivate func didFinish(id: String, task: URLSessionTask, fileName: String, size: Int64) {
+        guard ownsTask(id: id, task: task) else {
+            try? FileManager.default.removeItem(at: Self.directory.appendingPathComponent(fileName))
+            return
+        }
         tasks[id] = nil
+        legacyBackgroundIDs.remove(id)
         update(id) {
+            $0.activeTaskToken = nil
             $0.state = .completed
             $0.fileName = fileName
             $0.bytesWritten = size
@@ -343,15 +395,18 @@ final class DownloadManager {
         }
     }
 
-    fileprivate func didFail(id: String, message: String, resumeData: Data?) {
+    fileprivate func didFail(id: String, task: URLSessionTask, message: String, resumeData: Data?) {
+        guard ownsTask(id: id, task: task) else { return }
         guard let i = records.firstIndex(where: { $0.id == id }) else { return }
         // Pausing cancels the task; that's not a failure.
-        guard records[i].state != .paused, records[i].state != .completed else { return }
+        guard records[i].state != .completed else { return }
         tasks[id] = nil
         if let resumeData {
             let url = Self.directory.appendingPathComponent(Self.safeName(id) + ".resume")
             try? resumeData.write(to: url, options: .atomic)
         }
+        legacyBackgroundIDs.remove(id)
+        records[i].activeTaskToken = nil
         records[i].state = .failed
         records[i].error = message
         save()
@@ -366,43 +421,56 @@ final class DownloadManager {
 /// URLSession delegate. Runs on URLSession's queue; state changes hop to the main actor.
 final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let id = downloadTask.taskDescription else { return }
+        guard let id = downloadTask.taskDescription?.components(separatedBy: "|task|").first else { return }
         if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             let message = "Server returned HTTP \(http.statusCode)"
-            Task { @MainActor in DownloadManager.shared.didFail(id: id, message: message, resumeData: nil) }
+            Task { @MainActor in DownloadManager.shared.didFail(id: id, task: downloadTask, message: message, resumeData: nil) }
+            return
+        }
+        let mime = downloadTask.response?.mimeType?.lowercased() ?? ""
+        let prefix: String = {
+            guard let handle = try? FileHandle(forReadingFrom: location) else { return "" }
+            defer { try? handle.close() }
+            return String(data: (try? handle.read(upToCount: 1024)) ?? Data(), encoding: .utf8) ?? ""
+        }()
+        if mime.contains("mpegurl") || mime.contains("dash+xml") || prefix.contains("#EXTM3U") || prefix.contains("<MPD") {
+            Task { @MainActor in
+                DownloadManager.shared.didFail(id: id, task: downloadTask,
+                    message: "Offline playlist downloads aren't supported. Choose a direct video file or torrent.", resumeData: nil)
+            }
             return
         }
         var ext = downloadTask.response?.suggestedFilename.map { ($0 as NSString).pathExtension } ?? ""
         if ext.isEmpty || ext.count > 5 { ext = downloadTask.originalRequest?.url?.pathExtension ?? "" }
         if ext.isEmpty || ext.count > 5 || ext == "php" { ext = "mkv" }
-        let name = DownloadManager.fileName(for: id, ext: ext.lowercased())
+        let name = UUID().uuidString + "-" + DownloadManager.fileName(for: id, ext: ext.lowercased())
         let dest = DownloadManager.directory.appendingPathComponent(name)
         let fm = FileManager.default
         try? fm.removeItem(at: dest)
         do {
             try fm.moveItem(at: location, to: dest)
             let size = Int64((try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            Task { @MainActor in DownloadManager.shared.didFinish(id: id, fileName: name, size: size) }
+            Task { @MainActor in DownloadManager.shared.didFinish(id: id, task: downloadTask, fileName: name, size: size) }
         } catch {
             let message = error.localizedDescription
-            Task { @MainActor in DownloadManager.shared.didFail(id: id, message: message, resumeData: nil) }
+            Task { @MainActor in DownloadManager.shared.didFail(id: id, task: downloadTask, message: message, resumeData: nil) }
         }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard let id = downloadTask.taskDescription else { return }
+        guard let id = downloadTask.taskDescription?.components(separatedBy: "|task|").first else { return }
         Task { @MainActor in
-            DownloadManager.shared.didProgress(id: id, written: totalBytesWritten, expected: totalBytesExpectedToWrite)
+            DownloadManager.shared.didProgress(id: id, task: downloadTask, written: totalBytesWritten, expected: totalBytesExpectedToWrite)
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error, let id = task.taskDescription else { return }
+        guard let error, let id = task.taskDescription?.components(separatedBy: "|task|").first else { return }
         let ns = error as NSError
         let resume = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
         let message = ns.code == NSURLErrorCancelled ? "Cancelled" : error.localizedDescription
-        Task { @MainActor in DownloadManager.shared.didFail(id: id, message: message, resumeData: resume) }
+        Task { @MainActor in DownloadManager.shared.didFail(id: id, task: task, message: message, resumeData: resume) }
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

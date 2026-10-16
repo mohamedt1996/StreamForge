@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,6 +23,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.verticalScroll
+import com.mohamedt.streamforge.ui.isExpandedWidth
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -191,10 +195,10 @@ fun DetailScreen(initial: MediaItem, autoPlay: Boolean = false) {
 
     fun play(ep: Episode) {
         val upcoming = episodes.dropWhile { it.id != ep.id }.drop(1)
-        val url = ep.xcEpisodeId?.let { id -> DispatcharrRepo.client?.episodeUrl(id, ep.ext ?: "mp4") }
+        val url = ep.xcEpisodeId?.let { id -> DispatcharrRepo.playbackClient(item)?.episodeUrl(id, ep.ext ?: "mp4") }
         if (ep.xcEpisodeId != null && url != null) {
             Player.play(context, PlaybackRequest(item, ep, PlaybackSource("xc-ep-${ep.xcEpisodeId}", SourceKind.Direct(url),
-                "${item.title} ${ep.code}", provider = DispatcharrRepo.active?.name ?: "Server", cached = true), upcoming = upcoming))
+                "${item.title} ${ep.code}", provider = DispatcharrRepo.playbackClient(item)?.server?.name ?: "Server", cached = true), upcoming = upcoming))
         } else {
             picker = ep to upcoming
         }
@@ -299,90 +303,140 @@ private fun DetailPhone(
     val nav = LocalNav.current
     val context = LocalContext.current
     val item = d.item
-    LazyColumn(Modifier.fillMaxSize(), state = listState) {
-        item {
-            Box(Modifier.fillMaxWidth().height(heroHeight)) {
-                Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
-                // Edge-to-edge muted trailer over the artwork (cropped, no controls).
-                TrailerSurface(trailer, Modifier.fillMaxSize())
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.3f), Color.Transparent, Palette.background))))
-                Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(Dims.gutter()), verticalAlignment = Alignment.Bottom) {
-                    Column(Modifier.weight(1f)) {
-                        // Like Netflix, the title shrinks a little while the trailer plays.
-                        val logoScale by animateFloatAsState(if (trailer.revealed) 0.8f else 1f, tween(TrailerPolicy.FADE_MS), label = "logo-scale")
-                        val shrink = Modifier.graphicsLayer {
-                            scaleX = logoScale
-                            scaleY = logoScale
-                            transformOrigin = TransformOrigin(0f, 1f)
-                        }
-                        if (item.logo != null) {
-                            Artwork(item.logo, shrink.widthIn(max = 320.dp).height(if (heroHeight < 240.dp) 64.dp else 90.dp), ContentScale.Fit)
-                        } else {
-                            Text(item.title, fontSize = if (heroHeight < 240.dp) 26.sp else 32.sp, fontWeight = FontWeight.Black, maxLines = 2,
-                                overflow = TextOverflow.Ellipsis, modifier = shrink)
-                        }
-                        Text(metaLine(item).joinToString("  ·  "), color = Palette.secondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                    TrailerButton(trailer, Modifier.padding(start = 12.dp))
-                }
+    val body: LazyListScope.() -> Unit = {
+        phoneBody(d, episodes, season, sources, onPlayEpisode, onSeason, onAllSources,
+            onOpen = { nav.push(Screen.Detail(it)) },
+            onPlaySource = { src -> Player.play(context, PlaybackRequest(item, source = src)) })
+    }
+    if (isExpandedWidth()) {
+        // Tablets in landscape: artwork, title and actions on the left, episodes / sources / cast on the right.
+        Row(Modifier.fillMaxSize()) {
+            Column(Modifier.weight(0.44f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+                PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = false)
+                PhoneActions(item, playLabel, onPlay, onTrailer)
+                PhoneOverview(item, maxLines = 12)
+            }
+            LazyColumn(Modifier.weight(0.56f).fillMaxHeight(), state = rememberLazyListState(), contentPadding = PaddingValues(top = 8.dp)) {
+                body()
             }
         }
-        item {
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.card(onPlay, shape = RoundedCornerShape(24.dp)).background(Palette.gradient).padding(horizontal = 22.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(playLabel, fontWeight = FontWeight.Bold, maxLines = 1)
+    } else {
+        LazyColumn(Modifier.fillMaxSize(), state = listState) {
+            item(key = "hero") { PhoneHero(item, trailer, Modifier.fillMaxWidth().height(heroHeight), compact = heroHeight < 240.dp) }
+            item(key = "actions") { PhoneActions(item, playLabel, onPlay, onTrailer) }
+            item(key = "overview") { PhoneOverview(item, maxLines = 6) }
+            body()
+        }
+    }
+}
+
+@Composable
+private fun PhoneHero(item: MediaItem, trailer: TrailerController, modifier: Modifier, compact: Boolean) {
+    Box(modifier) {
+        Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
+        // Edge-to-edge muted trailer over the artwork (cropped, no controls).
+        TrailerSurface(trailer, Modifier.fillMaxSize())
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.3f), Color.Transparent, Palette.background))))
+        Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(Dims.gutter()), verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                // Like Netflix, the title shrinks a little while the trailer plays.
+                val logoScale by animateFloatAsState(if (trailer.revealed) 0.8f else 1f, tween(TrailerPolicy.FADE_MS), label = "logo-scale")
+                val shrink = Modifier.graphicsLayer {
+                    scaleX = logoScale
+                    scaleY = logoScale
+                    transformOrigin = TransformOrigin(0f, 1f)
                 }
-                Box(Modifier.size(46.dp).card({ Library.toggleFavorite(item) }, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
-                    Icon(if (Library.isFavorite(item)) Icons.Filled.Check else Icons.Filled.Add, "My List")
+                if (item.logo != null) {
+                    Artwork(item.logo, shrink.widthIn(max = 320.dp).height(if (compact) 64.dp else 90.dp), ContentScale.Fit)
+                } else {
+                    Text(item.title, fontSize = if (compact) 26.sp else 32.sp, fontWeight = FontWeight.Black, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis, modifier = shrink)
                 }
-                if (onTrailer != null) {
-                    Box(Modifier.size(46.dp).card(onTrailer, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Movie, "Trailer")
-                    }
-                }
+                Text(metaLine(item).joinToString("  ·  "), color = Palette.secondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            TrailerButton(trailer, Modifier.padding(start = 12.dp))
+        }
+    }
+}
+
+@Composable
+private fun PhoneActions(item: MediaItem, playLabel: String, onPlay: () -> Unit, onTrailer: (() -> Unit)?) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.heightIn(min = 48.dp).card(onPlay, shape = RoundedCornerShape(24.dp)).background(Palette.gradient).padding(horizontal = 22.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(playLabel, fontWeight = FontWeight.Bold, maxLines = 1)
+        }
+        Box(Modifier.size(48.dp).card({ Library.toggleFavorite(item) }, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
+            Icon(if (Library.isFavorite(item)) Icons.Filled.Check else Icons.Filled.Add, "My List")
+        }
+        if (onTrailer != null) {
+            Box(Modifier.size(48.dp).card(onTrailer, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Movie, "Trailer")
             }
         }
-        item {
-            item.overview?.let { Text(it, Modifier.padding(horizontal = Dims.gutter()).widthIn(max = 820.dp), color = Color.White.copy(alpha = 0.85f), maxLines = 6, overflow = TextOverflow.Ellipsis) }
+    }
+}
+
+@Composable
+private fun PhoneOverview(item: MediaItem, maxLines: Int) {
+    val nav = LocalNav.current
+    Column {
+        item.overview?.let {
+            Text(it, Modifier.padding(horizontal = Dims.gutter()).widthIn(max = 820.dp), color = Color.White.copy(alpha = 0.85f),
+                maxLines = maxLines, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp)
         }
         Metadata.collections[item.id]?.takeIf { it.first > 0 }?.let { (cid, cname) ->
-            item {
-                Text("Part of the $cname →", color = Palette.accent, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = Dims.gutter(), vertical = 10.dp).card({ nav.push(Screen.Collection(cid, cname)) }).padding(6.dp))
-            }
+            Text("Part of the $cname →", color = Palette.accent, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = Dims.gutter() - 6.dp, vertical = 6.dp).card({ nav.push(Screen.Collection(cid, cname)) })
+                    .padding(horizontal = 6.dp, vertical = 12.dp))
         }
-        if (item.type == MediaType.SERIES) {
-            item {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    d.seasons.forEach { s -> Chip(if (s == 0) "Specials" else "Season $s", season == s) { onSeason(s) } }
-                }
-            }
-            episodes.distinctBy { it.id }.forEach { ep -> item(key = "ep-${ep.id}") { EpisodeRow(item, ep) { onPlayEpisode(ep) } } }
-        }
-        if (item.type == MediaType.MOVIE) {
-            item {
-                val s = sources
-                Column(Modifier.padding(horizontal = Dims.gutter(), vertical = 10.dp)) {
-                    Text("Sources", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    if (s == null || (s.loading && s.sources.isEmpty())) Text("Asking your server and addons…", color = Palette.secondary)
-                    else if (s.sorted.isEmpty()) Text("No sources found. Add stream addons in Settings.", color = Palette.secondary)
-                }
-            }
-            sources?.sorted?.take(8)?.forEach { src ->
-                item(key = "src-${src.id}") { SourceRow(src, sources?.estimate(src)) { Player.play(context, PlaybackRequest(item, source = src)) } }
-            }
-            if ((sources?.sorted?.size ?: 0) > 8) item {
-                Text("All ${sources?.sorted?.size} sources →", color = Palette.accent, modifier = Modifier.padding(Dims.gutter()).card(onAllSources).padding(6.dp))
-            }
-        }
-        if (d.cast.isNotEmpty()) item {
-            Shelf("Cast", d.cast, key = { it.id }) { person -> CastCard(person) }
-        }
-        item { Shelf("More Like This", d.similar, key = { it.id }) { PosterCard(it, { nav.push(Screen.Detail(it)) }) } }
-        item { Spacer(Modifier.height(40.dp)) }
     }
+}
+
+/** Seasons, episodes, sources, cast and "More like this" (phone and tablet). */
+private fun LazyListScope.phoneBody(
+    d: Details,
+    episodes: List<Episode>,
+    season: Int?,
+    sources: SourcesModel?,
+    onPlayEpisode: (Episode) -> Unit,
+    onSeason: (Int) -> Unit,
+    onAllSources: () -> Unit,
+    onOpen: (MediaItem) -> Unit,
+    onPlaySource: (PlaybackSource) -> Unit,
+) {
+    val item = d.item
+    if (item.type == MediaType.SERIES) {
+        item(key = "seasons") {
+            LazyRow(contentPadding = PaddingValues(horizontal = Dims.gutter(), vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                itemsIndexed(d.seasons.distinct(), key = { _, s -> s }) { _, s -> Chip(if (s == 0) "Specials" else "Season $s", season == s) { onSeason(s) } }
+            }
+        }
+        episodes.distinctBy { it.id }.forEach { ep -> item(key = "ep-${ep.id}") { EpisodeRow(item, ep) { onPlayEpisode(ep) } } }
+    }
+    if (item.type == MediaType.MOVIE) {
+        item(key = "sources-head") {
+            val s = sources
+            Column(Modifier.padding(horizontal = Dims.gutter(), vertical = 10.dp)) {
+                Text("Sources", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                if (s == null || (s.loading && s.sources.isEmpty())) Text("Asking your server and addons…", color = Palette.secondary)
+                else if (s.sorted.isEmpty()) Text("No sources found. Add stream addons in Settings.", color = Palette.secondary)
+            }
+        }
+        sources?.sorted?.take(8)?.forEach { src ->
+            item(key = "src-${src.id}") { SourceRow(src, sources?.estimate(src)) { onPlaySource(src) } }
+        }
+        if ((sources?.sorted?.size ?: 0) > 8) item(key = "sources-all") {
+            Text("All ${sources?.sorted?.size} sources →", color = Palette.accent,
+                modifier = Modifier.padding(horizontal = Dims.gutter() - 6.dp, vertical = 8.dp).card(onAllSources).padding(horizontal = 6.dp, vertical = 12.dp))
+        }
+    }
+    if (d.cast.isNotEmpty()) item(key = "cast") {
+        Shelf("Cast", d.cast, key = { it.id }) { person -> CastCard(person) }
+    }
+    item(key = "similar") { Shelf("More Like This", d.similar, key = { it.id }) { PosterCard(it, { onOpen(it) }) } }
+    item(key = "bottom") { Spacer(Modifier.height(40.dp)) }
 }
 
 private fun metaLine(item: MediaItem): List<String> = listOfNotNull(
@@ -713,10 +767,15 @@ fun PersonScreen(id: Int?, name: String, photo: String? = null) {
     if (i == null && !failed) { Loading(); return }
     // What's playable from your own server first.
     val credits = i?.credits ?: emptyList()
-    val onServer = credits.mapNotNull { c ->
-        val sid = DispatcharrRepo.active?.id ?: return@mapNotNull null
-        if (c.type == MediaType.MOVIE) DispatcharrRepo.matchMovie(c.tmdbId, null, c.title, c.year)?.toItem(sid)
-        else DispatcharrRepo.matchSeries(c.tmdbId, null, c.title)?.toItem(sid)
+    // O(1) lookups per credit; remembered so recompositions don't redo them (re-run when the library changes).
+    val movieLib = DispatcharrRepo.movieItems
+    val seriesLib = DispatcharrRepo.seriesItems
+    val onServer = remember(credits, movieLib, seriesLib) {
+        credits.mapNotNull { c ->
+            val sid = DispatcharrRepo.active?.id ?: return@mapNotNull null
+            if (c.type == MediaType.MOVIE) DispatcharrRepo.matchMovie(c.tmdbId, null, c.title, c.year)?.toItem(sid)
+            else DispatcharrRepo.matchSeries(c.tmdbId, null, c.title)?.toItem(sid)
+        }.distinctBy { it.id }
     }
     val tv = isTv()
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = if (tv) Dims.overscanY else 0.dp, bottom = if (tv) 48.dp else 0.dp)) {

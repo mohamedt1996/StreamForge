@@ -143,12 +143,13 @@ struct PersonView: View {
         AddonManager.shared.enabled.contains { $0.manifest.hasStreams }
     }
 
+    /// O(1) index lookup returning the store's ready-made item (runs per credit on every render).
     private func serverItem(for c: TMDBClient.PersonCredit) -> MediaItem? {
-        guard let serverID = store.activeServer?.id else { return nil }
+        guard store.activeServer != nil else { return nil }
         if c.mediaType == "tv" {
-            return store.matchSeries(tmdbID: c.tmdbID, imdbID: nil, title: c.title).map { $0.mediaItem(serverID: serverID) }
+            return store.matchSeriesItem(tmdbID: c.tmdbID, imdbID: nil, title: c.title)
         }
-        return store.matchMovie(tmdbID: c.tmdbID, imdbID: nil, title: c.title, year: c.year).map { $0.mediaItem(serverID: serverID) }
+        return store.matchMovieItem(tmdbID: c.tmdbID, imdbID: nil, title: c.title, year: c.year)
     }
 
     private func creditButton(_ c: TMDBClient.PersonCredit) -> some View {

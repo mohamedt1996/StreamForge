@@ -54,6 +54,8 @@ struct MediaItem: Identifiable, Hashable, Codable {
     var added: Date?
     var runtimeMinutes: Int?
     var categoryID: String?
+    /// Optional direct AVPlayer-compatible preview; older saved items decode without it.
+    var trailerURL: URL?
 
     static func == (a: MediaItem, b: MediaItem) -> Bool { a.id == b.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -139,7 +141,11 @@ struct MediaDetails {
 
     /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and junk.
     mutating func addTrailers(_ raw: [String], atFront: Bool = false) {
-        let incoming = raw.compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
+        if item.trailerURL == nil {
+            item.trailerURL = raw.compactMap { TrailerSelection.directURL(URL(string: $0)) }.first
+        }
+        let incoming = raw.filter { TrailerSelection.directURL(URL(string: $0)) == nil }
+            .compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
         var seen = Set<String>()
         let unique = incoming.filter { seen.insert($0).inserted }
         trailerKeys = atFront ? unique + trailerKeys : trailerKeys + unique
@@ -151,6 +157,8 @@ struct MediaDetails {
         guard !s.isEmpty else { return nil }
         if s.contains("/") || s.contains("=") {
             if let comps = URLComponents(string: s) {
+                let host = comps.host?.lowercased() ?? ""
+                guard ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtube-nocookie.com"].contains(host) else { return nil }
                 if let v = comps.queryItems?.first(where: { $0.name == "v" })?.value {
                     s = v
                 } else if let last = comps.path.split(separator: "/").last {

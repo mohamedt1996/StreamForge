@@ -32,7 +32,7 @@ struct LibraryView: View {
                     .cardButtonStyle()
                 }
 
-                let downloaded = DownloadManager.shared.records.filter { $0.state == .completed }
+                let downloaded = DownloadManager.shared.visibleRecords.filter { $0.state == .completed }
                 Shelf(title: "Downloaded", items: downloaded) { rec in
                     Button { DownloadManager.shared.play(rec) } label: {
                         LandscapeCard(title: rec.displayTitle, subtitle: rec.bytesWritten.byteText,

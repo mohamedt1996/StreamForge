@@ -148,6 +148,18 @@ targets:
           - CFBundleURLName: com.mohamedt.streamforge.links
             CFBundleURLSchemes: [streamforge, stremio]
 
+  StreamForgeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: StreamForge
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.mohamedt.streamforge.tests
+
   StreamForgeWidgets:
     type: app-extension
     platform: iOS
@@ -210,6 +222,9 @@ schemes:
       config: Debug
       environmentVariables:
         MTL_DEBUG_LAYER: "0"
+    test:
+      targets:
+        - StreamForgeTests
     archive:
       config: Release
   StreamForgeTV:

@@ -89,8 +89,10 @@ import com.mohamedt.streamforge.ui.LocalNav
 import com.mohamedt.streamforge.ui.LocalShelfKey
 import com.mohamedt.streamforge.ui.Palette
 import com.mohamedt.streamforge.ui.Pill
+import com.mohamedt.streamforge.ui.WatchlistCard
 import com.mohamedt.streamforge.ui.PosterCard
 import com.mohamedt.streamforge.ui.ProgressLine
+import com.mohamedt.streamforge.ui.PullRefresh
 import com.mohamedt.streamforge.ui.Screen
 import com.mohamedt.streamforge.ui.SfButton
 import com.mohamedt.streamforge.ui.Shelf
@@ -133,7 +135,8 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
     val open: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
 
-    LazyColumn(Modifier.fillMaxWidth()) {
+    PullRefresh({ DispatcharrRepo.refreshAll(true); GuideRepo.refresh() }) {
+    LazyColumn(Modifier.fillMaxSize()) {
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("StreamForge", fontSize = 26.sp, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
@@ -176,7 +179,7 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
                 PosterCard(it, { open(it) }, { Library.toggleFavorite(it) })
             }
         }
-        item { Shelf("My List", Library.favorites, key = { it.id }) { PosterCard(it, { open(it) }) } }
+        item { Shelf("My List", Library.favorites, key = { it.id }) { WatchlistCard(it, { open(it) }) } }
         item { Shelf("Trending Movies", HomeData.trendingMovies, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
         item { Shelf("Trending Series", HomeData.trendingSeries, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
         HomeData.catalogs.forEachIndexed { i, (entry, items) ->
@@ -185,6 +188,7 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
             }
         }
         item { Spacer(Modifier.height(30.dp)) }
+    }
     }
 }
 
@@ -196,8 +200,9 @@ private fun homeChannels(): List<Channel> {
     return ids.mapNotNull { DispatcharrRepo.channel(it) }
 }
 
-private fun recentMovies() = DispatcharrRepo.movieItems.sortedByDescending { it.added ?: 0 }.take(24)
-private fun recentSeries() = DispatcharrRepo.seriesItems.sortedByDescending { it.added ?: 0 }.take(24)
+// Pre-sorted off the main thread by DispatcharrRepo (sorting the whole library here ran on every recomposition).
+private fun recentMovies() = DispatcharrRepo.recentMovies.take(24)
+private fun recentSeries() = DispatcharrRepo.recentSeries.take(24)
 
 // MARK: TV
 
@@ -313,7 +318,7 @@ private fun HomeTv(onSettings: () -> Unit) {
             }
         })
         if (Library.favorites.isNotEmpty()) add(HomeRow("mylist") {
-            Shelf("My List", Library.favorites, key = { it.id }, rowKey = "mylist") { PosterCard(it, { open(it) }) }
+            Shelf("My List", Library.favorites, key = { it.id }, rowKey = "mylist") { WatchlistCard(it, { open(it) }) }
         })
         if (movies.isNotEmpty()) add(HomeRow("movies") {
             Shelf("Recently added movies", movies, subtitle = DispatcharrRepo.active?.name, key = { it.id }, rowKey = "movies") {
@@ -496,7 +501,7 @@ private fun Billboard(
 
 /** Resume a Continue Watching entry: straight from the server when possible, else via the detail page. */
 private fun resumePlayback(context: android.content.Context, nav: com.mohamedt.streamforge.ui.Navigator, p: Progress) {
-    val client = DispatcharrRepo.client
+    val client = DispatcharrRepo.playbackClient(p.item)
     val ep = p.episode
     val url = when {
         ep?.xcEpisodeId != null && client != null -> client.episodeUrl(ep.xcEpisodeId, ep.ext ?: "mp4")
@@ -504,7 +509,7 @@ private fun resumePlayback(context: android.content.Context, nav: com.mohamedt.s
         else -> null
     }
     if (url != null) {
-        Player.play(context, PlaybackRequest(p.item, ep, PlaybackSource("resume", SourceKind.Direct(url), p.item.title, provider = "Server"), p.position - 5000))
+        Player.play(context, PlaybackRequest(p.item, ep, PlaybackSource("resume", SourceKind.Direct(url), p.item.title, provider = "Server"), maxOf(0L, p.position - 5000)))
     } else {
         nav.push(Screen.Detail(p.item, autoPlay = true))
     }

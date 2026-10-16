@@ -265,6 +265,18 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 
 	canSecrets := p.device.has("secrets")
 	isAdmin := p.user.Role == "admin"
+	// Dismissals pushed in this batch ("<collection>|<id>" → dismissed). A member's device may
+	// remove a managed item it dismisses (PROTOCOL.md §5, "Dismissals"); the batch usually
+	// carries the dismissal and the item's tombstone together, in any order.
+	batchDismissed := map[string]bool{}
+	for _, rec := range req.Records {
+		if rec.Collection == dismissedCollection {
+			if c, item, ok := parseDismissedID(rec.ID); ok {
+				batchDismissed[c+"|"+item] = !rec.Deleted
+			}
+		}
+	}
+	dismissalsChanged := false
 	nowMs := a.nowMs()
 	maxTS := a.now().Add(futureSkew).UnixMilli()
 
@@ -298,8 +310,16 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 		var storedManaged int
 		err := tx.QueryRow(`SELECT updated_at, rev, managed FROM records WHERE user_id = ? AND collection = ? AND id = ?`,
 			p.user.ID, rec.Collection, rec.ID).Scan(&storedUA, &storedRev, &storedManaged)
+		dismissedByUser := false
+		if err == nil && storedManaged != 0 && !isAdmin {
+			var derr error
+			if dismissedByUser, derr = isDismissed(tx, p.user.ID, batchDismissed, rec.Collection, rec.ID); derr != nil {
+				writeInternal(w, a, "push dismissal lookup", derr)
+				return
+			}
+		}
 		switch {
-		case err == nil && storedManaged != 0 && !isAdmin:
+		case err == nil && storedManaged != 0 && !isAdmin && !dismissedByUser:
 			// Admin-managed record: a member's device may not change or delete it. Re-stamp the
 			// stored copy so it is newer than what the device has (and the rev advances), so the
 			// device takes it back on its next pull.
@@ -340,6 +360,17 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 			writeInternal(w, a, "push upsert", err)
 			return
 		}
+		if dismissedByUser {
+			// The user dismissed this managed item: from now on the record is theirs.
+			if _, err := tx.Exec(`UPDATE records SET managed = 0 WHERE user_id = ? AND collection = ? AND id = ?`,
+				p.user.ID, rec.Collection, rec.ID); err != nil {
+				writeInternal(w, a, "push unmanage", err)
+				return
+			}
+		}
+		if rec.Collection == dismissedCollection {
+			dismissalsChanged = true
+		}
 		res.Status, res.Rev = "applied", rev
 		results = append(results, res)
 	}
@@ -356,5 +387,33 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 	if rev != startRev {
 		a.hub.notify(p.user.ID)
 	}
+	if dismissalsChanged {
+		// Apply the dismissals (tombstone/release the items) or restores (write them again).
+		// Failure doesn't fail the push: the next reconcile of this user catches up.
+		if _, err := a.reconcileUser(p.user.ID); err != nil {
+			a.log.Printf("reconcile after dismissal for %s: %v", p.user.ID, err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "results": results})
+}
+
+// isDismissed reports whether the user dismissed the managed item a record belongs to — in this
+// push batch, or earlier (an active dismissed record).
+func isDismissed(q queryer, userID string, batch map[string]bool, collection, id string) (bool, error) {
+	did := dismissalIDFor(collection, id)
+	if did == "" {
+		return false, nil
+	}
+	if v, ok := batch[did]; ok {
+		return v, nil
+	}
+	var deleted int
+	err := q.QueryRow(`SELECT deleted FROM records WHERE user_id = ? AND collection = ? AND id = ?`, userID, dismissedCollection, did).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return deleted == 0, nil
 }

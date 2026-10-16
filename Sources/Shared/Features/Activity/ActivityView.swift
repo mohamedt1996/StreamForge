@@ -149,16 +149,16 @@ struct ActivityView: View {
                     if let free = downloads.freeSpace { Text("\(free.byteText) free") }
                 }
                 .font(.caption).foregroundStyle(Theme.secondaryText)
-                if downloads.records.contains(where: { $0.isTorrent && $0.state != .completed }), engine.mode == .embedded {
+                if downloads.visibleRecords.contains(where: { $0.isTorrent && $0.state != .completed }), engine.mode == .embedded {
                     Label("Torrent downloads use the on-device engine, which iOS pauses when StreamForge is in the background. Keep the app open until they finish, or use a remote TorrServer.",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(Theme.gold)
                 }
-                if downloads.records.isEmpty {
+                if downloads.visibleRecords.isEmpty {
                     Text("Download movies and episodes from their detail pages to watch offline.")
                         .font(.subheadline).foregroundStyle(Theme.secondaryText)
                 }
-                ForEach(downloads.records) { rec in
+                ForEach(downloads.visibleRecords) { rec in
                     DownloadRow(record: rec)
                 }
             }

@@ -150,13 +150,72 @@ object TorrServer {
             }.getOrElse { it.message ?: "Couldn't start the torrent engine" }
         }
         if (err.isEmpty() || err.contains("already running")) {
-            embeddedRunning = true
-            lastError = null
-            for (i in 0 until 40) { if (ping()) break; delay(150) }
-            applyEmbeddedSettings()
+            // Only trust the engine once it answers: the Go side can report "already running" while
+            // its HTTP listener is gone.
+            if (waitUntilReachable(8_000)) {
+                embeddedRunning = true
+                lastError = null
+                applyEmbeddedSettings()
+            } else {
+                embeddedRunning = false
+                lastError = if (err.isEmpty()) "The torrent engine didn't start. Try again in a moment." else
+                    "The torrent engine stopped responding. Close StreamForge and open it again."
+            }
         } else {
             lastError = err
         }
+    }
+
+    private suspend fun waitUntilReachable(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        do {
+            if (ping(timeoutSeconds = 2)) return true
+            delay(150)
+        } while (System.currentTimeMillis() < deadline)
+        return false
+    }
+
+    /** Result of [ensureRunning]. [restarted]: the embedded engine had died and was started again, so
+     *  every torrent it had is gone and open stream connections are dead (re-add + reload). */
+    data class Health(val reachable: Boolean, val restarted: Boolean)
+
+    private val healthLock = Mutex()
+    private var backgroundedAt = 0L
+
+    /**
+     * Makes sure TorrServer answers before a torrent is (re)resolved: drops stale pooled connections,
+     * pings, and starts the embedded engine again when it doesn't answer (never stop+start in one
+     * process: the pinned TorrServer reopens a closed settings DB and crashes).
+     */
+    suspend fun ensureRunning(): Health = healthLock.withLock {
+        if (!configured) return@withLock Health(reachable = false, restarted = false)
+        if (!embedded) {
+            if (ping()) return@withLock Health(reachable = true, restarted = false)
+            Http.evictIdleConnections()
+            return@withLock Health(reachable = ping(), restarted = false)
+        }
+        val wasRunning = embeddedRunning
+        if (wasRunning) {
+            if (ping()) return@withLock Health(reachable = true, restarted = false)
+            Http.evictIdleConnections()
+            if (ping()) return@withLock Health(reachable = true, restarted = false)
+            embeddedRunning = false
+            torrents = emptyList()
+        }
+        startEmbeddedIfNeeded()
+        Health(reachable = embeddedRunning, restarted = wasRunning && embeddedRunning)
+    }
+
+    /** The app went to the background. */
+    fun noteBackground() { backgroundedAt = System.currentTimeMillis() }
+
+    /** The app is visible again: drop connections that died meanwhile and check a running engine. */
+    suspend fun returnedToForeground() {
+        val since = backgroundedAt
+        if (since == 0L) return
+        backgroundedAt = 0L
+        Http.evictIdleConnections()
+        if (embedded && embeddedRunning && System.currentTimeMillis() - since > 2_000) ensureRunning()
     }
 
     private suspend fun applyEmbeddedSettings() {
@@ -174,9 +233,9 @@ object TorrServer {
         runCatching { Http.text("$base/settings", method = "POST", body = body) }
     }
 
-    suspend fun ping(): Boolean {
+    suspend fun ping(timeoutSeconds: Long = 3): Boolean {
         val base = baseUrl ?: return false
-        return runCatching { Http.text("$base/echo", authHeaders, timeoutSeconds = 3) }.isSuccess
+        return runCatching { Http.text("$base/echo", authHeaders, timeoutSeconds = timeoutSeconds) }.isSuccess
     }
 
     suspend fun version(): String? {
@@ -223,6 +282,13 @@ object TorrServer {
     /** Adds the torrent, waits for metadata, picks the file and returns a stream URL. */
     suspend fun resolve(source: TorrentSource, progress: (String) -> Unit): Pair<String, String> {
         progress("Connecting to peers…")
+        // Never trust a stale engine/session (the engine may have died or dropped the torrent while the
+        // app was away): revive it, then re-add below so the torrent comes back with its trackers.
+        if (!ensureRunning().reachable) {
+            val fallback = if (embedded) "The torrent engine isn't responding. Try again in a moment." else
+                "Can't reach your TorrServer. Check the address in Settings → Torrents."
+            throw IllegalStateException(lastError ?: fallback)
+        }
         var status = add(source)
         val hash = status.hash.ifEmpty { source.infoHash }
         var attempts = 0

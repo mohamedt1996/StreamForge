@@ -6,6 +6,7 @@ struct PosterCard: View {
     var width: CGFloat = Theme.posterWidth
     var showTitle = true
     @State private var enriched: URL?
+    @State private var hoveringPreview = false
     @Environment(LibraryStore.self) private var library
 
     var body: some View {
@@ -20,6 +21,12 @@ struct PosterCard: View {
                             ProgressLine(fraction: p.fraction).padding(6)
                         }
                     }
+                if hoveringPreview && TrailerPolicy.allowsAutoplay && PlayerCoordinator.shared.current == nil {
+                    NativeTrailerView(item: item)
+                        .frame(width: width, height: width * 1.5)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .allowsHitTesting(false)
+                }
                 if item.type == .series, NewEpisodeTracker.shared.isNew(item) {
                     Text("NEW")
                         .font(.caption2.weight(.heavy))
@@ -50,8 +57,16 @@ struct PosterCard: View {
                 .frame(width: width, alignment: .leading)
             }
         }
+        #if os(iOS)
+        .onHover { hoveringPreview = $0 }
+        #endif
+        .onDisappear { hoveringPreview = false }
         .task(id: item.id) {
-            if item.poster == nil { enriched = await MetadataService.shared.enrichedPoster(for: item) }
+            enriched = nil
+            if item.poster == nil {
+                let poster = await MetadataService.shared.enrichedPoster(for: item)
+                if !Task.isCancelled { enriched = poster }
+            }
         }
     }
 }
@@ -172,7 +187,19 @@ struct PosterGrid: View {
             ForEach(items) { item in
                 Button { onSelect(item) } label: { PosterCard(item: item) }
                     .cardButtonStyle()
+                    #if os(iOS)
+                    .contextMenu {
+                        MediaContextMenu(item: item)
+                    } preview: {
+                        if TrailerPolicy.allowsAutoplay {
+                            NativeTrailerView(item: item).frame(width: 320, height: 180)
+                        } else {
+                            RemoteImage(url: item.poster).frame(width: 160, height: 240)
+                        }
+                    }
+                    #else
                     .contextMenu { MediaContextMenu(item: item) }
+                    #endif
                     .onAppear { if item.id == items.last?.id { onAppearLast?() } }
             }
         }

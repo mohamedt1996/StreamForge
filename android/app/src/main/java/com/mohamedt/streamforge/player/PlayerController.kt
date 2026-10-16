@@ -2,11 +2,13 @@ package com.mohamedt.streamforge.player
 
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.mohamedt.streamforge.PlayerActivity
 import com.mohamedt.streamforge.core.Episode
+import com.mohamedt.streamforge.core.Http
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.Settings
 import com.mohamedt.streamforge.dispatcharr.Channel
@@ -20,6 +22,7 @@ import com.mohamedt.streamforge.stremio.Addons
 import com.mohamedt.streamforge.stremio.Subtitle
 import com.mohamedt.streamforge.torrent.TorrServer
 import com.mohamedt.streamforge.torrent.TorrentContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -131,6 +134,30 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     private var fileStarted = false
     private var fileLoaded = false
 
+    // Recovery after the app was in the background / the stream dropped. While away, mpv's HTTP
+    // connections time out, live streams hit EOF and TorrServer may drop the torrent (or the engine may
+    // be gone): instead of "Can't play", the source is re-resolved (torrent re-added, fresh headers) and
+    // reloaded at the last position, or a live channel is re-tuned, behind the buffering UI.
+    private var inBackground = false
+    private var backgroundedAt = 0L
+    /** Set when the player leaves the screen; cleared after a stretch of healthy playback. While set,
+     *  load failures, errors and stalls are retried instead of shown. */
+    private var unhealthySinceBackground = false
+    private var lastProgressAt = SystemClock.elapsedRealtime()
+    private var lastProgressPos = -1L
+    private var healthyTicks = 0
+    private var recoveryAttempts = 0
+    private var recoveryJob: Job? = null
+    private var foregroundJob: Job? = null
+    private var lastFailure: String? = null
+    /** Bumped by every [load], so work started for an older load never touches a newer one. */
+    private var loadGeneration = 0
+    private var resolving = false
+    /** What the user asked for (mpv's own pause also flips at keep-open EOF and when leaving the app). */
+    private var userPaused = false
+    /** mpv was paused because the player left the screen (Home on TV, screen off). */
+    private var pausedForBackground = false
+
     val isLive get() = request.isLive
     val title get() = request.catchup?.title ?: if (isLive) currentChannel?.name ?: request.item.title else request.item.title
     val subtitle: String?
@@ -157,17 +184,41 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
         positionMs = 0; durationMs = 0; cachedMs = 0; started = false; buffering = true; error = null; status = null
         fileStarted = false; fileLoaded = false
         segments = emptyList(); addonSubtitles = emptyList(); autoSkipped.clear()
+        loadGeneration++
+        val generation = loadGeneration
+        recoveryJob?.cancel(); recoveryJob = null
+        recoveryAttempts = 0; lastFailure = null
+        lastProgressAt = SystemClock.elapsedRealtime(); lastProgressPos = -1
+        // New content always plays: mpv keeps `pause` across loadfile (and keep-open pauses at EOF).
+        userPaused = false; pausedForBackground = false
+        mpv.setFlag("pause", false)
         resolveJob?.cancel()
+        resolving = true
         resolveJob = scope.launch {
             try {
                 val (url, headers) = resolve(r.source)
+                if (generation != loadGeneration) return@launch
                 val start = r.startMs?.let { it / 1000.0 } ?: resume(r)
+                lastProgressAt = SystemClock.elapsedRealtime()
                 mpv.load(url, start, headers, r.isLive, r.catchup?.title ?: r.item.title)
+                resolving = false
                 if (r.isLive) refreshProgramme()
                 loadSubtitles(r)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                error = e.message ?: "Can't play this"
-                buffering = false
+                // A newer load owns the state now; and a failure after mpv.load (guide, subtitles) isn't a playback error.
+                if (generation != loadGeneration || !resolving) return@launch
+                resolving = false
+                val message = e.message ?: "Can't play this"
+                lastFailure = message
+                if (unhealthySinceBackground) {
+                    // E.g. the player left the screen while the torrent was still being fetched.
+                    scheduleRecovery(message)
+                } else {
+                    error = message
+                    buffering = false
+                }
             }
         }
     }
@@ -229,11 +280,20 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     // MARK: Controls
 
-    fun togglePause() { mpv.setFlag("pause", !paused) }
+    fun togglePause() { setPausedByUser(!paused) }
+
+    /** Pause/play on the user's behalf (controls, remote keys). */
+    fun setPausedByUser(pause: Boolean) {
+        userPaused = pause
+        pausedForBackground = false
+        // Paused time is not a stall.
+        lastProgressAt = SystemClock.elapsedRealtime()
+        mpv.setFlag("pause", pause)
+    }
 
     fun seekTo(ms: Long) {
         if (isLive && !Settings.values.timeshiftMinutes.let { it > 0 }) return
-        val target = if (durationMs > 0) ms.coerceIn(0, durationMs - 1000) else maxOf(0, ms)
+        val target = if (durationMs > 0) ms.coerceIn(0L, maxOf(0L, durationMs - 1000L)) else maxOf(0, ms)
         positionMs = target
         mpv.seek(target / 1000.0)
     }
@@ -275,7 +335,17 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
         showToast(if (nightMode) "Night mode on" else "Night mode off")
     }
 
-    fun retry() { load(request) }
+    fun retry() {
+        if (started) {
+            // Pick up where playback stopped (re-resolving the source), not from the original start.
+            recoveryJob?.cancel(); recoveryJob = null
+            recoveryAttempts = 0
+            error = null
+            scheduleRecovery("retry", delayMs = 0)
+        } else {
+            load(request)
+        }
+    }
 
     /** A new request while the (singleTask) player is already open, e.g. from PiP. */
     fun open(r: PlaybackRequest) {
@@ -293,7 +363,148 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     }
 
     /** Leaving the player without PiP (Home on TV, screen off): don't keep playing audio in the background. */
-    fun pauseForBackground() { if (!paused) mpv.setFlag("pause", true) }
+    fun pauseForBackground() {
+        inBackground = true
+        backgroundedAt = SystemClock.elapsedRealtime()
+        unhealthySinceBackground = true
+        healthyTicks = 0
+        foregroundJob?.cancel()
+        if (!paused) {
+            pausedForBackground = true
+            mpv.setFlag("pause", true)
+        }
+    }
+
+    /**
+     * The player is on screen again (PlayerActivity.onStart). It stays paused if it was paused for the
+     * background, but anything that failed meanwhile (error, unloaded file, stream ran dry) is reloaded
+     * now, and a torrent's engine/torrent are revived, so pressing Play works.
+     */
+    fun onForeground() {
+        if (!inBackground) return
+        inBackground = false
+        val away = SystemClock.elapsedRealtime() - backgroundedAt
+        lastProgressAt = SystemClock.elapsedRealtime()
+        foregroundJob?.cancel()
+        foregroundJob = scope.launch {
+            // Let the surface come back and mpv report its state.
+            delay(1500)
+            foregroundCheck(away)
+        }
+    }
+
+    private suspend fun foregroundCheck(away: Long) {
+        if (recoveryJob != null || resolving || mpv.destroyed) return
+        val eof = mpv.flag("eof-reached")
+        val nearEnd = durationMs > 0 && positionMs >= durationMs - 20_000
+        if (error != null || (fileStarted && mpv.flag("idle-active")) || (eof && (isLive || !nearEnd))) {
+            recoveryAttempts = 0
+            scheduleRecovery(lastFailure ?: "returned from the background", delayMs = 0)
+            return
+        }
+        val torrent = request.source.kind as? SourceKind.Torrent ?: return
+        if (away < 3_000) return
+        // The engine may have died or dropped the torrent meanwhile: revive it and re-add the torrent with
+        // its trackers before mpv reconnects to /stream by hash alone.
+        val generation = loadGeneration
+        val health = TorrServer.ensureRunning()
+        if (generation != loadGeneration || recoveryJob != null) return
+        if (health.restarted || !health.reachable) {
+            scheduleRecovery(TorrServer.lastError ?: "the torrent engine restarted", delayMs = 0)
+        } else {
+            runCatching { TorrServer.add(torrent.source) }
+        }
+    }
+
+    /** Watches for a stall after a background trip and resets the retry budget once playback is healthy. */
+    private fun trackHealth() {
+        val now = SystemClock.elapsedRealtime()
+        val progressing = now - lastProgressAt < 2_500
+        if (progressing && !paused) {
+            healthyTicks++
+            if (healthyTicks >= 20) {
+                recoveryAttempts = 0
+                lastFailure = null
+                if (!inBackground) unhealthySinceBackground = false
+            }
+        } else if (!paused) {
+            healthyTicks = 0
+        }
+        if (!unhealthySinceBackground || inBackground || recoveryJob != null || resolving || userPaused || pausedForBackground ||
+            error != null || !fileStarted || !(started || isLive)) return
+        val limit = if (isLive) 15_000L else if (torrentHash != null) 30_000L else 20_000L
+        if (now - lastProgressAt > limit) scheduleRecovery("playback stalled")
+    }
+
+    /**
+     * Reloads the current source behind the buffering UI: VOD/torrent/catch-up at the last position
+     * (re-resolved: torrent re-added, fresh headers), live channels re-tuned at the live edge (the
+     * timeshift buffer starts over). Keeps the pause state. After [MAX_RECOVERY_ATTEMPTS] failures in a
+     * row the error is shown.
+     */
+    private fun scheduleRecovery(reason: String, delayMs: Long? = null) {
+        if (recoveryJob != null || mpv.destroyed) return
+        recoveryAttempts++
+        if (recoveryAttempts > MAX_RECOVERY_ATTEMPTS) {
+            buffering = false
+            status = null
+            error = lastFailure ?: if (isLive) "The channel isn't responding." else "Playback stopped: $reason"
+            return
+        }
+        val attempt = recoveryAttempts
+        val wait = delayMs ?: longArrayOf(500L, 2_000L, 5_000L)[minOf(attempt - 1, 2)]
+        val r = request
+        val generation = loadGeneration
+        val resumeAt: Double? = when {
+            r.isLive -> null
+            started -> maxOf(0L, positionMs - 2_000L) / 1000.0
+            else -> r.startMs?.let { it / 1000.0 } ?: resume(r)
+        }
+        val stayPaused = userPaused || pausedForBackground
+        error = null
+        buffering = true
+        status = if (attempt == 1) "Reconnecting…" else "Reconnecting… (try $attempt of $MAX_RECOVERY_ATTEMPTS)"
+        recoveryJob = scope.launch {
+            try {
+                if (wait > 0) delay(wait)
+                if (generation != loadGeneration) return@launch
+                // Pooled connections may have died while the app was away.
+                Http.evictIdleConnections()
+                var source = r.source
+                val channelId = r.channelId
+                if (r.isLive && channelId != null) {
+                    DispatcharrRepo.client?.liveUrl(channelId)?.let { source = source.copy(kind = SourceKind.Direct(it)) }
+                }
+                val (url, headers) = resolve(source)
+                if (generation != loadGeneration) return@launch
+                // Events of the file being replaced must not count for the new one.
+                fileStarted = false; fileLoaded = false
+                lastProgressAt = SystemClock.elapsedRealtime(); lastProgressPos = -1; healthyTicks = 0
+                recoveryJob = null
+                mpv.setFlag("pause", stayPaused)
+                mpv.load(url, resumeAt, headers, r.isLive, r.catchup?.title ?: r.item.title)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation != loadGeneration) return@launch
+                lastFailure = e.message ?: "Can't play this"
+                recoveryJob = null
+                scheduleRecovery(lastFailure ?: reason)
+            }
+        }
+    }
+
+    /** keep-open reports EOF both at the real end and when the connection died mid-file. */
+    private fun handleEndOfStream() {
+        if (recoveryJob != null || !fileLoaded) return
+        if (isLive) {
+            // Live streams don't end: the connection was cut. Re-tune.
+            scheduleRecovery("stream ended")
+            return
+        }
+        val reachedEnd = if (durationMs <= 0) started else positionMs >= durationMs - 20_000
+        if (reachedEnd) onEnded() else scheduleRecovery("the stream was interrupted")
+    }
 
     // MARK: Live TV
 
@@ -366,13 +577,20 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     override fun onProperty(name: String, value: Any?) {
         when (name) {
-            "time-pos" -> if (fileLoaded) (value as? Double)?.let { positionMs = (it * 1000).toLong(); if (it > 0.3 && !started) onStarted() }
+            "time-pos" -> if (fileLoaded) (value as? Double)?.let {
+                positionMs = (it * 1000).toLong()
+                if (kotlin.math.abs(positionMs - lastProgressPos) > 50) {
+                    lastProgressPos = positionMs
+                    lastProgressAt = SystemClock.elapsedRealtime()
+                }
+                if (it > 0.3 && !started) onStarted()
+            }
             "duration" -> durationMs = ((value as? Double) ?: 0.0).times(1000).toLong()
             "pause" -> paused = value as? Boolean ?: false
             "paused-for-cache" -> buffering = value as? Boolean ?: false
             "core-idle" -> if (value == false && started) buffering = false
             "demuxer-cache-time" -> cachedMs = ((value as? Double) ?: 0.0).times(1000).toLong()
-            "eof-reached" -> if (value == true) onEnded()
+            "eof-reached" -> if (value == true) handleEndOfStream()
             "track-list" -> refreshTracks()
             "chapter-list" -> { chapters = mpv.chapters(); scope.launch { loadSegments() } }
         }
@@ -381,13 +599,26 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
     override fun onEvent(id: Int) {
         when (id) {
             Mpv.EVENT_START_FILE -> fileStarted = true
-            Mpv.EVENT_FILE_LOADED -> { fileLoaded = true; status = null; error = null; refreshTracks(); chapters = mpv.chapters() }
+            Mpv.EVENT_FILE_LOADED -> {
+                fileLoaded = true; status = null; error = null; refreshTracks(); chapters = mpv.chapters()
+                // A recovery reload that stays paused never reports "playing": drop the spinner here.
+                if (started && (userPaused || pausedForBackground)) buffering = false
+            }
             // END_FILE of the file being replaced (channel zap, next episode) arrives before START_FILE of the new one: ignore it.
-            Mpv.EVENT_END_FILE -> if (fileStarted && !started && error == null) {
-                val failed = request
-                scope.launch {
-                    delay(1500)
-                    if (!started && request === failed) { error = if (isLive) "The channel isn't responding." else "Playback failed."; buffering = false }
+            Mpv.EVENT_END_FILE -> if (fileStarted && recoveryJob == null && error == null) {
+                if (started || unhealthySinceBackground) {
+                    // Failed mid-playback or right after a background trip (dead connection): retry with
+                    // backoff before showing anything. keep-open means a normal end never sends END_FILE.
+                    lastFailure = if (isLive) "The channel isn't responding." else "Playback failed."
+                    scheduleRecovery("playback failed")
+                } else {
+                    val failed = request
+                    scope.launch {
+                        delay(1500)
+                        if (!started && request === failed && recoveryJob == null) {
+                            error = if (isLive) "The channel isn't responding." else "Playback failed."; buffering = false
+                        }
+                    }
                 }
             }
         }
@@ -414,6 +645,7 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
 
     private suspend fun tick() {
         saveProgress(force = false)
+        trackHealth()
         activeSegment?.let { s ->
             if (Settings.values.autoSkip && s.kind != "credits" && autoSkipped.add("${s.kind}${s.start}")) {
                 seekTo(s.end)
@@ -454,5 +686,9 @@ class PlayerController(private val context: Context, initial: PlaybackRequest) :
         torrentHash?.let { h -> CoroutineScope(Dispatchers.IO).launch { TorrServer.drop(h) } }
         scope.cancel()
         mpv.destroy()
+    }
+
+    private companion object {
+        const val MAX_RECOVERY_ATTEMPTS = 3
     }
 }

@@ -350,9 +350,9 @@ struct MediaDetailView: View {
     private func play(episode: EpisodeRef) {
         let upcoming = model.upcoming(after: episode)
         // Episodes hosted on the user's own server start instantly.
-        if let eid = episode.dispatcharrEpisodeID, let url = DispatcharrStore.shared.client?.episodeURL(eid, ext: episode.ext ?? "mp4") {
+        if let eid = episode.dispatcharrEpisodeID, let url = DispatcharrStore.shared.playbackClient(for: item)?.episodeURL(eid, ext: episode.ext ?? "mp4") {
             let source = PlaybackSource(id: "xc-ep-\(eid)", kind: .direct(url, headers: [:]), title: "\(item.title) \(episode.code)",
-                                        provider: DispatcharrStore.shared.activeServer?.name ?? "Server", isCached: true)
+                                        provider: DispatcharrStore.shared.playbackClient(for: item)?.server.name ?? "Server", isCached: true)
             player.play(PlaybackRequest(item: item, episode: episode, source: source, upcoming: upcoming))
         } else {
             sourceSheet = SourceSheetContext(item: item, episode: episode, upcoming: upcoming)

@@ -161,7 +161,7 @@ final class PiPController {
             let playing = player.rate > 0
             player.pause()
             hostView.playerLayer.player = nil
-            model?.resumeAfterHandoff(at: t.isFinite ? t : nil, play: playing || (restored && isActive))
+            model?.resumeAfterHandoff(at: t.isFinite ? t : nil, play: playing)
         }
         if mode == .frames, let renderer {
             let t = renderer.position
@@ -170,10 +170,10 @@ final class PiPController {
             hostView.sampleLayer.flush()
             if let model {
                 if model.isLive {
-                    model.resumeAfterHandoff(at: nil, play: playing || restored)
+                    model.resumeAfterHandoff(at: nil, play: playing)
                     model.goLive()
                 } else {
-                    model.resumeAfterHandoff(at: t, play: playing || (restored && isActive))
+                    model.resumeAfterHandoff(at: t, play: playing)
                 }
             }
         }
@@ -208,7 +208,7 @@ final class PiPController {
         if let renderer {
             renderer.setPaused(!playing)
         } else {
-            model?.player.setFlag("pause", !playing)
+            model?.setPausedByUser(!playing)
         }
         proxy?.paused = !playing
         pip?.invalidatePlaybackState()

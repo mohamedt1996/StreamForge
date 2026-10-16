@@ -19,7 +19,7 @@ android {
     defaultConfig {
         applicationId = "com.mohamedt.streamforge"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
     }

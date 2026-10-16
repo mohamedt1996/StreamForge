@@ -67,10 +67,8 @@ final class HomeModel {
             pool += catalogShelves.flatMap { $0.items.prefix(4) }.filter { $0.backdrop != nil }
         }
         if pool.count < 3 {
-            let store = DispatcharrStore.shared
-            if let id = store.activeServer?.id {
-                pool += store.movies.sorted { ($0.added ?? 0) > ($1.added ?? 0) }.prefix(6).map { $0.mediaItem(serverID: id) }
-            }
+            // Pre-sorted off the main thread by DispatcharrStore.
+            pool += DispatcharrStore.shared.recentMovieItems.prefix(6)
         }
         var seen = Set<String>()
         hero = Array(pool.filter { seen.insert($0.id).inserted }.prefix(7))
@@ -260,9 +258,11 @@ struct HomeView: View {
 
     @ViewBuilder
     private var recentlyAdded: some View {
-        if let serverID = store.activeServer?.id {
-            let movies = store.movies.sorted { ($0.added ?? 0) > ($1.added ?? 0) }.prefix(24).map { $0.mediaItem(serverID: serverID) }
-            let series = store.series.sorted { ($0.lastModified ?? 0) > ($1.lastModified ?? 0) }.prefix(24).map { $0.mediaItem(serverID: serverID) }
+        if store.activeServer != nil {
+            // Built with the library off the main thread (sorting tens of thousands of titles and
+            // cleaning their names here ran on every render of Home).
+            let movies = store.recentMovieItems.prefix(24)
+            let series = store.recentSeriesItems.prefix(24)
             Shelf(title: "Recently Added Movies", subtitle: store.activeServer?.name, items: Array(movies),
                   seeAll: { router.tab = .movies }) { posterButton($0) }
             Shelf(title: "Recently Updated Series", subtitle: store.activeServer?.name, items: Array(series),

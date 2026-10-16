@@ -42,6 +42,8 @@ struct PlayerScreen: View {
     @State var liveScrubbing: Double?
     @State var seekFeedback: String?
     @State var showNumberPad = false
+    @State var showingTrailer = false
+    @State var resumeAfterTrailer = false
     #if os(iOS)
     @State private var airPlayHandoff: AirPlayHandoffRequest?
     @State private var airPlayExplanation: String?
@@ -85,6 +87,16 @@ struct PlayerScreen: View {
             if !model.channelDigits.isEmpty && !showNumberPad { channelEntryBadge }
             if showNumberPad { numberPadOverlay.transition(.opacity) }
             if let panel { panelView(panel).transition(.move(edge: .trailing).combined(with: .opacity)) }
+            if showingTrailer {
+                VStack(spacing: 12) {
+                    NativeTrailerView(item: model.request.item, source: model.request.source, muted: false)
+                    Button("Back to Full") { returnFromTrailer() }
+                        .buttonStyle(.borderedProminent)
+                        .padding()
+                }
+                .background(.black)
+                .zIndex(11)
+            }
             #if os(iOS)
             // An overlay, not a fullScreenCover: a cover would fire this screen's onDisappear and stop mpv.
             if let handoff = airPlayHandoff {
@@ -129,6 +141,7 @@ struct PlayerScreen: View {
             #endif
         }
         .onDisappear {
+            hideTask?.cancel()
             model.stop()
             #if os(iOS)
             UIApplication.shared.isIdleTimerDisabled = false
@@ -144,7 +157,8 @@ struct PlayerScreen: View {
         .onPlayPauseCommand { model.togglePause(); showControls() }
         .onKeyPress(characters: .decimalDigits, phases: .down) { press in handleDigitKey(press.characters) }
         .onExitCommand {
-            if showNumberPad { showNumberPad = false; model.cancelDigits() }
+            if showingTrailer { returnFromTrailer() }
+            else if showNumberPad { showNumberPad = false; model.cancelDigits() }
             else if !model.channelDigits.isEmpty { model.cancelDigits() }
             else if panel != nil { panel = nil }
             else if controlsVisible && model.hasStarted { controlsVisible = false }

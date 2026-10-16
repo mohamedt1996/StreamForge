@@ -7,6 +7,11 @@ import com.mohamedt.streamforge.core.Episode
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.core.Store
 import com.mohamedt.streamforge.sync.RemoteSync
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -50,15 +55,33 @@ object Library {
     val lastChannel: Long? get() = snap.recentChannels.getOrNull(1)
     val watched get() = snap.watched
 
+    // library.json grows with every watched mark and position; it's written on one background thread
+    // (in order), coalescing bursts such as playback progress ticks into a single write.
+    private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    private val saveQueued = AtomicBoolean(false)
+
     private fun update(transform: (LibrarySnapshot) -> LibrarySnapshot) {
         snap = transform(snap)
-        Store.save(LibrarySnapshot.serializer(), snap, "library.json")
+        persist()
         RemoteSync.changed()
+    }
+
+    private fun persist() {
+        if (!saveQueued.compareAndSet(false, true)) return
+        saveScope.launch {
+            saveQueued.set(false)
+            // Reads the latest snapshot: anything changed after this read queues another write.
+            Store.save(LibrarySnapshot.serializer(), snap, "library.json")
+        }
     }
 
     fun key(item: MediaItem, episode: Episode?) = episode?.let { "${item.id}#${it.season}x${it.episode}" } ?: item.id
 
     fun isFavorite(item: MediaItem) = snap.favorites.any { it.id == item.id }
+    fun setFavorite(item: MediaItem, saved: Boolean) = update { s ->
+        val remaining = s.favorites.filter { it.id != item.id }
+        s.copy(favorites = if (saved) listOf(item) + remaining else remaining)
+    }
     fun toggleFavorite(item: MediaItem) = update { s ->
         s.copy(favorites = if (isFavorite(item)) s.favorites.filter { it.id != item.id } else listOf(item) + s.favorites)
     }

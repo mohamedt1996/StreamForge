@@ -15,6 +15,7 @@ import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.Executors
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -54,6 +55,9 @@ object DispatcharrUuids {
 
     private val serializer = MapSerializer(String.serializer(), String.serializer())
     private val maps = HashMap<String, MutableMap<String, String>>()
+    /** Writes run in order here, outside the lock: a REST library refresh records tens of thousands of
+     *  ids, and [uuid] is called on the main thread to build playback URLs. */
+    private val writer = Executors.newSingleThreadExecutor()
 
     private fun fileName(serverId: String) = "dispatcharr-uuids-$serverId.json"
 
@@ -63,23 +67,28 @@ object DispatcharrUuids {
     @Synchronized
     fun uuid(kind: Char, id: Long, serverId: String): String? = map(serverId)["$kind$id"]
 
-    @Synchronized
     fun record(kind: Char, entries: Map<Long, String>, serverId: String) {
         if (entries.isEmpty()) return
-        val m = map(serverId)
-        var changed = false
-        for ((id, uuid) in entries) {
-            if (uuid.isEmpty()) continue
-            val key = "$kind$id"
-            if (m[key] != uuid) { m[key] = uuid; changed = true }
+        val snapshot = synchronized(this) {
+            val m = map(serverId)
+            var changed = false
+            for ((id, uuid) in entries) {
+                if (uuid.isEmpty()) continue
+                val key = "$kind$id"
+                if (m[key] != uuid) { m[key] = uuid; changed = true }
+            }
+            if (!changed) return
+            HashMap(m)
         }
-        if (changed) Store.save(serializer, HashMap(m), fileName(serverId))
+        val name = fileName(serverId)
+        writer.execute { Store.save(serializer, snapshot, name) }
     }
 
-    @Synchronized
     fun remove(serverId: String) {
-        maps.remove(serverId)
-        Store.file(fileName(serverId)).delete()
+        synchronized(this) { maps.remove(serverId) }
+        val name = fileName(serverId)
+        // After any pending write of this map, so it isn't recreated.
+        writer.execute { Store.file(name).delete() }
     }
 }
 

@@ -232,8 +232,20 @@ struct SyncRecord: Decodable, Sendable {
     var deleted: Bool
     var updatedAt: Int64
     var rev: Int64
+    /// Set up for this user by the server admin (PROTOCOL.md §5).
+    var managed: Bool
 
-    enum CodingKeys: String, CodingKey { case collection, id, data, deleted, updatedAt, rev }
+    enum CodingKeys: String, CodingKey { case collection, id, data, deleted, updatedAt, rev, managed }
+
+    init(collection: String, id: String, data: SyncJSON?, deleted: Bool, updatedAt: Int64, rev: Int64, managed: Bool) {
+        self.collection = collection
+        self.id = id
+        self.data = data
+        self.deleted = deleted
+        self.updatedAt = updatedAt
+        self.rev = rev
+        self.managed = managed
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -244,6 +256,7 @@ struct SyncRecord: Decodable, Sendable {
         deleted = (try? c.decodeIfPresent(Bool.self, forKey: .deleted)) ?? false
         updatedAt = c.lenientInt64(.updatedAt) ?? 0
         rev = c.lenientInt64(.rev) ?? 0
+        managed = (try? c.decodeIfPresent(Bool.self, forKey: .managed)) ?? false
     }
 }
 

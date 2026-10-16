@@ -56,7 +56,7 @@ struct ProfilePickerView: View {
                 PINPadView(title: "Enter \(profile.name)'s PIN", subtitle: nil, error: pinError) { pin in
                     if store.verify(pin: pin, for: profile) {
                         pinFor = nil
-                        choose(profile)
+                        choose(profile, pin: pin)
                         return true
                     }
                     pinError = true
@@ -72,7 +72,7 @@ struct ProfilePickerView: View {
                         HStack(spacing: 30) {
                             ForEach(store.profiles) { profile in
                                 Button {
-                                    if profile.hasPIN && profile.id != store.activeProfileID {
+                                    if profile.hasPIN && (profile.id != store.activeProfileID || store.needsSelection) {
                                         pinError = false
                                         pinFor = profile
                                     } else {
@@ -106,8 +106,8 @@ struct ProfilePickerView: View {
         }
     }
 
-    private func choose(_ profile: UserProfile) {
-        store.select(profile.id)
+    private func choose(_ profile: UserProfile, pin: String? = nil) {
+        store.select(profile.id, pin: pin)
         finish()
     }
 
@@ -250,7 +250,7 @@ struct ProfilesSettingsView: View {
                         }
                     }
                     .contextMenu {
-                        Button { store.select(profile.id) } label: { Label("Switch to \(profile.name)", systemImage: "person.crop.circle") }
+                        Button { store.needsSelection = true } label: { Label("Switch to \(profile.name)", systemImage: "person.crop.circle") }
                         if store.profiles.count > 1 {
                             Button(role: .destructive) { store.delete(profile) } label: { Label("Delete", systemImage: "trash") }
                         }

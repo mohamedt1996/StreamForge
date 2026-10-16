@@ -78,6 +78,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/admin/users/{id}", a.adminOnly(a.handleAdminUser))
 	mux.HandleFunc("PUT /api/admin/users/{id}/settings", a.adminOnly(a.handlePutUserSettings))
 	mux.HandleFunc("POST /api/admin/users/{id}/copy", a.adminOnly(a.handleCopyFromUser))
+	mux.HandleFunc("POST /api/admin/users/{id}/dismissed/restore", a.adminOnly(a.handleRestoreDismissed))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "no such endpoint")

@@ -28,46 +28,28 @@ struct VODFilter: Equatable {
     var isActive: Bool { genre != nil || decade != nil || minRating > 0 || unwatchedOnly }
 }
 
-/// Pre-built MediaItems for the whole Dispatcharr VOD library, rebuilt off the main thread when
-/// the library changes. Browsing 50k titles stays smooth because cleaning/mapping happens once.
+/// The Dispatcharr VOD library as MediaItems, with per-category slices and the shelves. Everything is
+/// built off the main thread by `DispatcharrStore` together with the library (titles are cleaned
+/// once there), so this is a thin, observable view of the store's published data.
 @MainActor
 @Observable
 final class VODIndex {
     static let shared = VODIndex()
 
-    private(set) var movies: [MediaItem] = []
-    private(set) var series: [MediaItem] = []
-    private(set) var moviesByCategory: [String: [MediaItem]] = [:]
-    private(set) var seriesByCategory: [String: [MediaItem]] = [:]
-    private(set) var isBuilding = false
-    private var builtKey: String?
-
     private init() {}
 
-    func rebuildIfNeeded() {
-        let store = DispatcharrStore.shared
-        guard let serverID = store.activeServer?.id else {
-            movies = []; series = []; moviesByCategory = [:]; seriesByCategory = [:]; builtKey = nil
-            return
-        }
-        let key = "\(serverID)-\(store.movies.count)-\(store.series.count)-\(store.movies.first?.id ?? 0)-\(store.lastRefresh?.timeIntervalSince1970 ?? 0)"
-        guard key != builtKey, !isBuilding else { return }
-        isBuilding = true
-        let rawMovies = store.movies
-        let rawSeries = store.series
-        Task {
-            let built = await Task.detached(priority: .userInitiated) { () -> ([MediaItem], [MediaItem]) in
-                (rawMovies.map { $0.mediaItem(serverID: serverID) }, rawSeries.map { $0.mediaItem(serverID: serverID) })
-            }.value
-            self.movies = built.0
-            self.series = built.1
-            self.moviesByCategory = Dictionary(grouping: built.0) { $0.categoryID ?? "0" }
-            self.seriesByCategory = Dictionary(grouping: built.1) { $0.categoryID ?? "0" }
-            self.builtKey = key
-            self.isBuilding = false
-        }
-    }
+    private var store: DispatcharrStore { DispatcharrStore.shared }
 
+    var movies: [MediaItem] { store.movieItems }
+    var series: [MediaItem] { store.seriesItems }
+    var moviesByCategory: [String: [MediaItem]] { store.movieItemsByCategory }
+    var seriesByCategory: [String: [MediaItem]] { store.seriesItemsByCategory }
+    var isBuilding: Bool { store.isBuildingVOD }
+
+    /// Kept for callers: the store rebuilds the items whenever the library or the filters change.
+    func rebuildIfNeeded() {}
+
+    /// All items, or one category's (newest first).
     func items(_ kind: MediaType, categoryID: String?) -> [MediaItem] {
         if let categoryID {
             return (kind == .series ? seriesByCategory : moviesByCategory)[categoryID] ?? []
@@ -75,21 +57,45 @@ final class VODIndex {
         return kind == .series ? series : movies
     }
 
+    /// Newest 30.
+    func recent(_ kind: MediaType) -> [MediaItem] { kind == .series ? store.recentSeriesItems : store.recentMovieItems }
+    /// Best rated (7+) 30.
+    func topRated(_ kind: MediaType) -> [MediaItem] { kind == .series ? store.topSeriesItems : store.topMovieItems }
+
+    /// Filters and sorts on a detached task; nil when the calling task was cancelled (a newer
+    /// filter or keystroke superseded it).
+    nonisolated static func filtered(_ filter: VODFilter, items: [MediaItem], watched: Set<String>) async -> [MediaItem]? {
+        await detachedCancellable { VODIndex.apply(filter, to: items, watched: watched, checkCancellation: true) }
+    }
+
     nonisolated static func apply(_ filter: VODFilter, to items: [MediaItem], watched: Set<String>) -> [MediaItem] {
-        let q = filter.query.trimmed.lowercased()
-        var out = items.filter { item in
-            if !q.isEmpty, !item.title.lowercased().contains(q) { return false }
-            if let g = filter.genre, !item.genres.contains(where: { $0.localizedCaseInsensitiveContains(g) }) { return false }
+        apply(filter, to: items, watched: watched, checkCancellation: false) ?? []
+    }
+
+    nonisolated private static func apply(_ filter: VODFilter, to items: [MediaItem], watched: Set<String>,
+                                          checkCancellation: Bool) -> [MediaItem]? {
+        let q = filter.query.trimmed
+        let fold: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        var out: [MediaItem] = []
+        for (n, item) in items.enumerated() {
+            if checkCancellation, n % 4096 == 0, Task.isCancelled { return nil }
+            if !q.isEmpty, item.title.range(of: q, options: fold) == nil { continue }
+            if let g = filter.genre, !item.genres.contains(where: { $0.range(of: g, options: fold) != nil }) { continue }
             if let d = filter.decade {
-                guard let y = item.year, y >= d, y < d + 10 else { return false }
+                guard let y = item.year, y >= d, y < d + 10 else { continue }
             }
-            if filter.minRating > 0, (item.rating ?? 0) < filter.minRating { return false }
-            if filter.unwatchedOnly, watched.contains(item.id) { return false }
-            return true
+            if filter.minRating > 0, (item.rating ?? 0) < filter.minRating { continue }
+            if filter.unwatchedOnly, watched.contains(item.id) { continue }
+            out.append(item)
         }
+        if checkCancellation, Task.isCancelled { return nil }
         switch filter.sort {
         case .added: out.sort { ($0.added ?? .distantPast) > ($1.added ?? .distantPast) }
-        case .title: out.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .title:
+            // Fold each title once (not per comparison) and compare without locale lookups: sorting
+            // tens of thousands of titles with localizedStandardCompare takes seconds.
+            let keyed = out.map { ($0.title.folding(options: fold, locale: nil), $0) }
+            out = keyed.sorted { $0.0.compare($1.0, options: [.numeric]) == .orderedAscending }.map { $0.1 }
         case .year: out.sort { ($0.year ?? 0, $0.added ?? .distantPast) > ($1.year ?? 0, $1.added ?? .distantPast) }
         case .rating: out.sort { ($0.rating ?? 0) > ($1.rating ?? 0) }
         }

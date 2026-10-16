@@ -215,6 +215,36 @@ final class PlayerModel: MPVPlayerDelegate {
     var showStats = false
     private(set) var stats: [(String, String)] = []
 
+    // Recovery after the app was in the background / the stream dropped.
+    // iOS suspends the app when nothing plays in the background: mpv's HTTP connections time out,
+    // live streams hit EOF, and the embedded TorrServer can die or drop the torrent. Instead of
+    // showing "Can't play this", the player reloads the same source (re-resolved: torrent re-added,
+    // fresh headers) at the last position, or re-tunes a live channel, behind the buffering UI.
+    @ObservationIgnored private var lifecycleObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var isInBackground = false
+    @ObservationIgnored private var backgroundedAt: Date?
+    /// Set when the app goes to the background; cleared after a stretch of healthy playback.
+    /// While set, load failures, errors and stalls are retried instead of shown.
+    @ObservationIgnored private var unhealthySinceBackground = false
+    @ObservationIgnored private var lastProgressAt = Date()
+    @ObservationIgnored private var lastProgressPosition: Double = -1
+    @ObservationIgnored private var healthyTicks = 0
+    @ObservationIgnored private var recoveryAttempts = 0
+    @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var foregroundTask: Task<Void, Never>?
+    @ObservationIgnored private var lastFailure: String?
+    /// Bumped by every `load`, so a recovery started for an older load never touches a newer one.
+    @ObservationIgnored private var loadGeneration = 0
+    @ObservationIgnored private var isResolving = false
+    /// What the user asked for (mpv's own `pause` also flips at keep-open EOF and during hand-offs).
+    @ObservationIgnored private var userPaused = false
+    /// AirPlay / PiP own playback: the main mpv is paused on purpose and must not be "recovered".
+    @ObservationIgnored private var handoffActive = false
+    @ObservationIgnored private var trailerHandoffActive = false
+    /// mpv was paused because another app took the audio session.
+    @ObservationIgnored private var pausedByInterruption = false
+    private static let maxRecoveryAttempts = 3
+
     private var resolveTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var lastSavedPosition: Double = 0
@@ -318,9 +348,11 @@ final class PlayerModel: MPVPlayerDelegate {
                 await self?.tick()
             }
         }
+        observeLifecycle()
     }
 
     func stop() {
+        loadGeneration += 1
         #if os(iOS)
         stopPictureInPicture()
         #endif
@@ -336,6 +368,11 @@ final class PlayerModel: MPVPlayerDelegate {
         aniSkipTask?.cancel()
         introDBTask?.cancel()
         toastTask?.cancel()
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        foregroundTask?.cancel()
+        for o in lifecycleObservers { NotificationCenter.default.removeObserver(o) }
+        lifecycleObservers = []
         pipSync = nil
         player.command("stop")
         player.shutdown()
@@ -351,25 +388,50 @@ final class PlayerModel: MPVPlayerDelegate {
     private func load(_ req: PlaybackRequest) {
         request = req
         resetState()
+        loadGeneration += 1
+        let generation = loadGeneration
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryAttempts = 0
+        lastFailure = nil
+        lastProgressAt = Date()
+        lastProgressPosition = -1
+        // New content always plays: mpv keeps `pause` across loadfile (and keep-open pauses at EOF),
+        // which would otherwise start the next channel/episode paused behind a "playing" UI.
+        userPaused = false
+        pausedByInterruption = false
+        player.setFlag("pause", false)
         resolveTask?.cancel()
+        isResolving = true
         resolveTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let (url, headers) = try await self.resolve(req.source)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == self.loadGeneration else { return }
                 let start = req.startPosition ?? self.resumePosition(for: req)
                 self.resolvedURL = url
                 self.resolvedHeaders = headers
                 let timeshift = self.timeshiftConfig(for: req)
                 self.timeshiftActive = timeshift != nil
                 if timeshift != nil { self.usedTimeshift = true }
+                self.lastProgressAt = Date()
                 self.player.load(url, start: start, headers: headers, title: req.displayTitle, live: req.isLive, timeshift: timeshift)
+                self.isResolving = false
                 self.updateNowPlaying()
                 await self.loadAddonSubtitles(for: req)
             } catch is CancellationError {
+                if generation == self.loadGeneration { self.isResolving = false }
             } catch {
-                self.errorText = error.localizedDescription
-                self.isBuffering = false
+                guard !Task.isCancelled, generation == self.loadGeneration else { return }
+                self.isResolving = false
+                self.lastFailure = error.localizedDescription
+                if self.unhealthySinceBackground && !Task.isCancelled {
+                    // E.g. the app was suspended while the torrent was still being fetched.
+                    self.scheduleRecovery(reason: error.localizedDescription)
+                } else {
+                    self.errorText = error.localizedDescription
+                    self.isBuffering = false
+                }
             }
         }
         if req.isLive, let id = req.channelID { Task { await refreshProgramme(id) } }
@@ -427,6 +489,10 @@ final class PlayerModel: MPVPlayerDelegate {
                 throw HTTPError.transport("Add your Dispatcharr web password in Settings to play recordings.")
             }
             let url = try await rest.recordingURL(id)
+            // The recording endpoint needs a valid JWT and mpv can't renew it, so make sure the
+            // cached access token still works first (`me()` renews/re-logs in on a 401) — it may
+            // have expired while the app was in the background.
+            _ = try? await rest.me()
             return (url, await rest.playbackHeaders)
         case .torrent(let t):
             let engine = TorrentEngine.shared
@@ -440,6 +506,7 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     private func loadAddonSubtitles(for req: PlaybackRequest) async {
+        let generation = loadGeneration
         var subs = req.source.subtitles
         let type = req.item.type == .movie ? "movie" : "series"
         let id: String?
@@ -452,6 +519,7 @@ final class PlayerModel: MPVPlayerDelegate {
             let fetched = await AddonManager.shared.subtitles(type: type, id: id, videoSize: req.source.sizeBytes, filename: req.source.filename)
             subs.append(contentsOf: fetched)
         }
+        guard !Task.isCancelled, generation == loadGeneration else { return }
         let preferred = AppSettings.shared.values.preferredSubtitleLanguage
         // Preferred language first, then alphabetical by language name.
         addonSubtitles = subs.sorted { a, b in
@@ -466,7 +534,19 @@ final class PlayerModel: MPVPlayerDelegate {
 
     func togglePause() {
         if ended { seek(to: 0); ended = false }
-        player.setFlag("pause", !isPaused)
+        setPausedByUser(!isPaused)
+    }
+
+    /// Pause/play on the user's behalf (controls, remote commands, PiP buttons).
+    func setPausedByUser(_ paused: Bool) {
+        guard !trailerHandoffActive else { return }
+        userPaused = paused
+        pausedByInterruption = false
+        // Paused time is not a stall.
+        lastProgressAt = Date()
+        // The session may have been taken by another app while we were paused.
+        if !paused { try? AVAudioSession.sharedInstance().setActive(true) }
+        player.setFlag("pause", paused)
     }
 
     func seek(to seconds: Double) {
@@ -501,7 +581,7 @@ final class PlayerModel: MPVPlayerDelegate {
         guard timeshiftActive else { return }
         refreshLiveWindow()
         performSeek(to: liveEdge)
-        if isPaused { player.setFlag("pause", false) }
+        if isPaused { setPausedByUser(false) }
     }
 
     func refreshLiveWindow() {
@@ -690,11 +770,19 @@ final class PlayerModel: MPVPlayerDelegate {
     /// An AirPlay receiver can fetch the current source itself.
     var isAirPlayCompatible: Bool { resolvedURL.map { AVPlaybackCompatibility.isAirPlayCompatible($0) } ?? false }
 
-    func pauseForHandoff() { player.setFlag("pause", true) }
+    func pauseForHandoff(forTrailer: Bool = false) {
+        trailerHandoffActive = forTrailer
+        handoffActive = true
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        player.setFlag("pause", true)
+    }
 
     func resumeAfterHandoff(at seconds: Double?, play: Bool) {
+        trailerHandoffActive = false
+        handoffActive = false
         if let s = seconds, s.isFinite, s > 1, !isLive { performSeek(to: s) }
-        player.setFlag("pause", !play)
+        setPausedByUser(!play)
     }
 
     // MARK: Volume
@@ -742,7 +830,15 @@ final class PlayerModel: MPVPlayerDelegate {
 
     func retry() {
         errorText = nil
-        load(request)
+        if hasStarted {
+            // Pick up where playback stopped (re-resolving the source), not from the original start.
+            recoveryTask?.cancel()
+            recoveryTask = nil
+            recoveryAttempts = 0
+            scheduleRecovery(reason: "retry", delay: 0)
+        } else {
+            load(request)
+        }
     }
 
     // MARK: Episodes / channels
@@ -877,6 +973,10 @@ final class PlayerModel: MPVPlayerDelegate {
         case "time-pos":
             if let v = value as? Double {
                 position = v
+                if abs(v - lastProgressPosition) > 0.05 {
+                    lastProgressPosition = v
+                    lastProgressAt = Date()
+                }
                 if v > 0.3 && !hasStarted { didStart() }
                 if !skipSegments.isEmpty { autoSkipIfNeeded(at: v) }
             }
@@ -902,7 +1002,7 @@ final class PlayerModel: MPVPlayerDelegate {
         case "demuxer-cache-time":
             cachedUntil = (value as? Double) ?? 0
         case "eof-reached":
-            if (value as? Bool) == true { didReachEnd() }
+            if (value as? Bool) == true { handleEndOfStream() }
         case "video-params/sig-peak":
             isHDR = ((value as? Double) ?? 1) > 1
         case "speed":
@@ -918,6 +1018,8 @@ final class PlayerModel: MPVPlayerDelegate {
     func mpvFileLoaded() {
         statusText = nil
         errorText = nil
+        // A recovery reload that keeps the user's pause never reports "playing": drop the spinner here.
+        if hasStarted && (userPaused || pausedByInterruption) { isBuffering = false }
         duration = player.double("duration") ?? 0
         chapters = player.chapters()
         if fit != .fit { setFit(fit) }
@@ -931,9 +1033,21 @@ final class PlayerModel: MPVPlayerDelegate {
     }
 
     func mpvEndFile(error: String?) {
+        // The file being replaced by a recovery reload: its failure is why we're reloading.
+        guard recoveryTask == nil else { return }
         if let error {
-            errorText = isLive ? "The channel stopped responding (\(error))." : "Playback failed: \(error)"
+            lastFailure = isLive ? "The channel stopped responding (\(error))." : "Playback failed: \(error)"
+            // Network errors during/right after a background period, or after playback had started,
+            // are retried (with backoff) before anything is shown.
+            if (unhealthySinceBackground || hasStarted) && !handoffActive {
+                scheduleRecovery(reason: error)
+                return
+            }
+            errorText = lastFailure
             isBuffering = false
+        } else if isLive && !handoffActive {
+            // A live stream doesn't end: it was cut. Re-tune.
+            scheduleRecovery(reason: "stream ended")
         }
     }
 
@@ -954,6 +1068,24 @@ final class PlayerModel: MPVPlayerDelegate {
         updateNowPlaying()
     }
 
+    /// mpv (keep-open) reports EOF both at the real end and when the connection died mid-file
+    /// (the demuxer just runs out of data). Only the former is "ended".
+    private func handleEndOfStream() {
+        guard recoveryTask == nil, !handoffActive else { return }
+        if isLive {
+            // Live streams don't end: the connection was cut (typically after a suspension). Re-tune.
+            scheduleRecovery(reason: "stream ended")
+            return
+        }
+        let reachedEnd = duration <= 0 ? hasStarted : position >= duration - 20
+        if reachedEnd {
+            didReachEnd()
+        } else {
+            // EOF far from the end (or before anything played): the stream dropped.
+            scheduleRecovery(reason: "the stream was interrupted")
+        }
+    }
+
     private func didReachEnd() {
         guard !isLive else { return }
         ended = true
@@ -965,6 +1097,7 @@ final class PlayerModel: MPVPlayerDelegate {
 
     private func tick() async {
         saveProgress(force: false)
+        trackHealth()
         commitSeekChain()
         if timeshiftActive { refreshLiveWindow() }
         if showStats { refreshStats() }
@@ -1032,6 +1165,202 @@ final class PlayerModel: MPVPlayerDelegate {
         return nil
     }
 
+    // MARK: Background / foreground recovery
+
+    private func observeLifecycle() {
+        guard lifecycleObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        // All three are delivered on the main queue (`queue: .main`).
+        lifecycleObservers = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { () -> Void in self?.appDidEnterBackground() }
+            },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { () -> Void in self?.appDidBecomeActive() }
+            },
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(),
+                               queue: .main) { [weak self] note in
+                let rawType = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                let began = rawType.flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
+                let rawOptions = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                let shouldResume = AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume)
+                MainActor.assumeIsolated { () -> Void in self?.audioInterruption(began: began, shouldResume: shouldResume) }
+            },
+        ]
+    }
+
+    private var pipBusy: Bool {
+        #if os(iOS)
+        if let pip = pipStorage as? PiPController { return pip.isActive || pip.isStarting }
+        #endif
+        return false
+    }
+
+    private func appDidEnterBackground() {
+        isInBackground = true
+        backgroundedAt = Date()
+        unhealthySinceBackground = true
+        healthyTicks = 0
+        foregroundTask?.cancel()
+        saveProgress(force: true)
+    }
+
+    /// Also fires after Control Center / notification banners; only acts after a real background trip.
+    private func appDidBecomeActive() {
+        guard isInBackground else { return }
+        isInBackground = false
+        let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
+        backgroundedAt = nil
+        // Time spent suspended is not a stall; measure from now.
+        lastProgressAt = Date()
+        reactivateAudio()
+        foregroundTask?.cancel()
+        foregroundTask = Task { [weak self] in
+            // Give mpv a moment to bring video back and report what state it is in.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await self.foregroundCheck(away: away)
+        }
+    }
+
+    private func foregroundCheck(away: TimeInterval) async {
+        guard recoveryTask == nil, !handoffActive, !pipBusy, !isResolving, !ended else { return }
+        let eof = player.flag("eof-reached")
+        let nearEnd = duration > 0 && position >= duration - 20
+        if errorText != nil || player.flag("idle-active") || (eof && (isLive || !nearEnd)) {
+            // Failed while away (error shown, file unloaded, or the stream ran dry): reload now.
+            recoveryAttempts = 0
+            scheduleRecovery(reason: lastFailure ?? "returned from the background", delay: 0)
+            return
+        }
+        guard case .torrent(let source) = request.source.kind, away > 3 else { return }
+        // The engine may have died (or dropped the torrent) while the app was suspended: revive it and
+        // re-add the torrent with its trackers before mpv reconnects to /stream by hash alone.
+        let generation = loadGeneration
+        let health = await TorrentEngine.shared.ensureRunning()
+        guard generation == loadGeneration, recoveryTask == nil, !handoffActive else { return }
+        if health.restarted || !health.reachable {
+            scheduleRecovery(reason: TorrentEngine.shared.lastError ?? "the torrent engine restarted", delay: 0)
+        } else {
+            _ = try? await TorrentEngine.shared.add(source)
+        }
+    }
+
+    private func reactivateAudio() {
+        // Only when we mean to play: activating would stop another app's music under a paused player.
+        guard !userPaused, !handoffActive else { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        if pausedByInterruption {
+            // iOS often never sends "interruption ended" (the other app didn't deactivate its session).
+            pausedByInterruption = false
+            player.command("ao-reload")
+            if !userPaused && !handoffActive { player.setFlag("pause", false) }
+        }
+    }
+
+    private func audioInterruption(began: Bool, shouldResume: Bool) {
+        if began {
+            // Another app took the audio: pause like any media app (and remember it wasn't the user).
+            if !userPaused && !isPaused && !handoffActive {
+                pausedByInterruption = true
+                player.setFlag("pause", true)
+            }
+        } else {
+            try? AVAudioSession.sharedInstance().setActive(true)
+            // The audio unit may not come back by itself after an interruption.
+            player.command("ao-reload")
+            if pausedByInterruption && !userPaused && !handoffActive && (shouldResume || !isInBackground) {
+                player.setFlag("pause", false)
+            }
+            pausedByInterruption = false
+            lastProgressAt = Date()
+        }
+    }
+
+    /// Called every second: watches for a stall after a background trip and resets the retry budget
+    /// once playback has been healthy for a while.
+    private func trackHealth() {
+        let progressing = Date().timeIntervalSince(lastProgressAt) < 2.5
+        if progressing && !isPaused {
+            healthyTicks += 1
+            if healthyTicks >= 20 {
+                recoveryAttempts = 0
+                lastFailure = nil
+                if !isInBackground { unhealthySinceBackground = false }
+            }
+        } else if !isPaused {
+            healthyTicks = 0
+        }
+
+        // Stall watchdog: only after returning from the background, only while the user wants it to play.
+        guard unhealthySinceBackground, !isInBackground, recoveryTask == nil, !isResolving, !handoffActive, !pipBusy,
+              !userPaused, !pausedByInterruption, !ended, errorText == nil, resolvedURL != nil,
+              hasStarted || isLive else { return }
+        let limit: TimeInterval = isLive ? 15 : (resolvedTorrentHash != nil ? 30 : 20)
+        if Date().timeIntervalSince(lastProgressAt) > limit {
+            scheduleRecovery(reason: "playback stalled")
+        }
+    }
+
+    /// Reloads the current source behind the buffering UI: VOD/torrent/catch-up at the last position
+    /// (re-resolving it: torrent re-added, fresh headers), live channels re-tuned at the live edge
+    /// (a timeshift buffer starts over). Keeps the user's pause state. After
+    /// `maxRecoveryAttempts` failures in a row the error is shown.
+    private func scheduleRecovery(reason: String, delay: Double? = nil) {
+        guard recoveryTask == nil, !handoffActive else { return }
+        recoveryAttempts += 1
+        guard recoveryAttempts <= Self.maxRecoveryAttempts else {
+            isBuffering = false
+            statusText = nil
+            errorText = lastFailure ?? (isLive ? "The channel stopped responding." : "Playback stopped: \(reason)")
+            return
+        }
+        let attempt = recoveryAttempts
+        let wait = delay ?? [0.5, 2.0, 5.0][min(attempt - 1, 2)]
+        let req = request
+        let generation = loadGeneration
+        let resumeAt: Double? = req.isLive ? nil : (hasStarted ? max(0, position - 2) : (req.startPosition ?? resumePosition(for: req)))
+        let stayPaused = userPaused
+        errorText = nil
+        ended = false
+        isBuffering = true
+        statusText = attempt == 1 ? "Reconnecting…" : "Reconnecting… (try \(attempt) of \(Self.maxRecoveryAttempts))"
+        recoveryTask = Task { [weak self] in
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            guard let self, !Task.isCancelled, generation == self.loadGeneration else { return }
+            // Pooled connections may be dead after a suspension.
+            await HTTPClient.shared.flushConnections()
+            var source = req.source
+            if req.isLive, let id = req.channelID, let url = DispatcharrStore.shared.client?.liveURL(id) {
+                source.kind = .direct(url, headers: [:])
+            }
+            do {
+                let (url, headers) = try await self.resolve(source)
+                guard !Task.isCancelled, generation == self.loadGeneration else { return }
+                self.resolvedURL = url
+                self.resolvedHeaders = headers
+                let timeshift = self.timeshiftConfig(for: req)
+                self.timeshiftActive = timeshift != nil
+                self.liveRangeStart = 0
+                self.liveRangeEnd = 0
+                if timeshift != nil { self.usedTimeshift = true }
+                self.lastProgressAt = Date()
+                self.lastProgressPosition = -1
+                self.healthyTicks = 0
+                self.recoveryTask = nil
+                // mpv keeps `pause` across loadfile; keep-open set it at EOF. Restore the user's choice.
+                self.player.setFlag("pause", stayPaused)
+                self.player.load(url, start: resumeAt, headers: headers, title: req.displayTitle, live: req.isLive, timeshift: timeshift)
+                self.updateNowPlaying()
+            } catch {
+                guard !Task.isCancelled, generation == self.loadGeneration else { return }
+                self.lastFailure = error.localizedDescription
+                self.recoveryTask = nil
+                self.scheduleRecovery(reason: error.localizedDescription)
+            }
+        }
+    }
+
     // MARK: System integration
 
     private func configureAudioSession() {
@@ -1047,8 +1376,8 @@ final class PlayerModel: MPVPlayerDelegate {
         center.pauseCommand.removeTarget(nil)
         center.changePlaybackPositionCommand.removeTarget(nil)
         center.togglePlayPauseCommand.addTarget { [weak self] _ in self?.togglePause(); return .success }
-        center.playCommand.addTarget { [weak self] _ in self?.player.setFlag("pause", false); return .success }
-        center.pauseCommand.addTarget { [weak self] _ in self?.player.setFlag("pause", true); return .success }
+        center.playCommand.addTarget { [weak self] _ in self?.setPausedByUser(false); return .success }
+        center.pauseCommand.addTarget { [weak self] _ in self?.setPausedByUser(true); return .success }
         center.changePlaybackPositionCommand.addTarget { [weak self] e in
             guard let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             self?.seek(to: e.positionTime)

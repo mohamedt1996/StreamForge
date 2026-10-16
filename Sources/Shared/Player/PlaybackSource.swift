@@ -24,6 +24,7 @@ struct PlaybackSource: Identifiable, Hashable {
     var bingeGroup: String?
     var subtitles: [StremioSubtitle] = []
     var filename: String?
+    var trailerURL: URL?
 
     var isTorrent: Bool { if case .torrent = kind { return true }; return false }
 
@@ -72,7 +73,8 @@ enum StreamTextParser {
            let nr = Range(m.range(at: 1), in: text), let ur = Range(m.range(at: 2), in: text),
            let value = Double(text[nr].replacingOccurrences(of: ",", with: ".")) {
             let unit = text[ur].lowercased()
-            p.size = Int64(value * (unit.hasPrefix("g") ? 1_073_741_824 : 1_048_576))
+            let bytes = value * (unit.hasPrefix("g") ? 1_073_741_824 : 1_048_576)
+            if bytes.isFinite, bytes >= 0, bytes < Double(Int64.max) { p.size = Int64(bytes) }
         }
         if let m = seedRegex.firstMatch(in: text, range: ns), let r = Range(m.range(at: 1), in: text) {
             p.seeders = Int(text[r])
@@ -100,6 +102,8 @@ final class SourcesModel {
     private(set) var loadingAddons: Set<String> = []
     private(set) var isLoading = false
     private(set) var subtitles: [StremioSubtitle] = []
+
+    private var loadID = UUID()
 
     let item: MediaItem
     let episode: EpisodeRef?
@@ -135,18 +139,23 @@ final class SourcesModel {
     }
 
     func load() async {
+        let generation = UUID()
+        loadID = generation
         isLoading = true
         sources = []
+        subtitles = []
+        loadingAddons = []
+        defer { if loadID == generation { isLoading = false; loadingAddons = [] } }
         await prepareDispatcharrPlayback()
+        guard !Task.isCancelled, loadID == generation else { return }
         addDispatcharrSources()
-        await loadAddonStreams()
-        isLoading = false
+        await loadAddonStreams(generation: generation)
     }
 
     /// REST streaming servers address streams by UUID: look up any this device hasn't seen yet
     /// (e.g. an episode from Continue Watching synced from another device).
     private func prepareDispatcharrPlayback() async {
-        guard let client = DispatcharrStore.shared.client, client.server.usesRESTStreaming else { return }
+        guard let client = DispatcharrStore.shared.playbackClient(for: item), client.server.usesRESTStreaming else { return }
         var movieID: Int?
         if case .dispatcharrMovie(_, let id, _) = item.origin { movieID = id }
         await client.preparePlayback(movieID: episode == nil ? movieID : nil, episodeID: episode?.dispatcharrEpisodeID)
@@ -154,7 +163,8 @@ final class SourcesModel {
 
     private func addDispatcharrSources() {
         let store = DispatcharrStore.shared
-        guard let server = store.activeServer, let client = store.client else { return }
+        guard let client = store.playbackClient(for: item) else { return }
+        let server = client.server
         let name = server.name.isEmpty ? "Dispatcharr" : server.name
 
         func add(url: URL?, title: String, detail: String?, ext: String?) {
@@ -184,7 +194,7 @@ final class SourcesModel {
         }
     }
 
-    private func loadAddonStreams() async {
+    private func loadAddonStreams(generation: UUID) async {
         let type = item.type == .movie ? "movie" : "series"
         let id: String?
         if let episode {
@@ -199,14 +209,14 @@ final class SourcesModel {
         let itemTitle = item.title
         let itemID = item.id
         await AddonManager.shared.streams(type: type, id: id) { [weak self] addon, streams in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.loadID == generation else { return }
             self.loadingAddons.remove(addon.id)
             self.sources.append(contentsOf: streams.enumerated().compactMap { i, s in
                 Self.makeSource(s, index: i, addon: addon, episode: ep, poster: poster, itemTitle: itemTitle, itemID: itemID)
             })
             for s in streams { self.subtitles.append(contentsOf: s.subtitles) }
         }
-        loadingAddons = []
+        if loadID == generation { loadingAddons = [] }
     }
 
     static func makeSource(_ s: StremioStream, index: Int, addon: InstalledAddon, episode: EpisodeRef?, poster: URL?, itemTitle: String,

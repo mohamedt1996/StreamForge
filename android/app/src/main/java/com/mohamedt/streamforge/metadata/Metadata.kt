@@ -45,7 +45,7 @@ object Metadata {
         var seasons = emptyList<Int>()
 
         // 1. Provider (Dispatcharr): ids, plot, playable episodes.
-        val client = DispatcharrRepo.client
+        val client = DispatcharrRepo.playbackClient(item)
         if (client != null) when (item.origin.kind) {
             "xc-movie" -> runCatching { client.vodInfo(item.origin.id) }.getOrNull()?.let { v ->
                 it = it.copy(

@@ -470,27 +470,32 @@ class DispatcharrRest(private val server: Server) {
 
 // Mapping to MediaItem
 
-fun Movie.toItem(serverId: String): MediaItem {
-    val (title, y) = TitleCleaner.clean(name)
+fun Movie.toItem(serverId: String): MediaItem = toItem(serverId, TitleCleaner.clean(name))
+
+/** [cleaned] is TitleCleaner.clean(name), passed in when the caller already has it (regex work is the costly part). */
+fun Movie.toItem(serverId: String, cleaned: Pair<String, Int?>): MediaItem {
+    val (title, y) = cleaned
     return MediaItem(
         id = "xc:${serverId.take(8)}:movie:$id", type = MediaType.MOVIE, title = title, year = year ?: y,
         poster = icon, overview = plot, rating = rating,
         genres = genre?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
-        imdbId = imdbId, tmdbId = tmdbId, origin = Origin("xc-movie", id, ext), added = added, categoryId = categoryId,
+        imdbId = imdbId, tmdbId = tmdbId, origin = Origin("xc-movie", id, ext, serverId = serverId), added = added, categoryId = categoryId,
     )
 }
 
-fun Series.toItem(serverId: String): MediaItem {
-    val (title, y) = TitleCleaner.clean(name)
+fun Series.toItem(serverId: String): MediaItem = toItem(serverId, TitleCleaner.clean(name))
+
+fun Series.toItem(serverId: String, cleaned: Pair<String, Int?>): MediaItem {
+    val (title, y) = cleaned
     return MediaItem(
         id = "xc:${serverId.take(8)}:series:$id", type = MediaType.SERIES, title = title, year = year ?: y,
         poster = cover, backdrop = backdrop, overview = plot, rating = rating,
         genres = genre?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
-        imdbId = imdbId, tmdbId = tmdbId, origin = Origin("xc-series", id), added = lastModified, categoryId = categoryId,
+        imdbId = imdbId, tmdbId = tmdbId, origin = Origin("xc-series", id, serverId = serverId), added = lastModified, categoryId = categoryId,
     )
 }
 
 fun Channel.toItem(serverId: String) = MediaItem(
     id = "xc:${serverId.take(8)}:live:$id", type = MediaType.CHANNEL, title = name, poster = icon,
-    origin = Origin("xc-channel", id), categoryId = categoryId,
+    origin = Origin("xc-channel", id, serverId = serverId), categoryId = categoryId,
 )

@@ -19,6 +19,13 @@ extension PlayerScreen {
         }
     }
 
+    func returnFromTrailer() {
+        showingTrailer = false
+        model.resumeAfterHandoff(at: nil, play: resumeAfterTrailer)
+        controlsVisible = true
+        scheduleHide()
+    }
+
     // MARK: Top bar
 
     var topBar: some View {
@@ -143,6 +150,13 @@ extension PlayerScreen {
                     toolbarButton("textformat.123", "Number") { openNumberPad() }
                     if model.previousChannelID != nil {
                         toolbarButton("arrow.uturn.backward", "Last Channel") { model.toggleLastChannel() }
+                    }
+                }
+                if !model.isLive && model.hasStarted && !ProfileStore.shared.isKidsMode {
+                    toolbarButton("film", "Play Trailer") {
+                        resumeAfterTrailer = !model.isPaused
+                        model.pauseForHandoff(forTrailer: true)
+                        showingTrailer = true
                     }
                 }
                 toolbarButton("speaker.wave.2", "Audio") { panel = .audio }

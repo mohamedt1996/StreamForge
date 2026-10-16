@@ -117,6 +117,7 @@ final class MultiviewModel {
     }
 
     func replace(_ id: UUID, with channel: XCChannel) {
+        guard !tiles.contains(where: { $0.id != id && $0.channel.id == channel.id }) else { return }
         guard let tile = tiles.first(where: { $0.id == id }) else { return }
         tile.replace(with: channel)
     }

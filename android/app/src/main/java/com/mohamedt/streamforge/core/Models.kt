@@ -31,6 +31,7 @@ data class Origin(
     val ext: String? = null,
     val addonId: String? = null,
     val metaId: String? = null,
+    val serverId: String? = null,
 )
 
 @Serializable

@@ -120,7 +120,7 @@ class SourcesModel(val item: MediaItem, val episode: Episode?) {
         loading = true
         sources.clear()
         // REST streaming servers address streams by UUID: fetch any this device hasn't seen yet.
-        DispatcharrRepo.client?.let { c ->
+        DispatcharrRepo.playbackClient(item)?.let { c ->
             runCatching { c.preparePlayback(if (episode == null && item.origin.kind == "xc-movie") item.origin.id else null, episode?.xcEpisodeId) }
         }
         addServerSources()
@@ -141,8 +141,8 @@ class SourcesModel(val item: MediaItem, val episode: Episode?) {
     }
 
     private fun addServerSources() {
-        val client = DispatcharrRepo.client ?: return
-        val name = DispatcharrRepo.active?.name ?: "Server"
+        val client = DispatcharrRepo.playbackClient(item) ?: return
+        val name = client.server.name
         fun add(url: String?, title: String, ext: String?) {
             if (url == null) return
             val p = StreamText.parse("$title ${ext ?: ""}")

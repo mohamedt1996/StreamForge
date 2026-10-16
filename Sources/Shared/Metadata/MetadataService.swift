@@ -80,7 +80,7 @@ final class MetadataService {
 
     private func mergeProvider(_ d: inout MediaDetails, overwrite: Bool = false) async {
         let store = DispatcharrStore.shared
-        guard let client = store.client else { return }
+        guard let client = store.playbackClient(for: d.item) else { return }
         switch d.item.origin {
         case .dispatcharrMovie(_, let streamID, _):
             guard let info = try? await client.movieInfo(streamID) else { return }

@@ -197,6 +197,11 @@ extension ServerSync {
         for (key, value) in settingsValues(AppSettings.shared.values) {
             add("settings", key, .object(["value": value]))
         }
+
+        // Admin-managed items this account continues without (ManagedConfig.swift)
+        for rec in dismissedLocalRecords() {
+            add(rec.collection, rec.id, rec.data, stamp: rec.stamp)
+        }
         return out
     }
 
@@ -386,7 +391,7 @@ extension ServerSync {
     }
 
     /// Returns true when the value was understood.
-    private func applySetting(_ key: String, _ value: SyncJSON, to v: inout AppSettings.Values) -> Bool {
+    func applySetting(_ key: String, _ value: SyncJSON, to v: inout AppSettings.Values) -> Bool {
         switch key {
         case "metadataLanguage":
             guard let s = value.stringValue, !s.isEmpty else { return false }
@@ -485,6 +490,13 @@ extension ServerSync {
     }
 
     func apply(_ records: [SyncRecord]) {
+        // Store callbacks fired while applying are not user edits (managed-setting check).
+        let wasApplying = applyingRemote
+        applyingRemote = true
+        defer {
+            applyingRemote = wasApplying
+            refreshManagedPrompts()
+        }
         let priority: [String: Int] = ["profiles": 0, "servers": 1, "secrets": 2, "settings": 3, "addons": 4]
         let sorted = records.sorted {
             let a = priority[$0.collection] ?? 5, b = priority[$1.collection] ?? 5
@@ -516,8 +528,11 @@ extension ServerSync {
         for r in sorted {
             if r.collection == "secrets", !hasSecretsScope { continue }
             let key = Self.recordKey(r.collection, r.id)
+            trackManaged(r)
             if let known = state.known[key], r.updatedAt <= known.t { continue }
             if !r.deleted, r.data == nil { continue }
+            // A managed item the user removed here comes back: ask first (restore prompt).
+            if holdIfLocallyRemoved(r) { continue }
             let data = r.data ?? .null
 
             switch r.collection {
@@ -547,6 +562,9 @@ extension ServerSync {
 
             case "profiles":
                 applyProfile(r, data)
+
+            case Self.dismissedCollection:
+                applyDismissal(r)
 
             case "servers":
                 guard let id = UUID(uuidString: r.id) else { break }

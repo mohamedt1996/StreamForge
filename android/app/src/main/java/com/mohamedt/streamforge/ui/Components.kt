@@ -1,6 +1,5 @@
 package com.mohamedt.streamforge.ui
 
-import android.content.res.Configuration
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -31,10 +30,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -59,6 +60,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import com.mohamedt.streamforge.core.Settings
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -69,6 +72,14 @@ import coil3.compose.AsyncImage
 import com.mohamedt.streamforge.core.MediaItem
 import com.mohamedt.streamforge.library.Library
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 
 /** Same palette as the Apple TV app: near-black violet night, violet → pink accent, gold for 4K. */
 object Palette {
@@ -88,6 +99,14 @@ object Palette {
     val gradient = Brush.linearGradient(listOf(accent, accent2))
 }
 
+val LocalWatchlistAction = compositionLocalOf<(MediaItem) -> Unit> { {} }
+private val typography = Typography(
+    titleLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 24.sp, lineHeight = 30.sp),
+    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 22.sp),
+    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
+    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 20.sp),
+)
+
 private val colors = darkColorScheme(
     primary = Palette.accent,
     secondary = Palette.accent2,
@@ -99,15 +118,57 @@ private val colors = darkColorScheme(
     onSurface = Color.White,
 )
 
+/**
+ * App theme. Also decides, once per activity, whether the 10-foot (remote) interface or the touch
+ * interface is used (hardware detection + Settings → Interface + the last input seen), and
+ * provides it through [LocalTvMode] so every screen agrees.
+ */
 @Composable
-fun StreamForgeTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = colors, content = content)
+fun StreamForgeTheme(content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val hardware = remember {
+        DeviceInput.init(context)
+        DeviceInput.isTvHardware(context)
+    }
+    val tv = DeviceInput.resolve(InterfaceMode.of(Settings.values.interfaceMode), hardware)
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val toggleSaved: (MediaItem) -> Unit = { item ->
+        val removed = Library.isFavorite(item)
+        Library.setFavorite(item, !removed)
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            if (snackbar.showSnackbar(if (removed) "Removed ${item.title} from My List" else "Added ${item.title} to My List",
+                    actionLabel = "Undo", withDismissAction = true) == SnackbarResult.ActionPerformed) {
+                Library.setFavorite(item, removed)
+            }
+        }
+    }
+    CompositionLocalProvider(LocalTvMode provides tv, LocalWatchlistAction provides toggleSaved) {
+        MaterialTheme(colorScheme = colors, typography = typography) {
+            Box(Modifier.fillMaxSize()) {
+                content()
+                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 88.dp))
+            }
+        }
+    }
+}
 
+/** True when the remote-driven 10-foot interface is active (see [DeviceInput]). */
 @Composable
-fun isTv(): Boolean =
-    (LocalConfiguration.current.uiMode and Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION
+fun isTv(): Boolean = LocalTvMode.current
 
+/** Wide window (large tablet, landscape tablet): poster sizes and two-column layouts. */
 @Composable
 fun isWide(): Boolean = LocalConfiguration.current.screenWidthDp >= 720
+
+/** Medium or wider window (tablet, phone in landscape): navigation rail instead of a bottom bar. */
+@Composable
+fun isMediumWidth(): Boolean = LocalConfiguration.current.screenWidthDp >= 600
+
+/** Expanded window (tablet in landscape, large foldables): two-pane layouts. */
+@Composable
+fun isExpandedWidth(): Boolean = LocalConfiguration.current.screenWidthDp >= 840
 
 object Dims {
     @Composable fun poster(): Dp = if (isTv()) 140.dp else if (isWide()) 140.dp else 112.dp
@@ -190,10 +251,10 @@ fun Modifier.card(
 @Composable
 fun Artwork(url: String?, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop, label: String? = null) {
     Box(modifier.background(Brush.verticalGradient(listOf(Palette.surfaceHigh, Palette.surface))), contentAlignment = Alignment.Center) {
-        if (url == null && label != null) {
+        if (label != null) {
             Text(label, color = Color.White.copy(alpha = 0.6f), fontSize = if (isTv()) 15.sp else 12.sp, fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center, maxLines = 3, modifier = Modifier.padding(8.dp))
-        } else if (url == null) {
+        } else {
             Icon(Icons.Filled.Movie, null, tint = Color.White.copy(alpha = 0.25f))
         }
         if (url != null) AsyncImage(model = url, contentDescription = null, contentScale = contentScale, modifier = Modifier.fillMaxSize())
@@ -326,7 +387,7 @@ fun SectionHeader(title: String, subtitle: String? = null, action: (() -> Unit)?
         }
         if (action != null) {
             Text("See all", color = Palette.accent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
-                modifier = Modifier.card(action, shape = RoundedCornerShape(6.dp)).padding(6.dp))
+                modifier = Modifier.card(action, shape = RoundedCornerShape(16.dp)).padding(horizontal = 12.dp, vertical = 10.dp))
         }
     }
 }
@@ -408,7 +469,7 @@ fun Chip(text: String, selected: Boolean, modifier: Modifier = Modifier, focusRe
         modifier = modifier.card(onClick, shape = RoundedCornerShape(24.dp), focusScale = if (tv) 1.06f else null, border = !tv,
             glow = false, focusRequester = focusRequester, onFocus = { focused = it })
             .background(bg)
-            .padding(horizontal = if (tv) 22.dp else 14.dp, vertical = if (tv) 11.dp else 7.dp))
+            .padding(horizontal = if (tv) 22.dp else 16.dp, vertical = if (tv) 11.dp else 9.dp))
 }
 
 @Composable
@@ -441,4 +502,23 @@ fun Loading(text: String = "Loading…") {
 @Composable
 fun PageTitle(text: String, modifier: Modifier = Modifier) {
     Text(text, fontSize = if (isTv()) 32.sp else 26.sp, fontWeight = FontWeight.Bold, modifier = modifier)
+}
+
+/** Pull-to-refresh for touch lists: shows the indicator briefly while [onRefresh] reloads in the background. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PullRefresh(onRefresh: () -> Unit, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    if (isTv()) {
+        Box(modifier.fillMaxSize()) { content() }
+        return
+    }
+    var refreshing by remember { mutableStateOf(false) }
+    LaunchedEffect(refreshing) {
+        if (refreshing) {
+            onRefresh()
+            delay(1200)
+            refreshing = false
+        }
+    }
+    PullToRefreshBox(isRefreshing = refreshing, onRefresh = { refreshing = true }, modifier = modifier.fillMaxSize()) { content() }
 }

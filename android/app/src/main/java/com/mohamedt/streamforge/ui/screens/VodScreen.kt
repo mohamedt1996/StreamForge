@@ -52,11 +52,13 @@ import com.mohamedt.streamforge.ui.EmptyState
 import com.mohamedt.streamforge.ui.Loading
 import com.mohamedt.streamforge.ui.LocalNav
 import com.mohamedt.streamforge.ui.Palette
+import com.mohamedt.streamforge.ui.WatchlistCard
 import com.mohamedt.streamforge.ui.PosterCard
 import com.mohamedt.streamforge.ui.Screen
 import com.mohamedt.streamforge.ui.Shelf
 import com.mohamedt.streamforge.ui.isTv
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 enum class VodSort(val label: String) { ADDED("Recently Added"), TITLE("A–Z"), YEAR("Year"), RATING("Rating") }
@@ -65,17 +67,21 @@ data class VodFilter(val sort: VodSort = VodSort.ADDED, val genre: String? = nul
     val active get() = genre != null || decade != null || unwatched || query.isNotBlank()
 }
 
+/** Runs on Dispatchers.Default (it walks the whole library). */
 fun applyFilter(f: VodFilter, items: List<MediaItem>): List<MediaItem> {
-    val q = f.query.trim().lowercase()
+    val q = f.query.trim()
+    // Read once: Library.isWatched per item would read the snapshot state tens of thousands of times.
+    val watched = if (f.unwatched) Library.watched else emptySet()
     val out = items.filter { i ->
-        (q.isEmpty() || i.title.lowercase().contains(q)) &&
+        (q.isEmpty() || i.title.contains(q, ignoreCase = true)) &&
             (f.genre == null || i.genres.any { it.contains(f.genre, ignoreCase = true) }) &&
             (f.decade == null || (i.year != null && i.year >= f.decade && i.year < f.decade + 10)) &&
-            (!f.unwatched || !Library.isWatched(i))
+            (!f.unwatched || i.id !in watched) // Library.key(item, null) == item.id
     }
     return when (f.sort) {
         VodSort.ADDED -> out.sortedByDescending { it.added ?: 0 }
-        VodSort.TITLE -> out.sortedBy { it.title.lowercase() }
+        // Lower-case each title once, not on every comparison.
+        VodSort.TITLE -> out.map { it.title.lowercase() to it }.sortedBy { it.first }.map { it.second }
         VodSort.YEAR -> out.sortedByDescending { it.year ?: 0 }
         VodSort.RATING -> out.sortedByDescending { it.rating ?: 0.0 }
     }
@@ -151,7 +157,11 @@ fun VodScreen(kind: MediaType) {
 
     if (grid || filter.active || filter.sort != VodSort.ADDED) {
         var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-        LaunchedEffect(filter, all) { results = withContext(Dispatchers.Default) { applyFilter(filter, all) } }
+        LaunchedEffect(filter, all) {
+            // Typing restarts this effect: wait for a pause before walking the whole library.
+            if (filter.query.isNotBlank()) delay(250)
+            results = withContext(Dispatchers.Default) { applyFilter(filter, all) }
+        }
         PosterGrid(results) {
             Column {
                 FilterBar(kind, filter, grid, { grid = it }, title = if (isTv()) (if (kind == MediaType.SERIES) "Series" else "Movies") else null, padded = false) { filter = it }
@@ -173,9 +183,10 @@ fun VodScreen(kind: MediaType) {
             val cont = Library.continueWatching.filter { it.item.type == kind && it.item.origin.kind.startsWith("xc") }
             Shelf("Continue Watching", cont.filter { !it.finished }, key = { it.key }) { ContinueCard(it) }
         }
-        item { Shelf("Recently Added", all.sortedByDescending { it.added ?: 0 }.take(30), seeAll = { grid = true }, key = { it.id }) { PosterCard(it, { open(it) }) } }
-        item { Shelf("Top Rated", all.filter { (it.rating ?: 0.0) >= 7.0 }.sortedByDescending { it.rating }.take(30), key = { it.id }) { PosterCard(it, { open(it) }) } }
-        item { Shelf("My List", Library.favorites.filter { it.type == kind }, key = { it.id }) { PosterCard(it, { open(it) }) } }
+        // Pre-built off the main thread by DispatcharrRepo (no full-library sort per recomposition).
+        item { Shelf("Recently Added", if (kind == MediaType.SERIES) DispatcharrRepo.recentSeries else DispatcharrRepo.recentMovies, seeAll = { grid = true }, key = { it.id }) { PosterCard(it, { open(it) }) } }
+        item { Shelf("Top Rated", if (kind == MediaType.SERIES) DispatcharrRepo.topSeries else DispatcharrRepo.topMovies, key = { it.id }) { PosterCard(it, { open(it) }) } }
+        item { Shelf("My List", Library.favorites.filter { it.type == kind }, key = { it.id }) { WatchlistCard(it, { open(it) }) } }
         if (kind == MediaType.MOVIE) item { CollectionsShelf(all) }
         if (sections.size > 1) {
             item {
@@ -186,9 +197,11 @@ fun VodScreen(kind: MediaType) {
         }
         (active?.categories ?: emptyList()).filter { !Library.isHidden("${kind.name}:${it.id}") }.forEach { cat ->
             item(key = "cat-${cat.id}") {
+                // Already newest first (DispatcharrRepo pre-sorts each category).
                 val items = if (kind == MediaType.SERIES) DispatcharrRepo.series(cat.id) else DispatcharrRepo.movies(cat.id)
-                val name = TitleCleaner.splitCategory(cat.name).second
-                Shelf(name, items.sortedByDescending { it.added ?: 0 }.take(20), subtitle = "${items.size} titles",
+                val name = remember(cat.name) { TitleCleaner.splitCategory(cat.name).second }
+                val shown = remember(items) { items.take(20) }
+                Shelf(name, shown, subtitle = "${items.size} titles",
                     seeAll = { nav.push(Screen.Category(kind, cat.id, name)) }, key = { it.id }, rowKey = "cat-${cat.id}") { PosterCard(it, { open(it) }) }
             }
         }
@@ -205,7 +218,9 @@ private fun CollectionsShelf(all: List<MediaItem>) {
     LaunchedEffect(all.size) {
         if (!Tmdb.configured) return@LaunchedEffect
         // Resolve collections for the best-known movies in the background (cached per item).
-        val candidates = all.filter { it.tmdbId != null }.sortedByDescending { it.rating ?: 0.0 }.take(200)
+        val candidates = withContext(Dispatchers.Default) {
+            all.filter { it.tmdbId != null }.sortedByDescending { it.rating ?: 0.0 }.take(200)
+        }
         for (m in candidates) {
             if (Metadata.collections.containsKey(m.id)) continue
             runCatching { Tmdb.details(m.tmdbId!!, MediaType.MOVIE) }.getOrNull()?.let { d ->
@@ -213,10 +228,13 @@ private fun CollectionsShelf(all: List<MediaItem>) {
                 else Metadata.collections[m.id] = -1 to ""
             }
         }
-        groups = all.mapNotNull { m -> Metadata.collections[m.id]?.takeIf { it.first > 0 }?.let { it to m } }
-            .groupBy({ it.first }, { it.second }).filter { it.value.size >= 2 }
-            .map { (c, movies) -> Triple(c.first, c.second, movies.sortedBy { it.year ?: 0 }) }
-            .sortedByDescending { it.third.size }
+        // Metadata.collections is a ConcurrentHashMap: safe to read from the background.
+        groups = withContext(Dispatchers.Default) {
+            all.mapNotNull { m -> Metadata.collections[m.id]?.takeIf { it.first > 0 }?.let { it to m } }
+                .groupBy({ it.first }, { it.second }).filter { it.value.size >= 2 }
+                .map { (c, movies) -> Triple(c.first, c.second, movies.sortedBy { it.year ?: 0 }) }
+                .sortedByDescending { it.third.size }
+        }
     }
     Shelf("Collections", groups, subtitle = "Franchises on your server", key = { it.first }) { (id, name, movies) ->
         com.mohamedt.streamforge.ui.LandscapeCard(name, "${movies.size} movies", movies.firstOrNull()?.backdrop ?: movies.firstOrNull()?.poster) {
@@ -230,7 +248,10 @@ fun CategoryScreen(kind: MediaType, categoryId: String, title: String) {
     var filter by remember { mutableStateOf(VodFilter()) }
     val items = if (kind == MediaType.SERIES) DispatcharrRepo.series(categoryId) else DispatcharrRepo.movies(categoryId)
     var results by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    LaunchedEffect(filter, items) { results = withContext(Dispatchers.Default) { applyFilter(filter, items) } }
+    LaunchedEffect(filter, items) {
+        if (filter.query.isNotBlank()) delay(250)
+        results = withContext(Dispatchers.Default) { applyFilter(filter, items) }
+    }
     PosterGrid(results) {
         Column {
             if (isTv()) {

@@ -1,6 +1,9 @@
 package com.mohamedt.streamforge
 
 import android.app.Application
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
@@ -32,6 +35,17 @@ class App : Application(), SingletonImageLoader.Factory {
             delay(2000)
             TorrServer.startEmbeddedIfNeeded()
         }
+        // Back from another app: drop HTTP connections that died meanwhile and check the torrent engine,
+        // so starting anything after returning never reuses a stale socket or a dead engine.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                scope.launch { runCatching { TorrServer.returnedToForeground() } }
+            }
+
+            override fun onStop(owner: LifecycleOwner) {
+                TorrServer.noteBackground()
+            }
+        })
     }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader =

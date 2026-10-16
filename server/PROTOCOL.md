@@ -154,6 +154,7 @@ Unknown fields are ignored; missing optional fields are fine.
 | `profiles` | profile UUID | `{"name", "avatar", "color", "kids": false}` |
 | `settings` | key below | `{"value": any}` |
 | `secrets` | `server:<uuid>`, `key:tmdb`, `key:omdb`, `key:fanart`, `trakt`, `pin:<profile>`, `parentPin` | `{"xcPassword","webPassword","apiKey"}` / `{"value": "…"}` / Trakt token object |
+| `dismissed` | `<collection>\|<id>` of a managed item, e.g. `addons\|https://…/manifest.json`, `servers\|<uuid>`, `settings\|seekStep` | `{"collection", "id", "dismissedAt": ms}` — the user removed an admin-managed item from their account (§5 *Dismissals*); delete = restore it |
 
 Synced `settings` keys (each client maps those it has; others are ignored):
 `metadataLanguage`, `metadataSource`, `maxResolution`, `excludeCam`, `streamSort`, `autoplayNext`,
@@ -203,6 +204,40 @@ user's store, so clients need no new endpoints: they pull them like anything els
   stored.updatedAt + 1)`, new `rev`) and answers `stale`; the device then pulls the managed version
   back (it is newer than its local change) and restores it. Admins' own devices may change managed
   records of their own account normally (the next admin change to that configuration overwrites them).
+  Exception: removals the user confirmed, see *Dismissals*.
+* **Dismissals** ("Continue without it"). A user may remove a managed `servers`, `addons` or
+  `settings` item from their own account. The apps only do this after an explicit confirmation
+  (removing the item → *Set up by your server* → *Remove from this account*, or *Continue without it*
+  when sync brings back an item the user had removed). The device pushes, in one batch:
+  * `dismissed/<collection>|<id>` `{"collection","id","dismissedAt"}`, and
+  * the item's change: a tombstone for `servers/<uuid>` (+ `secrets/server:<uuid>`) or
+    `addons/<transportUrl>`; for a setting the user's own value `settings/<key>` `{"value": …}`
+    (no `managed`). Clients use `updatedAt = max(now, known updatedAt + 1)`.
+
+  When a push contains a dismissal (or the user already has an active one) for the item, a member's
+  change to the managed record is accepted like any other push (LWW) and the record stops being
+  managed. After storing a changed `dismissed` record the server reconciles the user: while the
+  dismissal exists (not deleted) the item is left out of that user's managed configuration —
+  servers (with their secrets) and addons are tombstoned, settings are released (§5 *Removal*) —
+  even if the device's own change came back `stale`. Edits of managed records **without** a
+  dismissal keep being refused (*Enforcement*).
+
+  A dismissal ends when:
+  * the user restores the item (*Restore from sync*): the device pushes a tombstone for
+    `dismissed/<collection>|<id>`; the server writes the managed record again (new `updatedAt`
+    and `rev`), so it reaches all the user's devices;
+  * the admin pushes it again (`POST /api/admin/users/{id}/dismissed/restore`), assigns the
+    connection/addon to the user anew (a *new* assignment), or sets that managed setting for the
+    user (per-user settings, or *apply defaults*) — the server tombstones the dismissal and writes
+    the item;
+  * the item stops being assigned to the user — the server tombstones the dismissal, so a later
+    assignment reaches the user normally.
+
+  Clients keep the set of managed `(collection, id)` keys from pulled records (the top-level
+  `managed`) and the active `dismissed` ids. When a pull brings back a managed record for an item the
+  user had removed on this device (not via a dismissal, e.g. while sync was off), the apps don't
+  re-add it silently: they hold it and ask once, for all such items, *Restore from sync* (apply the
+  held records) or *Continue without it* (push dismissals as above).
 * **Addon ids** are normalised exactly like the apps do: trim; `stremio://` → `https://`; add
   `https://` when there is no scheme; strip trailing `/` and `/manifest.json`; append
   `/manifest.json`; percent-encode (UTF-8, upper-case hex) every character that is not an ASCII
@@ -260,6 +295,10 @@ Addon = {"id": "a_…", "transportUrl", "name", "customName", "manifestName", "m
   "addons": [{"transportUrl","name","enabled","order","managed","libraryId","logo","source": "all"|"direct"|""}],
   "libraryAddons": [...], "settings": [UserSetting]}` where
   `UserSetting = {key, label, type, …, "value": <synced value>|null, "managed", "managedValue"|null}`
+* The user detail also has `"dismissed": [{"collection": "servers"|"addons"|"settings", "id", "name", "dismissedAt"}]`
+  — managed items the user removed (*Removed by user* in the web admin).
+* `POST /api/admin/users/{id}/dismissed/restore` `{"collection", "id"}` → `204` ("Push again"):
+  ends the dismissal and writes the item to the user again. `404` if there is no such dismissal.
 * `POST /api/admin/users/{id}/copy` `{"from": userId, "addons"?: true, "servers"?: true, "settings"?: true}`
   → `{"addons": n, "servers": n, "settings": n}` — assigns the other user's current addons,
   Dispatcharr servers (with their credentials; connections are created for servers the library

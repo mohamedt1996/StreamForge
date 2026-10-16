@@ -85,8 +85,9 @@ final class ProfileStore {
 
     // MARK: Switching
 
-    func select(_ id: UUID) {
-        guard profiles.contains(where: { $0.id == id }) else { return }
+    func select(_ id: UUID, pin: String? = nil) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        guard !profile.hasPIN || (id == activeProfileID && !needsSelection) || pin == profile.pin else { return }
         needsSelection = false
         settingsUnlocked = false
         guard id != activeProfileID else { return }

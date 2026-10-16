@@ -59,7 +59,14 @@ final class HTTPClient: @unchecked Sendable {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch let error as URLError where error.code == .networkConnectionLost {
+                // A pooled keep-alive connection died while the app was suspended (URLSession
+                // doesn't retry non-idempotent requests like TorrServer's POST API). Retry once
+                // on a fresh connection.
+                (data, response) = try await session.data(for: request)
+            }
         } catch let error as URLError {
             throw HTTPError.transport(error.localizedDescription)
         }
@@ -69,6 +76,15 @@ final class HTTPClient: @unchecked Sendable {
             throw HTTPError.status(http.statusCode, String(data: data, encoding: .utf8))
         }
         return data
+    }
+
+    /// Drops pooled keep-alive connections so the next requests open fresh TCP connections
+    /// (`URLSession.flush`: "ensures that future requests occur on a new TCP connection").
+    /// Called when the app returns from the background, where those sockets may have died.
+    func flushConnections() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            session.flush { continuation.resume() }
+        }
     }
 
     func get<T: Decodable>(_ type: T.Type, _ url: URL, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> T {

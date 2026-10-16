@@ -208,7 +208,36 @@ final class TorrentEngine {
 
     // MARK: Embedded lifecycle
 
+    /// Result of `ensureRunning()`.
+    struct Health {
+        /// TorrServer answered /echo.
+        var reachable: Bool
+        /// The embedded engine had died and was started again: every torrent it had is gone and
+        /// open stream connections are dead, so a playing torrent must be re-added and reloaded.
+        var restarted: Bool
+    }
+
+    /// One in-flight start, shared by every caller (app launch, Activity, API calls, the player).
+    @ObservationIgnored private var startTask: Task<Void, Never>?
+    /// One in-flight health check / revive, shared by every caller.
+    @ObservationIgnored private var healthTask: Task<Health, Never>?
+    @ObservationIgnored private var backgroundedAt: Date?
+
     func startEmbeddedIfNeeded() async {
+        guard mode == .embedded, !embeddedRunning else { return }
+        if let running = startTask {
+            await running.value
+            return
+        }
+        let task = Task { @MainActor in
+            await self.startEmbeddedNow()
+            self.startTask = nil
+        }
+        startTask = task
+        await task.value
+    }
+
+    private func startEmbeddedNow() async {
         guard mode == .embedded, !embeddedRunning else { return }
         #if canImport(TorrServerKit) && os(iOS)
         let dir = FileStore.directory.appendingPathComponent("torrserver", isDirectory: true)
@@ -218,10 +247,18 @@ final class TorrentEngine {
             TorrserverkitStartServer(port, dir.path)
         }.value
         if err.isEmpty || err.contains("already running") {
-            embeddedRunning = true
-            lastError = nil
-            await waitUntilReachable()
-            await applyEmbeddedSettings()
+            // Only trust the engine once it answers: after iOS suspended the app, the Go side can
+            // still report "already running" while its HTTP listener is gone.
+            if await waitUntilReachable(seconds: 8) {
+                embeddedRunning = true
+                lastError = nil
+                await applyEmbeddedSettings()
+            } else {
+                embeddedRunning = false
+                lastError = err.isEmpty
+                    ? "The torrent engine didn't start. Try again in a moment."
+                    : "The torrent engine stopped responding. Close StreamForge from the app switcher and open it again."
+            }
         } else {
             lastError = err
         }
@@ -236,10 +273,70 @@ final class TorrentEngine {
         #endif
     }
 
-    private func waitUntilReachable() async {
-        for _ in 0..<40 {
-            if await ping() { return }
+    @discardableResult
+    private func waitUntilReachable(seconds: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        repeat {
+            if await ping(timeout: 2) { return true }
             try? await Task.sleep(nanoseconds: 150_000_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Makes sure TorrServer answers before a torrent is (re)resolved. iOS suspends the app (and with
+    /// it the embedded Go engine, its listener and every socket) whenever nothing plays in the
+    /// background, so on return the engine can be dead while `embeddedRunning` is still true, and
+    /// pooled keep-alive connections to it are stale. This drops stale connections, pings, and
+    /// starts the embedded engine again when it doesn't answer.
+    @discardableResult
+    func ensureRunning() async -> Health {
+        if let running = healthTask { return await running.value }
+        let task = Task { @MainActor () -> Health in
+            let result = await self.checkAndRevive()
+            self.healthTask = nil
+            return result
+        }
+        healthTask = task
+        return await task.value
+    }
+
+    private func checkAndRevive() async -> Health {
+        guard isConfigured else { return Health(reachable: false, restarted: false) }
+        if mode == .remote {
+            if await ping() { return Health(reachable: true, restarted: false) }
+            await http.flushConnections()
+            return Health(reachable: await ping(), restarted: false)
+        }
+        let wasRunning = embeddedRunning
+        if wasRunning {
+            if await ping() { return Health(reachable: true, restarted: false) }
+            await http.flushConnections()
+            if await ping() { return Health(reachable: true, restarted: false) }
+            // Dead: forget it, so the start below really runs.
+            embeddedRunning = false
+            torrents = []
+        }
+        await startEmbeddedIfNeeded()
+        return Health(reachable: embeddedRunning, restarted: wasRunning && embeddedRunning)
+    }
+
+    /// Called when the app goes to the background.
+    func noteBackground() {
+        backgroundedAt = Date()
+    }
+
+    /// Called when the app is active again: drops connections that died while the app was suspended
+    /// and revives the embedded engine if it was running before.
+    func returnedToForeground() {
+        guard let since = backgroundedAt else { return }
+        backgroundedAt = nil
+        let away = Date().timeIntervalSince(since)
+        Task { @MainActor in
+            await HTTPClient.shared.flushConnections()
+            await self.http.flushConnections()
+            if self.mode == .embedded, self.embeddedRunning, away > 2 {
+                await self.ensureRunning()
+            }
         }
     }
 
@@ -271,9 +368,9 @@ final class TorrentEngine {
 
     // MARK: API
 
-    func ping() async -> Bool {
+    func ping(timeout: TimeInterval = 3) async -> Bool {
         guard let base = baseURL else { return false }
-        return (try? await http.data(base.appendingRawPath("echo"), headers: authHeaders, timeout: 3)) != nil
+        return (try? await http.data(base.appendingRawPath("echo"), headers: authHeaders, timeout: timeout)) != nil
     }
 
     func serverVersion() async -> String? {
@@ -375,6 +472,15 @@ final class TorrentEngine {
     /// Adds the torrent, waits for metadata, chooses the right file and returns a URL mpv can stream.
     func resolve(_ source: TorrentSource, progress: @escaping @MainActor (String) -> Void) async throws -> (url: URL, file: TorrentFile, hash: String) {
         progress("Connecting to peers…")
+        // Never trust a stale engine/session: after the app was in the background the engine may be
+        // dead (or restarted without our torrent). Re-adding below restores the torrent with its trackers.
+        let health = await ensureRunning()
+        guard health.reachable else {
+            throw HTTPError.transport(lastError ?? (mode == .remote
+                ? "Can't reach your TorrServer. Check the address in Settings → Torrents."
+                : "The torrent engine isn't responding. Try again in a moment."))
+        }
+        try Task.checkCancellation()
         var status = try await add(source)
         let hash = status.hash.isEmpty ? source.infoHash : status.hash
         var attempts = 0
