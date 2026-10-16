@@ -1,22 +1,19 @@
-StreamForge server and mobile update
+StreamForge - YouTube-only trailers + Dynamic Island safe trailer
 
-Extract into the repository root, preserving Sources/, android/, server/, and Tests/ paths.
-This is a cumulative source update over commit 5490151. It includes the earlier playback
-and UI fixes plus the server operations and progress-conflict update. It is not an APK/IPA.
-Do not flatten directories. Review differences if your checkout has newer edits.
+Cumulative SOURCE update on top of the cinematic titles / trailer fallback package.
+Extract into the repository root with paths preserved. Not an IPA/APK; not built or deployed.
 
-Included:
-- Server health dashboard and last successful sync per device.
-- Saved Dispatcharr credential tests and addon Test & refresh.
-- Manual/daily backups, seven-snapshot retention, private downloads and offline restore steps.
-- Revision-aware progress conflict protection in server, Apple and Android clients.
-- Android featured home card, Discover/Continue/My List sections and 48dp mobile buttons.
-- Previous responsive trailer/details, playback touch controls and library improvements.
+Changes:
+- Removed IMDb trailers: embeds, title lookup (JSON-LD scraping), IMDb script bridge, link parsing.
+- Removed direct MP4/HLS trailer links (metadata links are ignored for trailers).
+- YouTube is unchanged: iOS YouTube embed, plus the optional Invidious native-video setting.
+- iPhone: the detail-page trailer is kept below the top safe area, so it never runs under the
+  Dynamic Island (also covers notch / status bar). The strip above the video is black, matching
+  the letterbox bars. iPad and the Home hero are unchanged (they already sit clear of it).
+- IMDb IDs are still used for sync, matching and the IMDb rating badge. Only trailers changed.
+- Main playback "Direct" streams (live TV, catch-up, Xtream episodes) are untouched.
+- Tests: PlaybackSourceTests updated for YouTube-only parsing; TrailerBridgeTests.cjs removed
+  (it only tested the IMDb web bridge).
 
-Deploy the updated server and clients together to enable progress revision protection.
-Daily backups default off: enable under Backups. Secrets-scoped admin access is required.
-
-Validation: Go test ./..., Go race tests, Go vet, JavaScript syntax and git diff checks passed.
-Swift/Kotlin received syntax checks; existing Kotlin parser limitations remain unchanged.
-No Xcode or Android SDK is available here: mobile builds and on-device testing remain required.
-These changes are committed locally, not pushed or deployed.
+Not verified: no Xcode build, XCTest run or on-device check. Please test the detail page on a
+Dynamic Island iPhone in portrait.

@@ -354,6 +354,7 @@ struct HeroCarousel: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var index = 0
     @State private var trailer = TrailerController()
+    @State private var enrichedHero: MediaItem?
     @State private var heroVisible = true
     @State private var pageVisible = false
 
@@ -377,7 +378,7 @@ struct HeroCarousel: View {
         TabView(selection: $index) {
             ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                 Button { onSelect(item) } label: {
-                    HeroSlide(item: item, height: height, trailer: i == index ? trailer : nil)
+                    HeroSlide(item: i == index ? (enrichedHero ?? item) : item, height: height, trailer: i == index ? trailer : nil)
                 }
                 .buttonStyle(.plain)
                 .tag(i)
@@ -404,13 +405,15 @@ struct HeroCarousel: View {
         .task(id: currentID) {
             // New slide: back to its artwork, then look up its trailer while the backdrop shows.
             trailer.setKeys([])
+            enrichedHero = nil
             guard let id = currentID, let item = items.first(where: { $0.id == id }) else { return }
             let shownAt = Date()
             try? await Task.sleep(nanoseconds: 800_000_000)
-            guard !Task.isCancelled, TrailerPolicy.allowsAutoplay else { return }
-            let keys = await MetadataService.shared.trailerKeys(for: item)
+            guard !Task.isCancelled else { return }
+            let details = await MetadataService.shared.details(for: item)
             guard !Task.isCancelled, currentID == id else { return }
-            trailer.setKeys(keys, delay: max(0.3, TrailerPolicy.startDelay - Date().timeIntervalSince(shownAt)))
+            enrichedHero = details.item
+            trailer.setSources(details.trailerSources, delay: max(0.3, TrailerPolicy.startDelay - Date().timeIntervalSince(shownAt)))
         }
         .task(id: items.count) {
             // Advance every 7 s of artwork; hold while a trailer loads or plays.
@@ -454,13 +457,7 @@ struct HeroSlide: View {
                 .clipped()
             LinearGradient(colors: [.clear, Theme.background.opacity(0.6), Theme.background], startPoint: .top, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
-                Group {
-                    if let logo = item.logo {
-                        RemoteImage(url: logo, contentMode: .fit).frame(maxWidth: 260, maxHeight: 90, alignment: .leading)
-                    } else {
-                        Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(2)
-                    }
-                }
+                CinematicTitle(item: item, width: 260, height: 90)
                 .scaleEffect(playing ? 0.8 : 1, anchor: .bottomLeading)
                 .animation(.easeInOut(duration: TrailerPolicy.fade), value: playing)
                 HStack(spacing: 8) {

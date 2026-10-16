@@ -14,9 +14,12 @@ import WebKit
 // back to the artwork and offers a replay button (iOS). Unmuting lasts for the session.
 //
 // Sources, in order (every failure is silent and moves on to the next):
-//   1. A direct MP4 from the user's Invidious instance (Settings), played with AVPlayer, for
-//      each trailer id in turn. This is the only source on tvOS (no WebKit there).
-//   2. iOS: YouTube's iframe player in a chrome-less WKWebView, again trying each id in turn.
+//   1. The user's optional Invidious instance (native video of the YouTube trailer).
+//   2. iOS: YouTube embeds. Provider branding is governed by YouTube's player settings.
+// tvOS uses the Invidious source only (no WebKit).
+//
+// iPhone: the video is kept below the top safe area so it never runs under the Dynamic Island
+// (or notch / status bar). See `TrailerSurface.topInset`.
 
 // MARK: - Policy
 
@@ -124,7 +127,8 @@ final class TrailerController {
     #if os(iOS)
     @ObservationIgnored private var web: TrailerWebPlayer?
     #endif
-    @ObservationIgnored private var keys: [String] = []
+    @ObservationIgnored private var sources: [TrailerSource] = []
+    @ObservationIgnored private var sourceGeneration = 0
     @ObservationIgnored private var active = false
     @ObservationIgnored private var candidates: [Candidate] = []
     @ObservationIgnored private var startTask: Task<Void, Never>?
@@ -144,12 +148,23 @@ final class TrailerController {
     /// Trailer ids for the current title, best first. New ids reset everything; the trailer
     /// starts `delay` seconds later if the hero is active by then.
     func setKeys(_ newKeys: [String], delay: TimeInterval = TrailerPolicy.startDelay) {
-        var seen = Set<String>()
-        let cleaned = newKeys.filter { !$0.isEmpty && seen.insert($0).inserted }
-        guard cleaned != keys else { return }
+        setSources(newKeys.compactMap(TrailerSource.parse), delay: delay)
+    }
+
+    func setSources(_ newSources: [TrailerSource], delay: TimeInterval = TrailerPolicy.startDelay) {
+        let cleaned = TrailerSource.ordered(newSources)
+        guard cleaned != sources else { return }
         reset()
-        keys = cleaned
+        sources = cleaned
         scheduleStart(after: delay)
+    }
+
+    func playManually() {
+        active = true
+        guard !sources.isEmpty else { phase = .unavailable; return }
+        if phase == .ended { replay(); return }
+        startTask?.cancel(); startTask = nil
+        if phase == .idle || phase == .unavailable { begin() } else { resumePlayback() }
     }
 
     /// Whether the hero is on screen and uncovered (and autoplay is allowed). Pauses/resumes.
@@ -216,14 +231,14 @@ final class TrailerController {
         dropSources()
         loadingTime = 0
         webPlayingSince = nil
-        keys = []
+        sources = []
         phase = .idle
     }
 
     // MARK: Start
 
     private func scheduleStart(after delay: TimeInterval) {
-        guard active, phase == .idle, !keys.isEmpty, startTask == nil else { return }
+        guard active, phase == .idle, !sources.isEmpty, startTask == nil else { return }
         let gen = generation
         startTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
@@ -238,12 +253,13 @@ final class TrailerController {
         phase = .loading
         isMuted = !TrailerPolicy.sessionPrefersSound
         var list: [Candidate] = []
+        let keys = sources.compactMap { if case .youtube(let key) = $0 { return key }; return nil }
         let instance = AppSettings.shared.values.invidiousInstance
         if !instance.isEmpty {
             list += keys.prefix(3).map { Candidate.invidious(key: $0, instance: instance) }
         }
         #if os(iOS)
-        list.append(.web(keys: Array(keys.prefix(4))))
+        if !keys.isEmpty { list.append(.web(keys: Array(keys.prefix(4)))) }
         #endif
         candidates = list
         startMonitor()
@@ -264,10 +280,10 @@ final class TrailerController {
         let next = candidates.removeFirst()
         switch next {
         case .invidious(let key, let instance):
-            let gen = generation
+            let gen = sourceGeneration
             resolveTask = Task { [weak self] in
                 let url = await InvidiousTrailer.streamURL(instance: instance, youtubeKey: key)
-                guard let self, !Task.isCancelled, self.generation == gen, self.phase == .loading else { return }
+                guard let self, !Task.isCancelled, self.sourceGeneration == gen, self.phase == .loading else { return }
                 self.resolveTask = nil
                 if let url { self.startNative(url) } else { self.advance() }
             }
@@ -294,9 +310,9 @@ final class TrailerController {
 
     #if os(iOS)
     private func startWeb(_ keys: [String]) {
-        let gen = generation
-        let w = TrailerWebPlayer(keys: keys, muted: isMuted) { [weak self] event in
-            guard let self, self.generation == gen else { return }
+        let gen = sourceGeneration
+        let w = TrailerWebPlayer(keys: keys, muted: isMuted, active: active) { [weak self] event in
+            guard let self, self.sourceGeneration == gen else { return }
             self.handle(event)
         }
         web = w
@@ -312,7 +328,7 @@ final class TrailerController {
         case .ended:
             if phase == .playing || phase == .loading { finish() }
         case .failed:
-            if phase == .loading { advance() } else if phase == .playing { finish() }
+            if phase == .loading || phase == .playing { phase = .loading; advance() }
         }
     }
     #endif
@@ -344,6 +360,8 @@ final class TrailerController {
     }
 
     private func dropSources() {
+        sourceGeneration += 1
+        resolveTask?.cancel(); resolveTask = nil
         player?.pause()
         player = nil
         #if os(iOS)
@@ -387,7 +405,7 @@ final class TrailerController {
                 }
             }
             if webView != nil, let since = webPlayingSince, Date().timeIntervalSince(since) > 1.0 {
-                // YouTube's title overlay is gone by now.
+                // Brief startup crossfade; provider branding may still appear.
                 phase = .playing
                 return true
             }
@@ -395,7 +413,7 @@ final class TrailerController {
             return true
         case .playing:
             if let p = player, let item = p.currentItem {
-                if item.status == .failed { finish(); return false }
+                if item.status == .failed { phase = .loading; advance(); return phase == .loading }
                 let t = p.currentTime().seconds
                 let d = item.duration.seconds
                 // Fade out just before the end, like Netflix (never show a frozen last frame).
@@ -455,7 +473,7 @@ final class TrailerWebPlayer {
     let view: WKWebView
     private let proxy: TrailerScriptProxy
 
-    init(keys: [String], muted: Bool, onEvent: @escaping (Event) -> Void) {
+    init(keys: [String], muted: Bool, active: Bool = true, onEvent: @escaping (Event) -> Void) {
         let proxy = TrailerScriptProxy()
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
@@ -481,7 +499,7 @@ final class TrailerWebPlayer {
             default: break
             }
         }
-        web.loadHTMLString(Self.html(keys: keys, muted: muted), baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        web.loadHTMLString(Self.html(keys: keys, muted: muted, active: active), baseURL: URL(string: "https://www.youtube-nocookie.com"))
     }
 
     func play() { run("sfPlay()") }
@@ -502,7 +520,7 @@ final class TrailerWebPlayer {
         view.evaluateJavaScript("try{\(js)}catch(e){}", completionHandler: nil)
     }
 
-    static func html(keys: [String], muted: Bool) -> String {
+    static func html(keys: [String], muted: Bool, active: Bool = true) -> String {
         let safe = keys.map { $0.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }.filter { !$0.isEmpty }
         let list = "[" + safe.map { "\"\($0)\"" }.joined(separator: ",") + "]"
         return """
@@ -515,13 +533,13 @@ final class TrailerWebPlayer {
         #wrap iframe,#p{width:100%;height:100%;border:0;pointer-events:none;}
         </style></head><body><div id="wrap"><div id="p"></div></div>
         <script>
-        var keys=\(list),idx=0,player=null,muted=\(muted ? "true" : "false"),want=true,done=false,started=false;
+        var keys=\(list),idx=0,player=null,muted=\(muted ? "true" : "false"),want=\(active ? "true" : "false"),done=false,started=false;
         function post(m){try{window.webkit.messageHandlers.trailer.postMessage(m);}catch(e){}}
         if(!keys.length){post('failed');}
         function onYouTubeIframeAPIReady(){
           if(!keys.length)return;
           player=new YT.Player('p',{host:'https://www.youtube-nocookie.com',videoId:keys[0],
-            playerVars:{autoplay:1,mute:1,controls:0,playsinline:1,modestbranding:1,rel:0,iv_load_policy:3,
+            playerVars:{autoplay:1,mute:1,controls:0,playsinline:1,rel:0,iv_load_policy:3,
                         disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'https://www.youtube-nocookie.com'},
             events:{
               onReady:function(e){if(muted){e.target.mute();}else{e.target.unMute();} if(want){e.target.playVideo();}},
@@ -595,15 +613,28 @@ struct TrailerWebHost: UIViewRepresentable {
 /// The video layer: goes over the artwork, fades in when frames flow and out at the end.
 struct TrailerSurface: View {
     let controller: TrailerController
+    /// Height of the top safe area to keep the video clear of (iPhone Dynamic Island, notch and
+    /// status bar). The strip above the video is black, matching the letterbox bars, so the
+    /// picture never runs under the island. 0 everywhere else.
+    var topInset: CGFloat = 0
 
     var body: some View {
         ZStack {
             Color.clear
-            if let player = controller.player {
-                TrailerPlayerSurface(player: player)
+            ZStack {
+                if let player = controller.player {
+                    TrailerPlayerSurface(player: player)
+                }
+                if let webView = controller.webView {
+                    TrailerWebHost(webView: webView)
+                }
             }
-            if let webView = controller.webView {
-                TrailerWebHost(webView: webView)
+            .padding(.top, topInset)
+            if topInset > 0 {
+                VStack(spacing: 0) {
+                    Color.black.frame(height: topInset)
+                    Spacer(minLength: 0)
+                }
             }
         }
         .opacity(controller.isRevealed ? 1 : 0)
@@ -667,6 +698,59 @@ struct HeroVisibilityReader: View {
                 .onChange(of: frame.maxY > height * 0.45, initial: true) { _, visible in
                     if isVisible != visible { isVisible = visible }
                 }
+        }
+    }
+}
+
+
+/// Explicit Trailer action stays in StreamForge and uses the same fallback chain.
+struct TrailerPreviewSheet: View {
+    let title: String
+    let sources: [TrailerSource]
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var controller = TrailerController()
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                VStack(spacing: 20) {
+                    Spacer(minLength: 0)
+                    ZStack {
+                        Color.black
+                        TrailerSurface(controller: controller)
+                        if controller.phase == .loading || controller.phase == .idle {
+                            ProgressView("Loading trailer…")
+                        } else if controller.phase == .unavailable {
+                            Text("No playable trailer is available right now.")
+                                .multilineTextAlignment(.center).padding()
+                        }
+                    }
+                    .frame(width: geo.size.width, height: min(geo.size.width * 9 / 16, max(1, geo.size.height - 80)))
+                    HStack(spacing: 24) {
+                        if controller.phase == .playing {
+                            Button(controller.isMuted ? "Unmute" : "Mute") { controller.toggleMute() }
+                        }
+                        if controller.phase == .ended {
+                            Button("Replay") { controller.replay() }
+                        }
+                    }.buttonStyle(.bordered)
+                    Spacer(minLength: 0)
+                }
+            }
+            .background(Color.black)
+            .navigationTitle(title)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .task {
+                controller.setSources(sources)
+                if scenePhase == .active { controller.playManually() }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    if controller.phase == .idle { controller.playManually() } else { controller.setActive(true) }
+                } else { controller.setActive(false) }
+            }
+            .onDisappear { controller.reset() }
         }
     }
 }

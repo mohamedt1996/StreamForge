@@ -15,18 +15,14 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertNil(StreamTextParser.parse(String(repeating: "9", count: 100) + " GB").size)
     }
 
-    func testDirectPreviewSelection() {
-        XCTAssertNotNil(TrailerSelection.directURL(URL(string: "https://media.example/trailer.m3u8?token=test")))
-        XCTAssertNil(TrailerSelection.directURL(URL(string: "https://youtube.com/watch?v=abc_DEF-1234")))
-        XCTAssertNil(TrailerSelection.directURL(URL(string: "file:///tmp/trailer.mp4")))
-    }
-
-    func testTrailerMetadataSeparatesNativeAndYouTubeSources() {
+    func testTrailerMetadataKeepsOnlyYouTubeSources() {
         let item = MediaItem(id: "test", type: .movie, title: "Test", origin: .tmdb(id: 1))
         var details = MediaDetails(item: item)
-        details.addTrailers(["https://media.example/trailer.mp4", "https://youtu.be/abc_DEF-1234", "abc_DEF-1234"])
-        XCTAssertEqual(details.item.trailerURL?.absoluteString, "https://media.example/trailer.mp4")
+        details.addTrailers(["https://media.example/trailer.mp4", "https://www.imdb.com/video/vi12345/",
+                             "https://youtu.be/abc_DEF-1234", "abc_DEF-1234"])
+        XCTAssertNil(details.item.trailerURL)
         XCTAssertEqual(details.trailerKeys, ["abc_DEF-1234"])
+        XCTAssertEqual(details.trailerSources, [.youtube("abc_DEF-1234")])
         XCTAssertNil(MediaDetails.cleanYouTubeKey("https://unrelated.example/abc_DEF-1234"))
     }
 
@@ -55,4 +51,12 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertTrue(LibraryStore.continueWatchingEntries([entry], watched: ["movie"]).isEmpty)
     }
 
+    func testTrailerSourceParsingIsYouTubeOnly() {
+        let youtube = TrailerSource.youtube("abcdefghijk")
+        XCTAssertEqual(TrailerSource.ordered([youtube, youtube]), [youtube])
+        XCTAssertEqual(TrailerSource.parse("https://youtu.be/abcdefghijk"), youtube)
+        XCTAssertNil(TrailerSource.parse("https://www.imdb.com/video/vi12345/"))
+        XCTAssertNil(TrailerSource.parse("https://cdn.example.com/trailer.m3u8"))
+        XCTAssertNil(TrailerSource.parse("javascript:alert(1)"))
+    }
 }

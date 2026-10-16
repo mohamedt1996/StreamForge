@@ -1,22 +1,33 @@
 import SwiftUI
 import AVKit
 
-/// Direct URLs are playable by AVPlayer; YouTube web pages are never passed to it.
-enum TrailerSelection {
-    static func directURL(_ url: URL?) -> URL? {
-        guard let url, ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
-              ["mp4", "m4v", "mov", "m3u8"].contains(url.pathExtension.lowercased()) else { return nil }
-        return url
+/// Trailers are YouTube only. Web pages are never handed to AVPlayer; the only native
+/// playback is the user's optional Invidious proxy of a YouTube trailer.
+enum TrailerSource: Equatable {
+    case youtube(String)
+
+    static func parse(_ raw: String) -> TrailerSource? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = URL(string: text), let scheme = url.scheme {
+            guard ["http", "https"].contains(scheme.lowercased()), url.host != nil,
+                  url.user == nil, url.password == nil else { return nil }
+            return MediaDetails.cleanYouTubeKey(text).map { .youtube($0) }
+        }
+        return MediaDetails.cleanYouTubeKey(text).map { .youtube($0) }
+    }
+
+    static func ordered(_ sources: [TrailerSource]) -> [TrailerSource] {
+        var unique: [TrailerSource] = []
+        for source in sources where !unique.contains(source) { unique.append(source) }
+        return unique
     }
 }
 
 @MainActor
 enum NativeTrailerResolver {
     static func resolve(item: MediaItem, source: PlaybackSource? = nil) async -> URL? {
-        if let url = TrailerSelection.directURL(source?.trailerURL) ?? TrailerSelection.directURL(item.trailerURL) { return url }
         let details = await MetadataService.shared.details(for: item)
         guard !Task.isCancelled else { return nil }
-        if let url = TrailerSelection.directURL(details.item.trailerURL) { return url }
         let instance = AppSettings.shared.values.invidiousInstance
         guard !instance.isEmpty else { return nil }
         for key in details.trailerKeys {

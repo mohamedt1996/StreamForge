@@ -70,6 +70,29 @@ struct RemoteImage: View {
     }
 }
 
+/// Transparent studio title artwork; keep the title readable while loading or on failure.
+struct CinematicTitle: View {
+    var item: MediaItem
+    var width: CGFloat
+    var height: CGFloat
+
+    var body: some View {
+        LazyImage(url: item.logo) { state in
+            if let image = state.image {
+                image.resizable().aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: width, maxHeight: height, alignment: .bottomLeading)
+            } else {
+                Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(3)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: width, alignment: .leading)
+            }
+        }
+        .pipeline(ImagePipeline.shared)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.title)
+    }
+}
+
 /// Round cast/crew photo. Fixed size so nothing shifts while it loads; shows the person's
 /// initials only when there is no photo (no URL, or the image failed to load).
 struct CastAvatar: View {

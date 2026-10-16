@@ -127,6 +127,9 @@ struct MediaDetails {
     /// YouTube ids of trailers/teasers, best first. Players try them in order (a video can be
     /// removed or region-locked), so every source's trailers are kept, not just the first.
     var trailerKeys: [String] = []
+    var trailerSources: [TrailerSource] {
+        TrailerSource.ordered(trailerKeys.map { .youtube($0) })
+    }
     var ratings: [RatingBadge] = []
     var seasons: [SeasonInfo] = []
     var episodesBySeason: [Int: [EpisodeRef]] = [:]
@@ -141,11 +144,7 @@ struct MediaDetails {
 
     /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and junk.
     mutating func addTrailers(_ raw: [String], atFront: Bool = false) {
-        if item.trailerURL == nil {
-            item.trailerURL = raw.compactMap { TrailerSelection.directURL(URL(string: $0)) }.first
-        }
-        let incoming = raw.filter { TrailerSelection.directURL(URL(string: $0)) == nil }
-            .compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
+        let incoming = raw.compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
         var seen = Set<String>()
         let unique = incoming.filter { seen.insert($0).inserted }
         trailerKeys = atFront ? unique + trailerKeys : trailerKeys + unique

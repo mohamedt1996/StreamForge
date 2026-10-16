@@ -78,6 +78,7 @@ struct MediaDetailView: View {
     @State private var downloadSheet: DownloadSheetContext?
     @State private var expandedOverview = false
     @State private var trailer = TrailerController()
+    @State private var showTrailer = false
     @State private var heroVisible = true
     @State private var pageVisible = false
     @State private var appearedAt = Date()
@@ -128,9 +129,12 @@ struct MediaDetailView: View {
         .onAppear { pageVisible = true; appearedAt = Date() }
         .onDisappear { pageVisible = false }
         .onChange(of: trailerActive, initial: true) { _, active in trailer.setActive(active) }
-        .onChange(of: model.details.trailerKeys, initial: true) { _, keys in
+        .onChange(of: model.details.trailerSources, initial: true) { _, sources in
             let remaining = TrailerPolicy.startDelay - Date().timeIntervalSince(appearedAt)
-            trailer.setKeys(keys, delay: max(0.4, remaining))
+            trailer.setSources(sources, delay: max(0.4, remaining))
+        }
+        .sheet(isPresented: $showTrailer) {
+            TrailerPreviewSheet(title: item.title, sources: model.details.trailerSources)
         }
         .sheet(item: $sourceSheet) { ctx in
             SourcesSheet(context: ctx)
@@ -151,6 +155,9 @@ struct MediaDetailView: View {
         var heroHeight: CGFloat
         var showsHeroPoster: Bool
         var episodeStillWidth: CGFloat
+        /// iPhone only: the top safe area (Dynamic Island / notch / status bar) the trailer must
+        /// stay below. The hero runs under it, so the video is inset instead.
+        var trailerTopInset: CGFloat = 0
     }
 
     private var isRegularWidth: Bool {
@@ -176,7 +183,8 @@ struct MediaDetailView: View {
         // Narrow iPad split views get the phone-sized still; never more than ~40 % of the row.
         let stillBase: CGFloat = regular ? 220 : 140
         let still = min(stillBase, max(96, (width - 2 * Theme.gutter) * 0.42))
-        return DetailLayout(width: width, heroHeight: hero, showsHeroPoster: regular && hero >= 400, episodeStillWidth: still)
+        let island = isPad ? 0 : max(0, geo.safeAreaInsets.top)
+        return DetailLayout(width: width, heroHeight: hero, showsHeroPoster: regular && hero >= 400, episodeStillWidth: still, trailerTopInset: island)
         #endif
     }
 
@@ -185,37 +193,18 @@ struct MediaDetailView: View {
     private var trailerActive: Bool {
         pageVisible && heroVisible && scenePhase == .active
             && player.current == nil && player.multiview == nil && player.sourcePickerRequest == nil
-            && sourceSheet == nil && downloadSheet == nil
+            && sourceSheet == nil && downloadSheet == nil && !showTrailer
             && TrailerPolicy.allowsAutoplay
     }
 
     @ViewBuilder
     private func header(_ layout: DetailLayout) -> some View {
-        #if os(iOS)
-        VStack(alignment: .leading, spacing: 20) {
-            RemoteImage(url: item.backdrop ?? item.poster)
-                .frame(width: layout.width, height: min(layout.width * 9 / 16, layout.heroHeight))
-                .overlay { TrailerSurface(controller: trailer) }
-                .overlay(alignment: .bottomTrailing) { TrailerControlButton(controller: trailer).padding(16) }
-                .clipped()
-                .background(HeroVisibilityReader(height: min(layout.width * 9 / 16, layout.heroHeight), isVisible: $heroVisible))
-            VStack(alignment: .leading, spacing: 10) {
-                Text(item.title).font(.largeTitle.weight(.bold)).fixedSize(horizontal: false, vertical: true)
-                metaLine.foregroundStyle(Theme.secondaryText)
-                if !model.details.ratings.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) { ForEach(model.details.ratings) { RatingBadgeView(badge: $0) } }
-                    }
-                }
-            }.padding(.horizontal, Theme.gutter)
-        }
-        #else
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(width: layout.width, height: layout.heroHeight)
                 .overlay {
                     // Muted trailer over the artwork, edge to edge (setting: Player → Autoplay trailers).
-                    TrailerSurface(controller: trailer)
+                    TrailerSurface(controller: trailer, topInset: layout.trailerTopInset)
                 }
                 .clipped()
                 .overlay(LinearGradient(colors: [.black.opacity(0.35), .clear, Theme.background.opacity(0.85), Theme.background],
@@ -232,14 +221,7 @@ struct MediaDetailView: View {
                 #endif
                 VStack(alignment: .leading, spacing: 10) {
                     // Like Netflix, the title shrinks a little while the trailer plays.
-                    Group {
-                        if let logo = item.logo {
-                            RemoteImage(url: logo, contentMode: .fit)
-                                .frame(maxWidth: logoWidth, maxHeight: logoWidth * 0.38, alignment: .bottomLeading)
-                        } else {
-                            Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(3)
-                        }
-                    }
+                    CinematicTitle(item: item, width: min(logoWidth, max(1, layout.width - 2 * Theme.gutter)), height: logoWidth * 0.38)
                     .scaleEffect(trailer.isRevealed ? 0.8 : 1, anchor: .bottomLeading)
                     .animation(.easeInOut(duration: TrailerPolicy.fade), value: trailer.isRevealed)
                     metaLine
@@ -268,7 +250,6 @@ struct MediaDetailView: View {
             .frame(width: layout.width, alignment: .leading)
         }
         .frame(width: layout.width, alignment: .bottomLeading)
-        #endif
     }
 
     private var logoWidth: CGFloat {
@@ -310,8 +291,8 @@ struct MediaDetailView: View {
                     Button { library.toggleFavorite(item) } label: {
                         Label(library.isFavorite(item) ? "In My List" : "My List", systemImage: library.isFavorite(item) ? "checkmark" : "plus")
                     }
-                    if let key = model.details.trailerYouTubeKey, let url = URL(string: "https://www.youtube.com/watch?v=\(key)") {
-                        Button { openURL(url) } label: { Label("Trailer", systemImage: "film") }
+                    if !model.details.trailerSources.isEmpty {
+                        Button { showTrailer = true } label: { Label("Trailer", systemImage: "film") }
                     }
                     if item.type == .movie {
                         Button { sourceSheet = SourceSheetContext(item: item, episode: nil, upcoming: []) } label: {
