@@ -416,8 +416,13 @@ final class TrailerPlayerView: UIView {
         super.init(frame: frame)
         backgroundColor = .clear
         isUserInteractionEnabled = false
-        // Fill the hero edge to edge (cropped, never letterboxed).
+        #if os(iOS)
+        // Keep the whole trailer inside the live iPhone / iPad container.
+        backgroundColor = .black
+        playerLayer.videoGravity = .resizeAspect
+        #else
         playerLayer.videoGravity = .resizeAspectFill
+        #endif
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -441,7 +446,7 @@ struct TrailerPlayerSurface: UIViewRepresentable {
 // MARK: - Web surface (iOS)
 
 #if os(iOS)
-/// YouTube's iframe player without chrome: no controls, no taps, cropped to fill, and faded
+/// YouTube's iframe player without chrome: no controls, no taps, sized to fit, and faded
 /// out before YouTube's end screen. Tries each id in turn when one is unavailable.
 @MainActor
 final class TrailerWebPlayer {
@@ -505,8 +510,8 @@ final class TrailerWebPlayer {
         <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
         <style>
         html,body{margin:0;padding:0;background:#000;overflow:hidden;width:100%;height:100%;}
-        #wrap{position:absolute;top:50%;left:50%;width:max(100vw,177.78vh);height:max(100vh,56.25vw);
-              transform:translate(-50%,-50%) scale(1.18);pointer-events:none;}
+        #wrap{position:absolute;top:50%;left:50%;width:min(100vw,177.77777778vh);height:min(100vh,56.25vw);
+              transform:translate(-50%,-50%);pointer-events:none;}
         #wrap iframe,#p{width:100%;height:100%;border:0;pointer-events:none;}
         </style></head><body><div id="wrap"><div id="p"></div></div>
         <script>
