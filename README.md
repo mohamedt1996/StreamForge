@@ -72,7 +72,10 @@ Sources/iOS, Sources/tvOS   small platform shims
 ## Licensing notes
 
 MPVKit's LGPL build links mpv/FFmpeg dynamically-compatible static libraries; TorrServer is GPL-3.0. If you distribute builds, comply with those licenses (publish this source alongside your binaries).
+<<<<<<< HEAD
 
 ### October issue fixes
 
 Android My List now includes removal with Undo. Poster-grid context previews and player trailer controls use native AVPlayer on Apple platforms; direct trailer media is supported, and YouTube native previews need an Invidious instance configured in Settings. See [issue changes and device QA](docs/ISSUES-QA.md) for behavior, regression coverage and current build-verification limitations.
+=======
+>>>>>>> parent of 217256e (Add files via upload)
