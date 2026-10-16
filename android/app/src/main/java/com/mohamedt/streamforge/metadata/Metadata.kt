@@ -10,6 +10,7 @@ import com.mohamedt.streamforge.core.dbl
 import com.mohamedt.streamforge.core.int
 import com.mohamedt.streamforge.core.str
 import com.mohamedt.streamforge.core.long
+import com.mohamedt.streamforge.core.child
 import com.mohamedt.streamforge.core.obj
 import com.mohamedt.streamforge.core.objects
 import com.mohamedt.streamforge.dispatcharr.DispatcharrRepo
@@ -43,6 +44,7 @@ object Metadata {
         }
         var similar = emptyList<MediaItem>()
         var seasons = emptyList<Int>()
+        var imdbRating: Double? = null
 
         // 1. Provider (Dispatcharr): ids, plot, playable episodes.
         val client = DispatcharrRepo.playbackClient(item)
@@ -117,6 +119,8 @@ object Metadata {
                 it = it.copy(overview = it.overview ?: m.description, poster = it.poster ?: m.poster, backdrop = it.backdrop ?: m.background,
                     logo = it.logo ?: m.logo, imdbId = it.imdbId ?: m.imdbId, rating = it.rating ?: m.imdbRating,
                     genres = it.genres.ifEmpty { m.genres })
+                // Stremio metas carry the IMDb rating (imdbRating).
+                imdbRating = m.imdbRating?.takeIf { r -> r > 0 && r <= 10 }
                 cast = mergeAddonCast(cast, m.people, m.cast)
                 addTrailers(m.trailers)
                 if (episodes.isEmpty() && m.videos.isNotEmpty()) {
@@ -126,9 +130,15 @@ object Metadata {
             }
         }
         if (it.logo == null && it.imdbId != null) it = it.copy(logo = "https://images.metahub.space/logo/medium/${it.imdbId}/img")
+        // 4. Ratings. OMDb (when a key is set) has IMDb, Rotten Tomatoes, Metacritic and the age
+        //    rating; otherwise the IMDb rating comes from Cinemeta (no key needed).
+        val omdb = it.imdbId?.let { id -> Omdb.ratings(id) }
+        omdb?.imdb?.let { r -> imdbRating = r }
+        if (imdbRating == null) imdbRating = it.imdbId?.let { id -> imdbRatingFor(id, it.type) }
 
         val d = Details(item = it, cast = cast, directors = directors, trailerKey = trailers.firstOrNull(), seasons = seasons,
-            episodes = episodes, similar = similar, trailerKeys = trailers.toList())
+            episodes = episodes, similar = similar, trailerKeys = trailers.toList(), imdbRating = imdbRating,
+            certification = omdb?.rated, rottenTomatoes = omdb?.rottenTomatoes, metacritic = omdb?.metacritic)
         cache[item.id] = d
         return d
     }
@@ -186,6 +196,33 @@ object Metadata {
     private val personCache = ConcurrentHashMap<String, Optional<Person>>()
     private val creditsCache = ConcurrentHashMap<String, List<Person>>()
     private val imdbCache = ConcurrentHashMap<String, Optional<Pair<Int, MediaType>>>()
+
+    /** IMDb ratings by "type:tt…" (NaN = looked up, none). */
+    private val imdbRatings = ConcurrentHashMap<String, Double>()
+
+    /**
+     * IMDb rating from Cinemeta, Stremio's free public metadata service (no API key):
+     * `GET https://v3-cinemeta.strem.io/meta/{movie|series}/{tt…}.json` → `meta.imdbRating`.
+     */
+    suspend fun imdbRatingFor(imdbId: String, type: MediaType): Double? {
+        if (!imdbId.startsWith("tt") || imdbId.length < 3 || !imdbId.drop(2).all { c -> c.isDigit() }) return null
+        if (type != MediaType.MOVIE && type != MediaType.SERIES) return null
+        val key = "${type.stremio}:$imdbId"
+        imdbRatings[key]?.let { r -> return r.takeIf { v -> !v.isNaN() } }
+        val value = try {
+            Http.json("https://v3-cinemeta.strem.io/meta/${type.stremio}/$imdbId.json", timeoutSeconds = 8)
+                .obj()?.child("meta")?.dbl("imdbRating")?.takeIf { r -> r > 0 && r <= 10 }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: com.mohamedt.streamforge.core.HttpException) {
+            if (e.code == 404) imdbRatings[key] = Double.NaN // Cinemeta doesn't know the title
+            return null
+        } catch (_: Exception) {
+            return null // network trouble: try again next time
+        }
+        imdbRatings[key] = value ?: Double.NaN
+        return value
+    }
 
     /** Details with faces filled in for cast entries that came as plain names. Returns [details] unchanged when nothing can be added. */
     suspend fun castWithPhotos(details: Details): Details {

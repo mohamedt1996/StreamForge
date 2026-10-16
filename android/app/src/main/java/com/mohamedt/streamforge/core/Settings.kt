@@ -64,6 +64,16 @@ object Settings {
             RemoteSync.changed()
         }
 
+    var omdbKey: String
+        get() = Store.secret("omdb")
+        set(v) = Store.setSecret("omdb", v.trim())
+
+    /** Keys typed in Settings win; otherwise the ones built into the app by CI (never synced). */
+    val effectiveTmdbKey: String get() = tmdbKey.ifEmpty { com.mohamedt.streamforge.BuildConfig.TMDB_KEY }
+    val effectiveOmdbKey: String get() = omdbKey.ifEmpty { com.mohamedt.streamforge.BuildConfig.OMDB_KEY }
+    val hasBuiltInKeys: Boolean
+        get() = com.mohamedt.streamforge.BuildConfig.TMDB_KEY.isNotEmpty() || com.mohamedt.streamforge.BuildConfig.OMDB_KEY.isNotEmpty()
+
     var torrServerPassword: String
         get() = Store.secret("torrserver.password")
         set(v) = Store.setSecret("torrserver.password", v)

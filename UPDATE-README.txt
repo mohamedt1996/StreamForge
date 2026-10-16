@@ -1,5 +1,47 @@
 StreamForge — Android: separate TV app, Chromecast with Google TV performance
 
+TV APP: SYNC SERVER PRE-FILLED
+- The Android TV app (tv flavor) opens Settings → Sync server with http://192.168.8.209:8484
+  already in the address field (BuildConfig.DEFAULT_SYNC_SERVER; editable). Press
+  "Get a pairing code" and approve it from the phone. The phone/tablet app is unchanged.
+
+BUILT-IN TMDB / OMDb KEYS (iOS, tvOS, Android)
+- Add two repository secrets (GitHub → Settings → Secrets and variables → Actions → New
+  repository secret): TMDB_API_KEY and OMDB_API_KEY. CI builds them into every app; they are
+  not in the source code. Without the secrets the apps build exactly as before.
+- iOS/tvOS: Info.plist keys StreamForgeTMDBKey / StreamForgeOMDbKey ← build settings
+  SF_TMDB_KEY / SF_OMDB_KEY (scripts/xcbuild.sh, project.yml). AppSettings.effectiveTMDBKey /
+  effectiveOMDbKey: a key typed in Settings wins, else the built-in one (BuiltInKeys).
+- Android: BuildConfig.TMDB_KEY / OMDB_KEY from the same env vars; Settings.effectiveTmdbKey /
+  effectiveOmdbKey. New OMDb support on Android (metadata/Omdb.kt): IMDb score, Rotten Tomatoes,
+  Metacritic and the age rating on detail pages; new "OMDb API key" field in Settings.
+- Built-in keys are never synced to the sync server or other devices; only keys typed in
+  Settings sync, as before.
+
+IMDB RATINGS (iOS + Android)
+- Every title with an IMDb id now gets its IMDb rating from Cinemeta, Stremio's free public
+  metadata service (https://v3-cinemeta.strem.io/meta/{movie|series}/{tt…}.json, field
+  imdbRating). No API key needed; results are cached; a failed lookup just shows no badge.
+- iOS: used when OMDb isn't set up and no addon already supplied the rating (OMDb, when set,
+  still adds Rotten Tomatoes / Metacritic). Shown with the existing yellow IMDb badge.
+  CinemetaRating in Metadata/ExtraProviders.swift; XCTest for the JSON parsing.
+- Android: new yellow "IMDb 8.8" badge (ImdbBadge in ui/Components.kt) on the phone/tablet and
+  TV detail pages and on the TV home billboard; the separate ★ score is hidden when the IMDb
+  badge shows. Details.imdbRating, filled in Metadata.details (also from addon metas).
+
+TRAILER FIX (iOS + Android)
+- YouTube trailers stopped playing on iOS once IMDb/direct links were removed: the embedded
+  player page claimed to be youtube-nocookie.com (baseURL + origin), and YouTube answers such
+  pages with "Video unavailable" (error 152; no origin at all gives 153). Earlier builds hid this
+  because IMDb or direct MP4 links played first.
+- Fix, per YouTube's Required Minimum Functionality docs: the page now identifies the app,
+  https://com.mohamedt.streamforge (iOS: https://<bundle id>), as baseURL, player origin and
+  Referer, with referrer policy strict-origin-when-cross-origin. Same change on Android.
+- iOS Trailer sheet: if YouTube still refuses a particular video, a "Watch on YouTube" button
+  opens it in the YouTube app/site instead of a dead end.
+- Dispatcharr: no Dispatcharr code was changed in any of these updates. Its youtube_trailer
+  values (bare ids or YouTube links) still reach the player unchanged.
+
 ANDROID (this update)
 - Two apps from one codebase (Gradle product flavors in android/app/build.gradle.kts):
   - tv: Android TV / Google TV. Always the 10-foot remote interface (it can no longer fall into

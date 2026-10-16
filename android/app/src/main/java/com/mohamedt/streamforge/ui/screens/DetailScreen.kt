@@ -95,6 +95,8 @@ import com.mohamedt.streamforge.ui.ButtonKind
 import com.mohamedt.streamforge.ui.Chip
 import com.mohamedt.streamforge.ui.Dims
 import com.mohamedt.streamforge.ui.InitialFocus
+import com.mohamedt.streamforge.ui.CriticScores
+import com.mohamedt.streamforge.ui.ImdbBadge
 import com.mohamedt.streamforge.ui.KeylineScroll
 import com.mohamedt.streamforge.ui.MinimalScroll
 import com.mohamedt.streamforge.ui.Loading
@@ -315,7 +317,8 @@ private fun DetailPhone(
         // Tablets in landscape: artwork, title and actions on the left, episodes / sources / cast on the right.
         Row(Modifier.fillMaxSize()) {
             Column(Modifier.weight(0.44f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-                PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = false)
+                PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = false,
+                    imdbRating = d.imdbRating, rottenTomatoes = d.rottenTomatoes, metacritic = d.metacritic)
                 PhoneActions(item, playLabel, onPlay, onTrailer)
                 PhoneOverview(item, maxLines = 12)
             }
@@ -325,7 +328,8 @@ private fun DetailPhone(
         }
     } else {
         LazyColumn(Modifier.fillMaxSize(), state = listState) {
-            item(key = "hero") { PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = heroHeight < 240.dp) }
+            item(key = "hero") { PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = heroHeight < 240.dp,
+                imdbRating = d.imdbRating, rottenTomatoes = d.rottenTomatoes, metacritic = d.metacritic) }
             item(key = "actions") { PhoneActions(item, playLabel, onPlay, onTrailer) }
             item(key = "overview") { PhoneOverview(item, maxLines = 6) }
             body()
@@ -334,7 +338,15 @@ private fun DetailPhone(
 }
 
 @Composable
-private fun PhoneHero(item: MediaItem, trailer: TrailerController, modifier: Modifier, compact: Boolean) {
+private fun PhoneHero(
+    item: MediaItem,
+    trailer: TrailerController,
+    modifier: Modifier,
+    compact: Boolean,
+    imdbRating: Double? = null,
+    rottenTomatoes: String? = null,
+    metacritic: String? = null,
+) {
     Column {
         Box(modifier) {
             Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
@@ -343,7 +355,14 @@ private fun PhoneHero(item: MediaItem, trailer: TrailerController, modifier: Mod
         }
         Column(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(item.title, fontSize = if (compact) 26.sp else 32.sp, fontWeight = FontWeight.Bold)
-            Text(metaLine(item).joinToString("  ·  "), color = Palette.secondary, fontSize = 14.sp)
+            if (imdbRating != null || rottenTomatoes != null || metacritic != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    imdbRating?.let { ImdbBadge(it) }
+                    CriticScores(rottenTomatoes, metacritic)
+                }
+            }
+            Text(metaLine(item, hideRating = imdbRating != null).joinToString("  ·  "), color = Palette.secondary, fontSize = 14.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -427,9 +446,10 @@ private fun LazyListScope.phoneBody(
     item(key = "bottom") { Spacer(Modifier.height(40.dp)) }
 }
 
-private fun metaLine(item: MediaItem): List<String> = listOfNotNull(
+/** Year · ★ rating · runtime · genres. [hideRating]: the IMDb badge is shown instead of the star rating. */
+private fun metaLine(item: MediaItem, hideRating: Boolean = false): List<String> = listOfNotNull(
     item.year?.toString(),
-    item.rating?.takeIf { it > 0 }?.let { "★ %.1f".format(it) },
+    item.rating?.takeIf { it > 0 && !hideRating }?.let { "★ %.1f".format(it) },
     item.runtimeMinutes?.takeIf { it > 0 }?.let { runtimeLabel(it) },
     item.genres.take(3).joinToString(", ").ifEmpty { null },
 )
@@ -524,9 +544,11 @@ private fun DetailTv(
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        d.imdbRating?.let { ImdbBadge(it) }
+                        CriticScores(d.rottenTomatoes, d.metacritic)
                         d.certification?.takeIf { it.isNotBlank() }?.let { Pill(it, Color.Transparent) }
                         if (sources?.sorted?.any { it.resolution >= 2160 } == true) Pill("4K", Palette.gold.copy(alpha = 0.18f), Palette.gold)
-                        Text(metaLine(item).joinToString("  ·  "), fontSize = 17.sp, color = Palette.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(metaLine(item, hideRating = d.imdbRating != null).joinToString("  ·  "), fontSize = 17.sp, color = Palette.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     d.tagline?.takeIf { it.isNotBlank() }?.let {
                         Spacer(Modifier.height(8.dp))

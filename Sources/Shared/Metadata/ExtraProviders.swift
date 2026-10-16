@@ -30,6 +30,40 @@ struct OMDbClient {
     }
 }
 
+/// Cinemeta (Stremio's free public metadata service): the IMDb rating for an IMDb id, with no
+/// API key. Used when OMDb isn't set up and no addon already supplied the rating.
+@MainActor
+enum CinemetaRating {
+    private static var cache: [String: String] = [:]
+
+    static func imdbRating(imdbID: String, type: MediaType) async -> String? {
+        let key = "\(type.stremioType):\(imdbID)"
+        if let hit = cache[key] { return hit.isEmpty ? nil : hit }
+        guard imdbID.hasPrefix("tt"), imdbID.dropFirst(2).allSatisfy(\.isNumber), type == .movie || type == .series,
+              let url = URL(string: "https://v3-cinemeta.strem.io/meta/\(type.stremioType)/\(imdbID).json") else { return nil }
+        let request = URLRequest(url: url, timeoutInterval: 6)
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        let value = rating(fromCinemetaJSON: data)
+        cache[key] = value ?? ""
+        return value
+    }
+
+    /// `{"meta": {"imdbRating": "8.8"}}` (string or number) → "8.8"; nil when missing or zero.
+    nonisolated static func rating(fromCinemetaJSON data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let meta = root["meta"] as? [String: Any] else { return nil }
+        let raw: Double?
+        switch meta["imdbRating"] {
+        case let n as NSNumber: raw = n.doubleValue
+        case let s as String: raw = Double(s.trimmingCharacters(in: .whitespaces))
+        default: raw = nil
+        }
+        guard let r = raw, r > 0, r <= 10 else { return nil }
+        return String(format: "%.1f", r)
+    }
+}
+
 /// Fanart.tv: transparent title logos and extra backdrops.
 struct FanartClient {
     let key: String

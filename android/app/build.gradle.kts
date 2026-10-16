@@ -22,6 +22,13 @@ android {
         targetSdk = 37
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+
+        // Built-in TMDB / OMDb keys, injected by CI from repository secrets (TMDB_API_KEY /
+        // OMDB_API_KEY → SF_TMDB_KEY / SF_OMDB_KEY). Empty in local builds without them; keys typed
+        // in Settings always win. Kept out of the source code on purpose.
+        fun quoted(env: String) = "\"" + (System.getenv(env) ?: "").trim().replace("\\", "").replace("\"", "") + "\""
+        buildConfigField("String", "TMDB_KEY", quoted("SF_TMDB_KEY"))
+        buildConfigField("String", "OMDB_KEY", quoted("SF_OMDB_KEY"))
     }
 
     // Two separate apps from one codebase:
@@ -34,10 +41,13 @@ android {
         create("mobile") {
             dimension = "device"
             buildConfigField("boolean", "TV_BUILD", "false")
+            buildConfigField("String", "DEFAULT_SYNC_SERVER", "\"\"")
         }
         create("tv") {
             dimension = "device"
             buildConfigField("boolean", "TV_BUILD", "true")
+            // Pre-filled in Settings → Sync server on the TV (Chromecast with Google TV); editable.
+            buildConfigField("String", "DEFAULT_SYNC_SERVER", "\"http://192.168.8.209:8484\"")
         }
     }
 

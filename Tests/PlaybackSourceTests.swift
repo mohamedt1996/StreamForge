@@ -110,4 +110,12 @@ final class PlaybackSourceTests: XCTestCase {
             XCTAssertLessThanOrEqual(landscape.height, device.screen.width, "\(device.name): landscape header fits")
         }
     }
+
+    func testCinemetaIMDbRatingParsing() {
+        XCTAssertEqual(CinemetaRating.rating(fromCinemetaJSON: Data(#"{"meta":{"imdbRating":"8.8"}}"#.utf8)), "8.8")
+        XCTAssertEqual(CinemetaRating.rating(fromCinemetaJSON: Data(#"{"meta":{"imdbRating":7.25}}"#.utf8)), "7.2")
+        XCTAssertNil(CinemetaRating.rating(fromCinemetaJSON: Data(#"{"meta":{"imdbRating":""}}"#.utf8)))
+        XCTAssertNil(CinemetaRating.rating(fromCinemetaJSON: Data(#"{"meta":{}}"#.utf8)))
+        XCTAssertNil(CinemetaRating.rating(fromCinemetaJSON: Data("not json".utf8)))
+    }
 }

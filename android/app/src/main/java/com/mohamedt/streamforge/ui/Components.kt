@@ -392,6 +392,28 @@ fun Pill(text: String, color: Color = Palette.surfaceHigh, textColor: Color = Co
 @Composable
 fun LiveBadge() = Pill("● LIVE", Palette.live)
 
+private val ImdbYellow = Color(0xFFF5C518)
+
+/** Rotten Tomatoes and Metacritic scores (from OMDb), as small pills next to the IMDb badge. */
+@Composable
+fun CriticScores(rottenTomatoes: String?, metacritic: String?) {
+    rottenTomatoes?.let { Pill("🍅 $it", Color(0x33FA5C3C), Color(0xFFFF9479)) }
+    metacritic?.let { Pill("MC $it", Color(0x3366CC4D), Color(0xFF9BE58A)) }
+}
+
+/** "IMDb 8.8": IMDb's yellow label and the score, as on iOS and in Stremio. */
+@Composable
+fun ImdbBadge(rating: Double, modifier: Modifier = Modifier) {
+    val tv = isTv()
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text("IMDb", fontSize = if (tv) 14.sp else 11.sp, fontWeight = FontWeight.Black, color = Color.Black, maxLines = 1,
+            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(ImdbYellow).padding(horizontal = if (tv) 6.dp else 5.dp, vertical = 1.dp))
+        Spacer(Modifier.width(if (tv) 7.dp else 5.dp))
+        Text(String.format(java.util.Locale.US, "%.1f", rating), fontSize = if (tv) 17.sp else 14.sp,
+            fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+    }
+}
+
 @Composable
 fun SectionHeader(title: String, subtitle: String? = null, action: (() -> Unit)? = null) {
     if (isTv()) {

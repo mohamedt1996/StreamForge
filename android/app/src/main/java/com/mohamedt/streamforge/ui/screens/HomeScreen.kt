@@ -86,6 +86,7 @@ import com.mohamedt.streamforge.stremio.Addons
 import com.mohamedt.streamforge.ui.ButtonKind
 import com.mohamedt.streamforge.ui.ChannelLogo
 import com.mohamedt.streamforge.ui.Dims
+import com.mohamedt.streamforge.ui.ImdbBadge
 import com.mohamedt.streamforge.ui.InitialFocus
 import com.mohamedt.streamforge.ui.KeylineScroll
 import com.mohamedt.streamforge.ui.LandscapeCard
@@ -293,9 +294,9 @@ private data class Hero(
 
 private fun runtimeText(minutes: Int): String = if (minutes >= 60) "${minutes / 60}h ${minutes % 60}m" else "${minutes}m"
 
-private fun itemMeta(i: MediaItem): List<String> = listOfNotNull(
+private fun itemMeta(i: MediaItem, hideRating: Boolean = false): List<String> = listOfNotNull(
     i.year?.toString(),
-    i.rating?.takeIf { it > 0 }?.let { "★ %.1f".format(it) },
+    i.rating?.takeIf { it > 0 && !hideRating }?.let { "★ %.1f".format(it) },
     i.runtimeMinutes?.takeIf { it > 0 }?.let { runtimeText(it) },
     i.genres.take(3).joinToString(", ").ifEmpty { null },
 )
@@ -324,17 +325,22 @@ private class HeroState {
 }
 
 /** The hero to show, merged with richer metadata when it has arrived. */
-private class HeroView(val hero: Hero?, val backdrop: String?, val logo: String?, val meta: List<String>, val overview: String?)
+private class HeroView(val hero: Hero?, val backdrop: String?, val logo: String?, val meta: List<String>, val overview: String?,
+    val imdbRating: Double? = null)
 
 private fun HeroState.view(featured: Hero?): HeroView {
     val hero = focused ?: featured
-    val rich = enriched?.takeIf { it.first == hero?.item?.id }?.second?.item
+    val details = enriched?.takeIf { it.first == hero?.item?.id }?.second
+    val rich = details?.item
+    val imdb = details?.imdbRating
     return HeroView(
         hero,
         rich?.backdrop ?: hero?.backdrop,
         rich?.logo ?: hero?.logo,
-        rich?.let { itemMeta(it) }?.takeIf { it.isNotEmpty() } ?: hero?.meta.orEmpty(),
+        // With an IMDb badge, the star rating is left out so only one score shows.
+        rich?.let { itemMeta(it, hideRating = imdb != null) }?.takeIf { it.isNotEmpty() } ?: hero?.meta.orEmpty(),
         hero?.overview ?: rich?.overview,
+        imdb,
     )
 }
 
@@ -540,6 +546,10 @@ private fun Billboard(
             hero?.progress?.let { p ->
                 Pill(p.remainingText, Palette.accent.copy(alpha = 0.35f))
                 Spacer(Modifier.width(10.dp))
+            }
+            v.imdbRating?.let {
+                ImdbBadge(it)
+                Spacer(Modifier.width(12.dp))
             }
             Text(v.meta.joinToString("  ·  "), fontSize = 17.sp, color = Palette.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

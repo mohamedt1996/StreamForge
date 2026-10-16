@@ -665,7 +665,8 @@ struct MetadataSettingsView: View {
             } header: {
                 Text("API keys")
             } footer: {
-                Text("TMDB (themoviedb.org) powers artwork, cast, trailers, trending and episode stills. OMDb adds IMDb, Rotten Tomatoes and Metacritic scores. Fanart.tv adds title logos. All are free for personal use.")
+                Text("TMDB (themoviedb.org) powers artwork, cast, trailers, trending and episode stills. OMDb adds IMDb, Rotten Tomatoes and Metacritic scores. Fanart.tv adds title logos. All are free for personal use."
+                     + (BuiltInKeys.tmdb.isEmpty && BuiltInKeys.omdb.isEmpty ? "" : " This build has its own TMDB / OMDb keys: leave a field empty to use them, or enter yours to override."))
             }
 
             Section("Options") {

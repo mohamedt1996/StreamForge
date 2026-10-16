@@ -6,6 +6,9 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const swift = fs.readFileSync(path.join(__dirname, '../Sources/Shared/Features/Detail/TrailerBackdrop.swift'), 'utf8');
 assert.ok(!/imdb/i.test(swift.split('// MARK: - Web surface')[1] || ''), 'web player must not reference IMDb');
+// YouTube rejects embeds whose page claims to be YouTube (error 152) or has no origin (153).
+assert.ok(swift.includes('baseURL: URL(string: Self.appOrigin)'), 'trailer page must use the app identity as its origin');
+assert.ok(!swift.includes("origin:'https://www.youtube-nocookie.com'"), 'player origin must be the app identity');
 const page = swift.split('static func html(')[1].split('return """')[1].split('"""')[0];
 const script = page.split('<script>')[1].split('</script>')[0];
 

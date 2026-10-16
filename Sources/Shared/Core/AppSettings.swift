@@ -130,6 +130,11 @@ final class AppSettings {
     }
 
     // MARK: Secrets
+
+    /// Keys the user typed in Settings win; otherwise the ones built into the app by CI.
+    var effectiveTMDBKey: String { tmdbKey.isEmpty ? BuiltInKeys.tmdb : tmdbKey }
+    var effectiveOMDbKey: String { omdbKey.isEmpty ? BuiltInKeys.omdb : omdbKey }
+
     var tmdbKey: String {
         get { Keychain.get("tmdb.key") ?? "" }
         set {
@@ -162,5 +167,20 @@ final class AppSettings {
     var torrServerPassword: String {
         get { Keychain.get("torrserver.password") ?? "" }
         set { Keychain.set(newValue, for: "torrserver.password") }
+    }
+}
+
+
+/// TMDB / OMDb keys built into the app at compile time (CI injects them from the repository
+/// secrets TMDB_API_KEY / OMDB_API_KEY into Info.plist). Empty when the build had none, so they
+/// never live in the source code. Never synced: only keys typed in Settings sync.
+enum BuiltInKeys {
+    static let tmdb = value("StreamForgeTMDBKey")
+    static let omdb = value("StreamForgeOMDbKey")
+
+    private static func value(_ key: String) -> String {
+        let raw = (Bundle.main.object(forInfoDictionaryKey: key) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // An unset build setting can leave the literal "$(SF_…)" behind.
+        return raw.hasPrefix("$(") ? "" : raw
     }
 }

@@ -20,7 +20,7 @@ import kotlinx.serialization.json.JsonObject
 /** TMDB v3. Accepts a v3 API key or a v4 read-access token. */
 object Tmdb {
     private const val BASE = "https://api.themoviedb.org/3"
-    val configured: Boolean get() = Settings.tmdbKey.isNotEmpty()
+    val configured: Boolean get() = Settings.effectiveTmdbKey.isNotEmpty()
 
     /** `https://image.tmdb.org/t/p/{size}/{file}`; tolerates a missing leading slash and already-absolute URLs. */
     fun image(path: String?, size: String = "w500"): String? {
@@ -48,7 +48,7 @@ object Tmdb {
         .distinct()
 
     private suspend fun get(path: String, query: Map<String, String?> = emptyMap()): JsonObject {
-        val key = Settings.tmdbKey
+        val key = Settings.effectiveTmdbKey
         val q = query.toMutableMap()
         q["language"] = Settings.values.metadataLanguage
         val headers = mutableMapOf<String, String>()

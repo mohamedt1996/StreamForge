@@ -82,6 +82,10 @@ jobs:
             .build/spm
           key: spm-${{ hashFiles('project.yml') }}
       - name: Build (unsigned)
+        env:
+          # Built-in metadata keys (optional): Settings → Secrets → Actions → TMDB_API_KEY / OMDB_API_KEY.
+          SF_TMDB_KEY: ${{ secrets.TMDB_API_KEY }}
+          SF_OMDB_KEY: ${{ secrets.OMDB_API_KEY }}
         run: bash scripts/xcbuild.sh StreamForge iphoneos 'generic/platform=iOS' xcodebuild-ios.log
       - name: Package IPA
         run: |
@@ -123,6 +127,9 @@ jobs:
           mkdir -p Frameworks/TorrServerKit.xcframework
           xcodegen generate
       - name: Build (unsigned)
+        env:
+          SF_TMDB_KEY: ${{ secrets.TMDB_API_KEY }}
+          SF_OMDB_KEY: ${{ secrets.OMDB_API_KEY }}
         run: bash scripts/xcbuild.sh StreamForgeTV appletvos 'generic/platform=tvOS' xcodebuild-tvos.log
       - name: Package IPA
         run: |
@@ -207,6 +214,8 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SF_TMDB_KEY: ${{ secrets.TMDB_API_KEY }}
+          SF_OMDB_KEY: ${{ secrets.OMDB_API_KEY }}
         run: |
           # A private signing key from repository secrets, when set, replaces the public sideload key.
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then

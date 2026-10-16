@@ -11,8 +11,8 @@ final class MetadataService {
     private var posterMisses = Set<String>()
 
     private var settings: AppSettings { AppSettings.shared }
-    var tmdb: TMDBClient { TMDBClient(key: settings.tmdbKey, language: settings.values.metadataLanguage) }
-    private var omdb: OMDbClient { OMDbClient(key: settings.omdbKey) }
+    var tmdb: TMDBClient { TMDBClient(key: settings.effectiveTMDBKey, language: settings.values.metadataLanguage) }
+    private var omdb: OMDbClient { OMDbClient(key: settings.effectiveOMDbKey) }
     private var fanart: FanartClient { FanartClient(key: settings.fanartKey) }
 
     // MARK: Posters for grids
@@ -66,6 +66,11 @@ final class MetadataService {
         if let imdb = details.item.imdbID, omdb.isConfigured, let r = try? await omdb.ratings(imdbID: imdb) {
             details.ratings = r.badges + details.ratings.filter { b in !r.badges.contains { $0.source == b.source } }
             if details.certification == nil { details.certification = r.rated }
+        }
+        // IMDb rating for every title with an IMDb id, even without an OMDb key or Cinemeta addon.
+        if !details.ratings.contains(where: { $0.source == "IMDb" }), let imdb = details.item.imdbID,
+           let value = await CinemetaRating.imdbRating(imdbID: imdb, type: details.item.type) {
+            details.ratings.insert(RatingBadge(source: "IMDb", value: value), at: 0)
         }
         if details.item.logo == nil, let tmdbID = details.item.tmdbID, fanart.isConfigured {
             details.item.logo = await fanart.logo(tmdbID: tmdbID, type: details.item.type, lang: settings.values.metadataLanguage)

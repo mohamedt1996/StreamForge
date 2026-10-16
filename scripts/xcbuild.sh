@@ -16,6 +16,7 @@ xcodebuild \
   -skipPackagePluginValidation \
   -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  SF_TMDB_KEY="${SF_TMDB_KEY:-}" SF_OMDB_KEY="${SF_OMDB_KEY:-}" \
   build > "$LOG" 2>&1
 STATUS=$?
 

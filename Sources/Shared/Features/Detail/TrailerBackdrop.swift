@@ -498,7 +498,10 @@ final class TrailerWebPlayer {
             default: break
             }
         }
-        web.loadHTMLString(Self.html(keys: keys, muted: muted, active: active), baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        // The page must identify the app, not YouTube: a page whose origin is YouTube itself gets
+        // "Video unavailable" (error 152) and one without an origin gets error 153. YouTube's
+        // documented identity for an app WebView is https://<bundle id>, sent as the Referer.
+        web.loadHTMLString(Self.html(keys: keys, muted: muted, active: active), baseURL: URL(string: Self.appOrigin))
     }
 
     func play() { run("sfPlay()") }
@@ -519,12 +522,18 @@ final class TrailerWebPlayer {
         view.evaluateJavaScript("try{\(js)}catch(e){}", completionHandler: nil)
     }
 
+    /// `https://com.mohamedt.streamforge`: the app's identity for YouTube's embedded player.
+    static var appOrigin: String {
+        "https://" + (Bundle.main.bundleIdentifier ?? "com.mohamedt.streamforge").lowercased()
+    }
+
     static func html(keys: [String], muted: Bool, active: Bool = true) -> String {
         let safe = keys.map { $0.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }.filter { !$0.isEmpty }
         let list = "[" + safe.map { "\"\($0)\"" }.joined(separator: ",") + "]"
         return """
         <!doctype html><html><head>
         <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+        <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>
         html,body{margin:0;padding:0;background:#000;overflow:hidden;width:100%;height:100%;}
         #wrap{position:absolute;top:50%;left:50%;width:min(100vw,177.77777778vh);height:min(100vh,56.25vw);
@@ -539,7 +548,7 @@ final class TrailerWebPlayer {
           if(!keys.length)return;
           player=new YT.Player('p',{host:'https://www.youtube-nocookie.com',videoId:keys[0],
             playerVars:{autoplay:1,mute:1,controls:0,playsinline:1,rel:0,iv_load_policy:3,
-                        disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'https://www.youtube-nocookie.com'},
+                        disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'\(appOrigin)'},
             events:{
               onReady:function(e){if(muted){e.target.mute();}else{e.target.unMute();} if(want){e.target.playVideo();}},
               onStateChange:function(e){
@@ -733,8 +742,17 @@ struct TrailerPreviewSheet: View {
                         if controller.phase == .loading || controller.phase == .idle {
                             ProgressView("Loading trailer…")
                         } else if controller.phase == .unavailable {
-                            Text("No playable trailer is available right now.")
-                                .multilineTextAlignment(.center).padding()
+                            VStack(spacing: 14) {
+                                Text("This trailer can't play inside StreamForge right now.")
+                                    .multilineTextAlignment(.center)
+                                // YouTube can still refuse a particular video in embedded players.
+                                if let key = sources.first?.youTubeKey,
+                                   let url = URL(string: "https://www.youtube.com/watch?v=\(key)") {
+                                    Link(destination: url) { Label("Watch on YouTube", systemImage: "play.rectangle.fill") }
+                                        .buttonStyle(.borderedProminent)
+                                }
+                            }
+                            .padding()
                         }
                     }
                     .frame(width: geo.size.width, height: min(geo.size.width * 9 / 16, max(1, geo.size.height - 80)))

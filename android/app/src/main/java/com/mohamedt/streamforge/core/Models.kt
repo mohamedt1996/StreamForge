@@ -89,6 +89,11 @@ data class Details(
     val certification: String? = null,
     /** YouTube trailer ids, best first; the hero trailer tries them in order. */
     val trailerKeys: List<String> = listOfNotNull(trailerKey),
+    /** IMDb user rating (0–10) when the title has an IMDb id; shown as an "IMDb" badge. */
+    val imdbRating: Double? = null,
+    /** Rotten Tomatoes Tomatometer ("85%") and Metascore ("67"), from OMDb when a key is set. */
+    val rottenTomatoes: String? = null,
+    val metacritic: String? = null,
 )
 
 /** "https://youtu.be/abc_DEF-123", "…watch?v=abc_DEF-123" or "abc_DEF-123" → "abc_DEF-123" (null for junk). */

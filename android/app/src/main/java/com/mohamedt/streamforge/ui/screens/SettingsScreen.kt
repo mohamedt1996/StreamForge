@@ -218,9 +218,13 @@ fun SettingsScreen() {
             }
         }
         item {
-            Section("Metadata", "A free TMDB key (themoviedb.org) adds artwork, cast, trailers, trending, collections and person pages.") {
+            Section("Metadata", "A free TMDB key (themoviedb.org) adds artwork, cast, trailers, trending, collections and person pages. " +
+                "A free OMDb key (omdbapi.com) adds IMDb, Rotten Tomatoes and Metacritic scores." +
+                (if (Settings.hasBuiltInKeys) " This build has its own keys: leave a field empty to use them, or enter yours to override." else "")) {
                 var key by remember { mutableStateOf(Settings.tmdbKey) }
                 Field("TMDB API key or read token", key, secret = true) { key = it; Settings.tmdbKey = it }
+                var omdbKey by remember { mutableStateOf(Settings.omdbKey) }
+                Field("OMDb API key", omdbKey, secret = true) { omdbKey = it; Settings.omdbKey = it }
                 Field("Language (ISO code)", s.metadataLanguage) { v -> upd { it.copy(metadataLanguage = v) } }
                 Toggle("Hide adult content", s.hideAdult) { v -> upd { it.copy(hideAdult = v) } }
             }
@@ -466,7 +470,8 @@ private fun SyncServerSection() {
 private fun SyncSignIn() {
     val tv = isTv()
     val scope = rememberCoroutineScope()
-    var url by remember { mutableStateOf(ServerSync.serverUrl) }
+    // The TV app comes with the home sync server filled in (still editable).
+    var url by remember { mutableStateOf(ServerSync.serverUrl.ifEmpty { com.mohamedt.streamforge.BuildConfig.DEFAULT_SYNC_SERVER }) }
     // TVs default to the pairing code (no typing a password with a remote).
     var pairMode by remember { mutableStateOf(tv) }
     var user by remember { mutableStateOf(ServerSync.username) }

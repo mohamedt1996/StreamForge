@@ -187,7 +187,10 @@ class TrailerController(private val context: Context) {
         web.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         web.webChromeClient = WebChromeClient()
         web.addJavascriptInterface(Bridge(generation), "SFTrailer")
-        web.loadDataWithBaseURL("https://www.youtube-nocookie.com/", trailerHtml(keys.take(4), muted), "text/html", "utf-8", null)
+        // The page must identify the app, not YouTube: a page whose origin is YouTube itself gets
+        // "Video unavailable" (error 152) and one without an origin gets error 153. YouTube's
+        // documented identity for an app WebView is https://<application id>, sent as the Referer.
+        web.loadDataWithBaseURL("$APP_ORIGIN/", trailerHtml(keys.take(4), muted), "text/html", "utf-8", null)
         webView = web
         if (!isActive) js("sfPause()")
         startMonitor()
@@ -263,6 +266,9 @@ class TrailerController(private val context: Context) {
     }
 }
 
+/** The app's identity for YouTube's embedded player (fixed, so debug builds match too). */
+private const val APP_ORIGIN = "https://com.mohamedt.streamforge"
+
 private fun trailerHtml(keys: List<String>, muted: Boolean): String {
     val safe = keys.map { k -> k.filter { it.isLetterOrDigit() && it.code < 128 || it == '-' || it == '_' } }.filter { it.isNotEmpty() }
     val list = safe.joinToString(",", "[", "]") { "\"" + it + "\"" }
@@ -270,6 +276,7 @@ private fun trailerHtml(keys: List<String>, muted: Boolean): String {
     return """
 <!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <style>
 html,body{margin:0;padding:0;background:#000;overflow:hidden;width:100%;height:100%;}
 #wrap{position:absolute;top:50%;left:50%;width:max(100vw,177.78vh);height:max(100vh,56.25vw);
@@ -284,7 +291,7 @@ function onYouTubeIframeAPIReady(){
   if(!keys.length)return;
   player=new YT.Player('p',{host:'https://www.youtube-nocookie.com',videoId:keys[0],
     playerVars:{autoplay:1,mute:1,controls:0,playsinline:1,modestbranding:1,rel:0,iv_load_policy:3,
-                disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'https://www.youtube-nocookie.com'},
+                disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'$APP_ORIGIN'},
     events:{
       onReady:function(e){if(muted){e.target.mute();}else{e.target.unMute();} if(want){e.target.playVideo();}},
       onStateChange:function(e){
