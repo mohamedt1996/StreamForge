@@ -15,14 +15,14 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertNil(StreamTextParser.parse(String(repeating: "9", count: 100) + " GB").size)
     }
 
-    func testTrailerMetadataKeepsOnlyYouTube() {
+    func testTrailerMetadataKeepsYouTubeAndIMDb() {
         let item = MediaItem(id: "test", type: .movie, title: "Test", origin: .tmdb(id: 1))
         var details = MediaDetails(item: item)
         details.addTrailers(["https://media.example/trailer.mp4", "https://www.imdb.com/video/vi12345/",
                              "https://youtu.be/abc_DEF-1234", "abc_DEF-1234"])
         XCTAssertNil(details.item.trailerURL)
         XCTAssertEqual(details.trailerKeys, ["abc_DEF-1234"])
-        XCTAssertEqual(details.trailerSources, [.youtube("abc_DEF-1234")])
+        XCTAssertEqual(details.trailerSources, [.youtube("abc_DEF-1234"), .imdb("vi12345")])
         XCTAssertNil(MediaDetails.cleanYouTubeKey("https://unrelated.example/abc_DEF-1234"))
     }
 
@@ -51,20 +51,36 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertTrue(LibraryStore.continueWatchingEntries([entry], watched: ["movie"]).isEmpty)
     }
 
-    func testTrailerSourcesAreYouTubeOnly() {
+    func testTrailerSourcesYouTubeFirstThenIMDb() {
         let youtube = TrailerSource.youtube("abcdefghijk")
-        XCTAssertEqual(TrailerSource.ordered([youtube, .youtube("zyxwvutsrqp"), youtube]), [youtube, .youtube("zyxwvutsrqp")])
+        let imdb = TrailerSource.imdb("vi12345")
+        let lookup = TrailerSource.imdbTitle("tt0111161")
+        XCTAssertEqual(TrailerSource.ordered([lookup, imdb, youtube, imdb]), [youtube, imdb, lookup])
         XCTAssertEqual(TrailerSource.parse("https://www.youtube.com/watch?v=abcdefghijk"), youtube)
         XCTAssertEqual(TrailerSource.parse("abcdefghijk"), youtube)
-        XCTAssertNil(TrailerSource.parse("https://www.imdb.com/video/vi12345/"))
+        XCTAssertEqual(TrailerSource.parse("https://www.imdb.com/video/vi12345/"), imdb)
+        XCTAssertEqual(TrailerSource.parse("https://www.imdb.com/video/embed/vi12345/"), imdb)
+        XCTAssertNil(TrailerSource.parse("https://www.imdb.com/trailers/"))
+        XCTAssertNil(TrailerSource.parse("https://imdb.com.example.org/video/vi12345/"))
         XCTAssertNil(TrailerSource.parse("https://cdn.example.com/trailer.m3u8"))
         XCTAssertNil(TrailerSource.parse("javascript:alert(1)"))
     }
 
-    func testIMDbTitlesGetNoTrailerLookup() {
+    func testIMDbTitlesGetLookupAfterYouTube() {
         var item = MediaItem(id: "tt0111161", type: .movie, title: "Test", origin: .tmdb(id: 1))
         item.imdbID = "tt0111161"
-        XCTAssertTrue(MediaDetails(item: item).trailerSources.isEmpty)
+        var details = MediaDetails(item: item)
+        XCTAssertEqual(details.trailerSources, [.imdbTitle("tt0111161")])
+        details.addTrailers(["abcdefghijk"])
+        XCTAssertEqual(details.trailerSources, [.youtube("abcdefghijk"), .imdbTitle("tt0111161")])
+    }
+
+    func testIMDbDiscoveryUsesTitleTrailerNotUnrelatedVideo() {
+        let html = #"<script type="application/ld+json">{"@type":"Movie","trailer":{"@type":"VideoObject","embedUrl":"https://www.imdb.com/video/embed/vi54321/"}}</script>"#
+        XCTAssertEqual(IMDbTrailerResolver.videoID(inHTML: html), "vi54321")
+        let unrelated = #"<script type="application/ld+json">{"@type":"VideoObject","embedUrl":"https://www.imdb.com/video/embed/vi99999/"}</script>"#
+        XCTAssertNil(IMDbTrailerResolver.videoID(inHTML: unrelated))
+        XCTAssertNil(IMDbTrailerResolver.videoID(inHTML: "<html>Consent or blocked</html>"))
     }
 
     func testDeviceModelClassification() {

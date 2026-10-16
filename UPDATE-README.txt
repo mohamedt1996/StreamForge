@@ -1,5 +1,30 @@
 StreamForge — Android: separate TV app, Chromecast with Google TV performance
 
+iOS TRAILERS: IMDb IS BACK AS THE BACKUP
+- Why trailers stopped: the earlier builds tried direct links, then IMDb (looked up for every
+  title with an IMDb id), then YouTube. IMDb was what actually played; when IMDb was removed,
+  only the embedded YouTube player was left and it did not load.
+- Order now: YouTube first (Invidious when configured, then the YouTube embed), then IMDb: a
+  linked IMDb video, else a lookup on the title's IMDb page (JSON-LD trailer). The IMDb code is
+  the original from the earlier builds (IMDbTrailerResolver, imdbScript), unchanged.
+- YouTube gets 9 s of on-screen loading before the IMDb backup takes over (IMDb gets 15 s), so a
+  YouTube failure only delays the trailer a little.
+- Direct MP4/HLS links stay removed. tvOS is unchanged (no WebKit: Invidious only).
+- Tests: XCTest for source order, IMDb link parsing and JSON-LD lookup; node tests for both the
+  YouTube and IMDb page scripts.
+
+iOS TRAILERS: NEW PLAYER PATH
+- The iOS trailer WebView now opens YouTube's own embed page directly
+  (https://www.youtube-nocookie.com/embed/<id>?autoplay=1&mute=1&controls=0&playsinline=1…)
+  with the app identity https://<bundle id> as the HTTP Referer (YouTube's documented method for
+  app WebViews), instead of a local HTML page hosting the iframe API. Trailers still did not load
+  with the local page even after its origin fix.
+- A script injected into the embed page drives its <video> element: muted autoplay, pause when
+  the hero is hidden, mute toggle, replay, fade before YouTube's end screen, and "failed" for
+  YouTube's error screen or a media error, which moves on to the next trailer id.
+- Tests/TrailerBridgeTests.cjs covers the injected script (run: node Tests/TrailerBridgeTests.cjs).
+- Android keeps its iframe page with the app-identity origin fix.
+
 TV APP: SYNC SERVER PRE-FILLED
 - The Android TV app (tv flavor) opens Settings → Sync server with http://192.168.8.209:8484
   already in the address field (BuildConfig.DEFAULT_SYNC_SERVER; editable). Press

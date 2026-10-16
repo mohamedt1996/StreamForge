@@ -1,8 +1,8 @@
 import SwiftUI
 import AVKit
 
-/// URL check kept for any metadata code that still recognises direct links. Trailers no longer
-/// play them; they are YouTube only.
+/// URL check kept for any metadata code that still recognises direct links. Trailers don't
+/// play direct links; they use YouTube, then IMDb.
 enum TrailerSelection {
     static func directURL(_ url: URL?) -> URL? {
         guard let url, url.host != nil, ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
@@ -11,25 +11,98 @@ enum TrailerSelection {
     }
 }
 
-/// Trailers are YouTube only. A YouTube id plays in the iOS embed, or natively through the
-/// user's optional Invidious instance (the only route on tvOS, which has no WebKit).
+/// Trailer sources, tried in this order: YouTube first, IMDb as the backup.
+/// A YouTube id plays in the iOS embed, or natively through the user's optional Invidious
+/// instance (the only route on tvOS, which has no WebKit). IMDb is iOS only (embed page).
 enum TrailerSource: Equatable {
     case youtube(String)
+    /// An IMDb video id ("vi12345") from metadata.
+    case imdb(String)
+    /// Look the trailer up on the title's IMDb page ("tt0111161") when YouTube doesn't play.
+    case imdbTitle(String)
 
-    var youTubeKey: String {
-        switch self { case .youtube(let key): return key }
+    var youTubeKey: String? {
+        if case .youtube(let key) = self { return key }
+        return nil
     }
 
-    /// Accepts a bare YouTube id or a youtube.com / youtu.be link. Anything else is ignored.
+    static func imdbVideoID(_ raw: String) -> String? {
+        guard let url = URL(string: raw), url.scheme == "https",
+              ["imdb.com", "www.imdb.com", "m.imdb.com"].contains(url.host?.lowercased() ?? "") else { return nil }
+        return url.path.split(separator: "/").map(String.init).first {
+            $0.hasPrefix("vi") && $0.count > 2 && $0.dropFirst(2).allSatisfy(\.isNumber)
+        }
+    }
+
+    /// A bare YouTube id, a youtube.com / youtu.be link or an IMDb video link. Anything else is ignored.
     static func parse(_ raw: String) -> TrailerSource? {
-        MediaDetails.cleanYouTubeKey(raw).map { .youtube($0) }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = URL(string: text), let scheme = url.scheme {
+            guard ["http", "https"].contains(scheme.lowercased()), url.host != nil,
+                  url.user == nil, url.password == nil else { return nil }
+            if let id = imdbVideoID(text) { return .imdb(id) }
+        }
+        return MediaDetails.cleanYouTubeKey(text).map { .youtube($0) }
     }
 
-    /// Removes duplicates, keeping the metadata's order (best first).
+    /// YouTube first (in metadata order), then IMDb; duplicates removed.
     static func ordered(_ sources: [TrailerSource]) -> [TrailerSource] {
+        func rank(_ s: TrailerSource) -> Int {
+            switch s { case .youtube: return 0; case .imdb: return 1; case .imdbTitle: return 2 }
+        }
         var unique: [TrailerSource] = []
         for source in sources where !unique.contains(source) { unique.append(source) }
-        return unique
+        return unique.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+    }
+}
+
+/// Best-effort IMDb trailer lookup from the title's public structured data (JSON-LD), never from
+/// the generic latest-trailers feed. HTTP blocks, consent pages and missing links just fail.
+enum IMDbTrailerResolver {
+    static func videoID(imdbID: String) async -> String? {
+        guard imdbID.hasPrefix("tt"), imdbID.count > 2,
+              imdbID.dropFirst(2).allSatisfy(\.isNumber),
+              let url = URL(string: "https://www.imdb.com/title/\(imdbID)/") else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            var data = Data()
+            for try await byte in bytes {
+                if Task.isCancelled || data.count >= 2_000_000 { return nil }
+                data.append(byte)
+            }
+            guard let html = String(data: data, encoding: .utf8) else { return nil }
+            return videoID(inHTML: html)
+        } catch { return nil }
+    }
+
+    static func videoID(inHTML html: String) -> String? {
+        let pattern = #"(?is)<script\b[^>]*\btype\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        func trailerID(_ object: Any) -> String? {
+            if let array = object as? [Any] { return array.compactMap(trailerID).first }
+            guard let node = object as? [String: Any] else { return nil }
+            if let graph = node["@graph"], let id = trailerID(graph) { return id }
+            let trailers = (node["trailer"] as? [Any]) ?? node["trailer"].map { [$0] } ?? []
+            for entry in trailers {
+                if let link = entry as? String, let id = TrailerSource.imdbVideoID(link) { return id }
+                if let video = entry as? [String: Any] {
+                    for key in ["embedUrl", "url"] {
+                        if let link = video[key] as? String, let id = TrailerSource.imdbVideoID(link) { return id }
+                    }
+                }
+            }
+            return nil
+        }
+        for match in regex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let range = Range(match.range(at: 1), in: html),
+                  let data = String(html[range]).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else { continue }
+            if let id = trailerID(object) { return id }
+        }
+        return nil
     }
 }
 

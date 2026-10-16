@@ -120,6 +120,9 @@ final class TrailerController {
         case invidious(key: String, instance: String)
         #if os(iOS)
         case web(keys: [String])
+        /// Backup after YouTube: a known IMDb video, or a lookup on the title's IMDb page.
+        case imdb(String)
+        case imdbLookup(String)
         #endif
     }
 
@@ -133,6 +136,9 @@ final class TrailerController {
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var resolveTask: Task<Void, Never>?
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    /// Give up on the current source after this much on-screen loading time. YouTube gets less,
+    /// so the IMDb backup starts quickly when YouTube won't play.
+    @ObservationIgnored private var candidateTimeout: TimeInterval = TrailerPolicy.loadTimeout
     /// On-screen time spent loading the current source.
     @ObservationIgnored private var loadingTime: TimeInterval = 0
     /// iOS web source: when YouTube reported "playing" (revealed a moment later, after its overlay fades).
@@ -252,13 +258,21 @@ final class TrailerController {
         phase = .loading
         isMuted = !TrailerPolicy.sessionPrefersSound
         var list: [Candidate] = []
-        let keys = sources.map(\.youTubeKey)
+        let keys = sources.compactMap(\.youTubeKey)
         let instance = AppSettings.shared.values.invidiousInstance
         if !instance.isEmpty {
             list += keys.prefix(3).map { Candidate.invidious(key: $0, instance: instance) }
         }
         #if os(iOS)
+        // YouTube first, IMDb as the backup.
         if !keys.isEmpty { list.append(.web(keys: Array(keys.prefix(4)))) }
+        for source in sources {
+            switch source {
+            case .imdb(let id): list.append(.imdb(id))
+            case .imdbTitle(let id): list.append(.imdbLookup(id))
+            case .youtube: break
+            }
+        }
         #endif
         candidates = list
         startMonitor()
@@ -277,6 +291,7 @@ final class TrailerController {
             return
         }
         let next = candidates.removeFirst()
+        candidateTimeout = TrailerPolicy.loadTimeout
         switch next {
         case .invidious(let key, let instance):
             let gen = sourceGeneration
@@ -288,7 +303,18 @@ final class TrailerController {
             }
         #if os(iOS)
         case .web(let keys):
+            candidateTimeout = 9
             startWeb(keys)
+        case .imdb(let id):
+            startWeb([], imdbVideoID: id)
+        case .imdbLookup(let titleID):
+            let gen = sourceGeneration
+            resolveTask = Task { [weak self] in
+                let videoID = await IMDbTrailerResolver.videoID(imdbID: titleID)
+                guard let self, !Task.isCancelled, self.sourceGeneration == gen, self.phase == .loading else { return }
+                self.resolveTask = nil
+                if let videoID { self.startWeb([], imdbVideoID: videoID) } else { self.advance() }
+            }
         #endif
         }
     }
@@ -308,9 +334,9 @@ final class TrailerController {
     }
 
     #if os(iOS)
-    private func startWeb(_ keys: [String]) {
+    private func startWeb(_ keys: [String], imdbVideoID: String? = nil) {
         let gen = sourceGeneration
-        let w = TrailerWebPlayer(keys: keys, muted: isMuted, active: active) { [weak self] event in
+        let w = TrailerWebPlayer(keys: keys, imdbVideoID: imdbVideoID, muted: isMuted, active: active) { [weak self] event in
             guard let self, self.sourceGeneration == gen else { return }
             self.handle(event)
         }
@@ -408,7 +434,7 @@ final class TrailerController {
                 phase = .playing
                 return true
             }
-            if loadingTime > TrailerPolicy.loadTimeout { advance(); return phase == .loading }
+            if loadingTime > candidateTimeout { advance(); return phase == .loading }
             return true
         case .playing:
             if let p = player, let item = p.currentItem {
@@ -463,56 +489,77 @@ struct TrailerPlayerSurface: UIViewRepresentable {
 // MARK: - Web surface (iOS)
 
 #if os(iOS)
-/// YouTube's iframe player without chrome: no controls, no taps, sized to fit, and faded
-/// out before YouTube's end screen. Tries each id in turn when one is unavailable.
+/// YouTube trailer without chrome: no controls, no taps, sized to fit, and faded out before
+/// YouTube's end screen. Tries each id in turn when one is unavailable.
+///
+/// The WebView opens YouTube's own embed page (youtube-nocookie.com/embed/<id>) directly, with the
+/// app's identity (https://<bundle id>) as the HTTP Referer, which is YouTube's documented way for
+/// app WebViews ("Required Minimum Functionality": loadRequest + Referer header). A small script
+/// injected into that page drives its <video> element (play / pause / mute / replay / end /
+/// failure). Earlier builds wrapped the player in a local HTML page using the iframe API; YouTube
+/// rejected that page's identity and its player messages never arrived, so nothing played.
 @MainActor
 final class TrailerWebPlayer {
     enum Event { case playing, ended, failed }
 
     let view: WKWebView
     private let proxy: TrailerScriptProxy
+    private let keys: [String]
+    private var index = 0
+    private var muted: Bool
+    private var active: Bool
+    private let onEvent: (Event) -> Void
 
-    init(keys: [String], muted: Bool, active: Bool = true, onEvent: @escaping (Event) -> Void) {
+    /// Set for the IMDb backup: plays that IMDb video's embed page instead of YouTube.
+    private let imdbVideoID: String?
+
+    init(keys: [String], imdbVideoID: String? = nil, muted: Bool, active: Bool = true, onEvent: @escaping (Event) -> Void) {
         let proxy = TrailerScriptProxy()
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsPictureInPictureMediaPlayback = false
         config.allowsAirPlayForMediaPlayback = false
+        // Present as Mobile Safari (the embed page serves its regular mobile player to it).
+        config.applicationNameForUserAgent = "Version/18.0 Mobile/15E148 Safari/604.1"
         config.userContentController.add(proxy, name: "trailer")
         let web = WKWebView(frame: .zero, configuration: config)
         web.isOpaque = false
-        web.backgroundColor = .clear
-        web.scrollView.backgroundColor = .clear
+        web.backgroundColor = .black
+        web.scrollView.backgroundColor = .black
         web.scrollView.isScrollEnabled = false
         web.scrollView.contentInsetAdjustmentBehavior = .never
         web.isUserInteractionEnabled = false
         web.accessibilityElementsHidden = true
         self.view = web
         self.proxy = proxy
-        proxy.onMessage = { message in
+        self.keys = Self.safeKeys(keys)
+        self.imdbVideoID = imdbVideoID.flatMap { id in id.hasPrefix("vi") && id.dropFirst(2).allSatisfy(\.isNumber) ? id : nil }
+        self.muted = muted
+        self.active = active
+        self.onEvent = onEvent
+        proxy.onMessage = { [weak self] message in
+            guard let self else { return }
             switch message {
-            case "playing": onEvent(.playing)
-            case "ended": onEvent(.ended)
-            case "failed": onEvent(.failed)
+            case "playing": self.onEvent(.playing)
+            case "ended": self.onEvent(.ended)
+            case "failed": self.next()
             default: break
             }
         }
-        // The page must identify the app, not YouTube: a page whose origin is YouTube itself gets
-        // "Video unavailable" (error 152) and one without an origin gets error 153. YouTube's
-        // documented identity for an app WebView is https://<bundle id>, sent as the Referer.
-        web.loadHTMLString(Self.html(keys: keys, muted: muted, active: active), baseURL: URL(string: Self.appOrigin))
+        loadCurrent()
     }
 
-    func play() { run("sfPlay()") }
-    func pause() { run("sfPause()") }
-    func replay() { run("sfReplay()") }
-    func setMuted(_ muted: Bool) { run("sfMute(\(muted ? "true" : "false"))") }
+    func play() { active = true; run("sfPlay()") }
+    func pause() { active = false; run("sfPause()") }
+    func replay() { active = true; run("sfReplay()") }
+    func setMuted(_ muted: Bool) { self.muted = muted; run("sfMute(\(muted ? "true" : "false"))") }
 
     func stop() {
         proxy.onMessage = nil
         view.evaluateJavaScript("try{sfPause()}catch(e){}", completionHandler: nil)
         view.configuration.userContentController.removeScriptMessageHandler(forName: "trailer")
+        view.configuration.userContentController.removeAllUserScripts()
         view.stopLoading()
         view.loadHTMLString("", baseURL: nil)
         view.removeFromSuperview()
@@ -522,56 +569,140 @@ final class TrailerWebPlayer {
         view.evaluateJavaScript("try{\(js)}catch(e){}", completionHandler: nil)
     }
 
+    /// The current id failed (unavailable, embedding disabled, error screen): try the next one.
+    private func next() {
+        if imdbVideoID != nil { onEvent(.failed); return }
+        index += 1
+        if index < keys.count { loadCurrent() } else { onEvent(.failed) }
+    }
+
+    private func loadCurrent() {
+        if let id = imdbVideoID, let url = URL(string: "https://www.imdb.com/video/embed/\(id)/") {
+            // IMDb backup (as in earlier builds): its embed page, driven by imdbScript.
+            let scripts = view.configuration.userContentController
+            scripts.removeAllUserScripts()
+            scripts.addUserScript(WKUserScript(source: Self.imdbScript(muted: muted, active: active),
+                                               injectionTime: .atDocumentStart, forMainFrameOnly: false))
+            view.load(URLRequest(url: url, timeoutInterval: 10))
+            return
+        }
+        guard index < keys.count, let url = Self.embedURL(key: keys[index]) else {
+            onEvent(.failed)
+            return
+        }
+        let scripts = view.configuration.userContentController
+        scripts.removeAllUserScripts()
+        scripts.addUserScript(WKUserScript(source: Self.bridgeScript(muted: muted, active: active),
+                                           injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.setValue(Self.appOrigin + "/", forHTTPHeaderField: "Referer")
+        view.load(request)
+    }
+
     /// `https://com.mohamedt.streamforge`: the app's identity for YouTube's embedded player.
     static var appOrigin: String {
         "https://" + (Bundle.main.bundleIdentifier ?? "com.mohamedt.streamforge").lowercased()
     }
 
-    static func html(keys: [String], muted: Bool, active: Bool = true) -> String {
-        let safe = keys.map { $0.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }.filter { !$0.isEmpty }
-        let list = "[" + safe.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+    static func safeKeys(_ keys: [String]) -> [String] {
+        keys.map { $0.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }.filter { !$0.isEmpty }
+    }
+
+    /// Chrome-less, muted, inline autoplay of one video on YouTube's privacy-enhanced embed page.
+    static func embedURL(key: String) -> URL? {
+        guard let id = safeKeys([key]).first else { return nil }
+        var c = URLComponents(string: "https://www.youtube-nocookie.com/embed/\(id)")
+        c?.queryItems = [
+            "autoplay=1", "mute=1", "controls=0", "playsinline=1", "rel=0", "iv_load_policy=3",
+            "disablekb=1", "fs=0", "cc_load_policy=0", "modestbranding=1", "enablejsapi=1",
+        ].map { pair in
+            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            return URLQueryItem(name: parts[0], value: parts[1])
+        } + [URLQueryItem(name: "origin", value: appOrigin), URLQueryItem(name: "widget_referrer", value: appOrigin)]
+        return c?.url
+    }
+
+    /// Controls standard media elements without deleting or masking IMDb's UI. Consent or
+    /// blocked playback never reports ready, so the controller times out to the next source.
+    static func imdbScript(muted: Bool, active: Bool) -> String {
+        let token = UUID().uuidString
         return """
-        <!doctype html><html><head>
-        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-        <meta name="referrer" content="strict-origin-when-cross-origin">
-        <style>
-        html,body{margin:0;padding:0;background:#000;overflow:hidden;width:100%;height:100%;}
-        #wrap{position:absolute;top:50%;left:50%;width:min(100vw,177.77777778vh);height:min(100vh,56.25vw);
-              transform:translate(-50%,-50%);pointer-events:none;}
-        #wrap iframe,#p{width:100%;height:100%;border:0;pointer-events:none;}
-        </style></head><body><div id="wrap"><div id="p"></div></div>
-        <script>
-        var keys=\(list),idx=0,player=null,muted=\(muted ? "true" : "false"),want=\(active ? "true" : "false"),done=false,started=false;
-        function post(m){try{window.webkit.messageHandlers.trailer.postMessage(m);}catch(e){}}
-        if(!keys.length){post('failed');}
-        function onYouTubeIframeAPIReady(){
-          if(!keys.length)return;
-          player=new YT.Player('p',{host:'https://www.youtube-nocookie.com',videoId:keys[0],
-            playerVars:{autoplay:1,mute:1,controls:0,playsinline:1,rel:0,iv_load_policy:3,
-                        disablekb:1,fs:0,cc_load_policy:0,enablejsapi:1,origin:'\(appOrigin)'},
-            events:{
-              onReady:function(e){if(muted){e.target.mute();}else{e.target.unMute();} if(want){e.target.playVideo();}},
-              onStateChange:function(e){
-                if(e.data===1){ if(!want){player.pauseVideo();return;} if(!started){started=true;post('playing');} }
-                else if(e.data===0){finish();}
-              },
-              onError:function(){next();}
-            }});
-        }
-        function next(){idx++;started=false;if(idx<keys.length){player.loadVideoById(keys[idx]);}else{post('failed');}}
-        function finish(){if(done)return;done=true;try{player.pauseVideo();}catch(e){}post('ended');}
-        setInterval(function(){try{
-          if(!player||!player.getDuration||done||!started)return;
-          var d=player.getDuration(),t=player.getCurrentTime();
-          if(d>1&&t>0&&d-t<0.9){finish();}
-        }catch(e){}},250);
-        function sfPlay(){want=true;if(player&&!done&&player.playVideo)player.playVideo();}
-        function sfPause(){want=false;if(player&&player.pauseVideo)player.pauseVideo();}
-        function sfMute(m){muted=m;if(player&&player.mute){if(m){player.mute();}else{player.unMute();}}}
-        function sfReplay(){if(!player||!player.seekTo)return;done=false;started=false;want=true;player.seekTo(0,true);player.playVideo();}
-        </script>
-        <script src="https://www.youtube.com/iframe_api" onerror="post('failed')"></script>
-        </body></html>
+        (function(){
+          var token='\(token)',want=\(active ? "true" : "false"),muted=\(muted ? "true" : "false"),done=false;
+          var attached=new WeakSet();
+          function post(m){try{window.webkit.messageHandlers.trailer.postMessage(m);}catch(e){}}
+          function videos(){return Array.from(document.querySelectorAll('video'));}
+          function play(v){var p=v.play();if(p&&p.catch)p.catch(function(){});}
+          function apply(action,value){
+            if(action==='play')want=true;
+            if(action==='pause')want=false;
+            if(action==='mute')muted=value;
+            if(action==='replay'){done=false;want=true;}
+            videos().forEach(function(v){
+              v.muted=muted;v.playsInline=true;
+              if(action==='replay')try{v.currentTime=0;}catch(e){}
+              if(want&&!done)play(v);else v.pause();
+            });
+            for(var i=0;i<window.frames.length;i++){
+              try{window.frames[i].postMessage({sfTrailer:token,action:action,value:value},'*');}catch(e){}
+            }
+          }
+          window.addEventListener('message',function(e){
+            if(e.source!==window.parent||!e.data||e.data.sfTrailer!==token)return;
+            apply(e.data.action,e.data.value);
+          });
+          window.sfPlay=function(){apply('play');};
+          window.sfPause=function(){apply('pause');};
+          window.sfMute=function(m){apply('mute',m);};
+          window.sfReplay=function(){apply('replay');};
+          function attach(){videos().forEach(function(v){
+            if(attached.has(v))return;attached.add(v);
+            v.muted=muted;v.playsInline=true;
+            v.addEventListener('playing',function(){if(!want||done){v.pause();return;}post('playing');});
+            v.addEventListener('ended',function(){done=true;post('ended');});
+            v.addEventListener('error',function(){post('failed');});
+            if(want&&!done)play(v);else v.pause();
+          });}
+          new MutationObserver(attach).observe(document,{childList:true,subtree:true});
+          document.addEventListener('DOMContentLoaded',attach);attach();
+        })();
+        """
+    }
+
+    /// Runs inside YouTube's embed page and drives its <video> element. Reports `playing` once
+    /// frames flow, `ended` just before the end (so YouTube's end screen never shows) and `failed`
+    /// for YouTube's error screen or a media error before playback started.
+    static func bridgeScript(muted: Bool, active: Bool) -> String {
+        return """
+        (function(){
+          if(window.__sfTrailer)return;window.__sfTrailer=true;
+          var want=\(active ? "true" : "false"),muted=\(muted ? "true" : "false"),done=false,started=false,failed=false;
+          var attached=new WeakSet();
+          function post(m){try{window.webkit.messageHandlers.trailer.postMessage(m);}catch(e){}}
+          function videos(){return Array.prototype.slice.call(document.querySelectorAll('video'));}
+          function play(v){try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}}
+          function apply(){videos().forEach(function(v){v.muted=muted;v.playsInline=true;if(want&&!done)play(v);else v.pause();});}
+          function fail(){if(failed||started)return;failed=true;post('failed');}
+          window.sfPlay=function(){want=true;apply();};
+          window.sfPause=function(){want=false;apply();};
+          window.sfMute=function(m){muted=m;videos().forEach(function(v){v.muted=m;});};
+          window.sfReplay=function(){done=false;started=false;want=true;videos().forEach(function(v){try{v.currentTime=0;}catch(e){}});apply();};
+          function attach(){
+            videos().forEach(function(v){
+              if(attached.has(v))return;attached.add(v);
+              v.muted=muted;v.playsInline=true;v.setAttribute('playsinline','');
+              v.addEventListener('playing',function(){if(!want||done){v.pause();return;}if(!started){started=true;post('playing');}});
+              v.addEventListener('timeupdate',function(){var d=v.duration,t=v.currentTime;if(started&&!done&&d>1&&t>0&&d-t<0.9){done=true;v.pause();post('ended');}});
+              v.addEventListener('ended',function(){if(!done){done=true;post('ended');}});
+              v.addEventListener('error',fail);
+              if(want&&!done)play(v);else v.pause();
+            });
+            var err=document.querySelector('.ytp-error');
+            if(err&&err.offsetWidth>0&&err.offsetHeight>0)fail();
+          }
+          new MutationObserver(attach).observe(document.documentElement,{childList:true,subtree:true});
+          attach();
+        })();
         """
     }
 }
@@ -746,7 +877,7 @@ struct TrailerPreviewSheet: View {
                                 Text("This trailer can't play inside StreamForge right now.")
                                     .multilineTextAlignment(.center)
                                 // YouTube can still refuse a particular video in embedded players.
-                                if let key = sources.first?.youTubeKey,
+                                if let key = sources.lazy.compactMap(\.youTubeKey).first,
                                    let url = URL(string: "https://www.youtube.com/watch?v=\(key)") {
                                     Link(destination: url) { Label("Watch on YouTube", systemImage: "play.rectangle.fill") }
                                         .buttonStyle(.borderedProminent)

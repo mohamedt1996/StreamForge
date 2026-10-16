@@ -127,8 +127,18 @@ struct MediaDetails {
     /// YouTube ids of trailers/teasers, best first. Players try them in order (a video can be
     /// removed or region-locked), so every source's trailers are kept, not just the first.
     var trailerKeys: [String] = []
-    /// Trailer sources for the players: YouTube only, in metadata order.
-    var trailerSources: [TrailerSource] { trailerKeys.map { .youtube($0) } }
+    /// IMDb trailer links from metadata (the backup after YouTube).
+    var imdbTrailers: [TrailerSource] = []
+    /// Trailer sources for the players: YouTube first, then IMDb (a linked video, else a lookup on
+    /// the title's IMDb page when the title has an IMDb id).
+    var trailerSources: [TrailerSource] {
+        var sources: [TrailerSource] = trailerKeys.map { .youtube($0) } + imdbTrailers
+        let hasIMDb = sources.contains { if case .imdb = $0 { return true }; return false }
+        if !hasIMDb, let id = item.imdbID, id.hasPrefix("tt"), id.count > 2, id.dropFirst(2).allSatisfy(\.isNumber) {
+            sources.append(.imdbTitle(id))
+        }
+        return TrailerSource.ordered(sources)
+    }
     var ratings: [RatingBadge] = []
     var seasons: [SeasonInfo] = []
     var episodesBySeason: [Int: [EpisodeRef]] = [:]
@@ -141,9 +151,12 @@ struct MediaDetails {
 
     var trailerYouTubeKey: String? { trailerKeys.first }
 
-    /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and anything that
-    /// isn't YouTube (direct MP4/HLS and IMDb links are no longer used for trailers).
+    /// Adds trailer ids (bare YouTube ids or YouTube URLs; IMDb video links are kept as the
+    /// backup), skipping duplicates and anything else (direct MP4/HLS links aren't used).
     mutating func addTrailers(_ raw: [String], atFront: Bool = false) {
+        for source in raw.compactMap(TrailerSource.parse) {
+            if case .imdb = source, !imdbTrailers.contains(source) { imdbTrailers.append(source) }
+        }
         var seen = Set(trailerKeys)
         let unique = raw.compactMap(Self.cleanYouTubeKey).filter { seen.insert($0).inserted }
         trailerKeys = atFront ? unique + trailerKeys : trailerKeys + unique
