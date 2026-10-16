@@ -69,7 +69,6 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request, p *principal) {
 	if wait > maxWaitSeconds {
 		wait = maxWaitSeconds
 	}
-	a.touchSync(p.user.ID)
 
 	ctx := r.Context()
 	var timer *time.Timer
@@ -89,6 +88,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request, p *principal) {
 		// client's rev advances), when the client is ahead of us (e.g. restored backup), or when
 		// this is not a long poll.
 		if len(res.Records) > 0 || res.Rev != since || timer == nil {
+			a.touchDeviceSync(p)
 			writeJSON(w, http.StatusOK, res)
 			return
 		}
@@ -96,6 +96,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request, p *principal) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			a.touchDeviceSync(p)
 			writeJSON(w, http.StatusOK, res)
 			return
 		case <-wake:
@@ -203,6 +204,7 @@ func (a *App) touchSync(userID string) {
 // ---- push --------------------------------------------------------------------------------
 
 type pushRecord struct {
+	BaseRev    *int64          `json:"baseRev,omitempty"`
 	Collection string          `json:"collection"`
 	ID         string          `json:"id"`
 	Data       json.RawMessage `json:"data"`
@@ -242,6 +244,10 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 			writeErr(w, http.StatusBadRequest, "invalid_record", fmt.Sprintf("records[%d]: id must be 1–512 bytes of UTF-8", i))
 			return
 		}
+		if rec.BaseRev != nil && *rec.BaseRev < 0 {
+			writeErr(w, 400, "invalid_record", "baseRev must be nonnegative")
+			return
+		}
 		if rec.UpdatedAt <= 0 {
 			writeErr(w, http.StatusBadRequest, "invalid_record", fmt.Sprintf("records[%d]: updatedAt must be a positive ms timestamp", i))
 			return
@@ -261,7 +267,6 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 		}
 		rec.Data = trimmed
 	}
-	a.touchSync(p.user.ID)
 
 	canSecrets := p.device.has("secrets")
 	isAdmin := p.user.Role == "admin"
@@ -308,8 +313,9 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 		}
 		var storedUA, storedRev int64
 		var storedManaged int
-		err := tx.QueryRow(`SELECT updated_at, rev, managed FROM records WHERE user_id = ? AND collection = ? AND id = ?`,
-			p.user.ID, rec.Collection, rec.ID).Scan(&storedUA, &storedRev, &storedManaged)
+		var storedDevice string
+		err := tx.QueryRow(`SELECT updated_at, rev, managed, device_id FROM records WHERE user_id = ? AND collection = ? AND id = ?`,
+			p.user.ID, rec.Collection, rec.ID).Scan(&storedUA, &storedRev, &storedManaged, &storedDevice)
 		dismissedByUser := false
 		if err == nil && storedManaged != 0 && !isAdmin {
 			var derr error
@@ -328,6 +334,17 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 			if _, err := tx.Exec(`UPDATE records SET updated_at = ?, rev = ?, stored_at = ? WHERE user_id = ? AND collection = ? AND id = ?`,
 				restamp, rev, nowMs, p.user.ID, rec.Collection, rec.ID); err != nil {
 				writeInternal(w, a, "push restamp", err)
+				return
+			}
+			res.Status, res.Rev = "stale", rev
+			results = append(results, res)
+			continue
+		case err == nil && rec.Collection == "progress" && rec.BaseRev != nil && *rec.BaseRev != storedRev && storedDevice != p.device.ID:
+			// An offline device edited a version superseded by another device. Publish the
+			// winning copy again so timestamp-based clients also converge on the next pull.
+			rev++
+			if _, err := tx.Exec(`UPDATE records SET updated_at = ?, rev = ?, stored_at = ? WHERE user_id = ? AND collection = ? AND id = ?`, max(nowMs, ua+1, storedUA+1), rev, nowMs, p.user.ID, rec.Collection, rec.ID); err != nil {
+				writeInternal(w, a, "progress conflict", err)
 				return
 			}
 			res.Status, res.Rev = "stale", rev
@@ -394,6 +411,7 @@ func (a *App) handlePush(w http.ResponseWriter, r *http.Request, p *principal) {
 			a.log.Printf("reconcile after dismissal for %s: %v", p.user.ID, err)
 		}
 	}
+	a.touchDeviceSync(p)
 	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "results": results})
 }
 

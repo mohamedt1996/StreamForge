@@ -8,6 +8,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -135,7 +141,7 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
     val openDetails: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
 
-    var homeSection by remember { mutableStateOf("Discover") }
+    var homeSection by rememberSaveable { mutableStateOf("Discover") }
     PullRefresh({ DispatcharrRepo.refreshAll(true); GuideRepo.refresh() }) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
@@ -146,14 +152,26 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
             }
         }
         item {
-            Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf("Discover", "My List").forEach { section ->
-                    com.mohamedt.streamforge.ui.SfButton(section, { homeSection = section },
-                        kind = if (homeSection == section) com.mohamedt.streamforge.ui.ButtonKind.PRIMARY else com.mohamedt.streamforge.ui.ButtonKind.SECONDARY)
+            Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 8.dp)
+                .clip(RoundedCornerShape(14.dp)).background(Palette.surface).padding(4.dp).selectableGroup()) {
+                listOf("Discover", "Continue", "My List").forEach { section ->
+                    Box(Modifier.weight(1f).clip(RoundedCornerShape(11.dp))
+                        .background(if (homeSection == section) Palette.surfaceHigh else Color.Transparent)
+                        .selectable(selected = homeSection == section, role = Role.Tab, onClick = { homeSection = section })
+                        .padding(vertical = 15.dp), contentAlignment = Alignment.Center) {
+                        Text(section, color = if (homeSection == section) Color.White else Palette.secondary,
+                            fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
-        if (homeSection == "My List") {
+        if (homeSection == "Continue") {
+            if (Library.continueWatching.none { !it.finished } && Library.upNext.isEmpty()) {
+                item { Text("Ready when you are. Start a movie or episode and pick it up here.", color = Palette.secondary, modifier = Modifier.padding(Dims.gutter())) }
+            }
+            item { Shelf("Continue Watching", Library.continueWatching.filter { !it.finished }, key = { it.key }) { ContinueCard(it) } }
+            item { Shelf("Up Next", Library.upNext, key = { it.key }) { UpNextCard(it) } }
+        } else if (homeSection == "My List") {
             if (Library.favorites.isEmpty()) { item {
                 Text("Your list starts here. Add a movie or series from its details page.", color = Palette.secondary, modifier = Modifier.padding(Dims.gutter()))
             }
@@ -161,6 +179,9 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
             item { Shelf("Saved movies", Library.favorites.filter { it.type == MediaType.MOVIE }, key = { it.id }) { WatchlistCard(it, { openDetails(it) }) } }
             item { Shelf("Saved series", Library.favorites.filter { it.type == MediaType.SERIES }, key = { it.id }) { WatchlistCard(it, { openDetails(it) }) } }
         } else {
+        val progress = Library.continueWatching.firstOrNull { !it.finished }
+        val featured = progress?.item ?: (HomeData.trendingMovies + HomeData.catalogs.flatMap { it.second } + recentMovies()).firstOrNull()
+        if (featured != null) { item(key = "featured") { MobileFeatured(featured, progress) } }
         if (!DispatcharrRepo.isConfigured) {
             item {
                 Column(Modifier.padding(Dims.gutter()).fillMaxWidth().background(Palette.surfaceHigh, RoundedCornerShape(18.dp)).padding(20.dp)) {
@@ -225,6 +246,36 @@ private fun recentSeries() = DispatcharrRepo.recentSeries.take(24)
 // MARK: TV
 
 /** What the billboard shows: the focused card's title, or the featured one before anything is focused. */
+/** The mobile hero follows the iOS hierarchy and expands from phone to tablet width. */
+@Composable
+private fun MobileFeatured(item: MediaItem, progress: Progress?) {
+    val nav = LocalNav.current
+    val context = LocalContext.current
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 10.dp)) {
+        val artworkHeight = if (maxWidth >= 600.dp) 340.dp else 280.dp
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Palette.raised)) {
+            Box(Modifier.fillMaxWidth().height(artworkHeight)) {
+                AsyncImage(item.backdrop ?: item.poster, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Palette.raised))))
+                Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
+                    Text(if (progress != null) "CONTINUE WATCHING" else "FEATURED", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Palette.secondary)
+                    Text(item.title, fontSize = 28.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(itemMeta(item).take(3).joinToString(" · "), fontSize = 13.sp, color = Palette.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Palette.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SfButton(if (progress != null) "Resume" else "Play", {
+                        if (progress != null) resumePlayback(context, nav, progress) else nav.push(Screen.Detail(item, autoPlay = true))
+                    }, modifier = Modifier.weight(1f), icon = Icons.Filled.PlayArrow, kind = ButtonKind.PRIMARY)
+                    SfButton("Details", { nav.push(Screen.Detail(item)) }, icon = Icons.Filled.Info)
+                }
+            }
+        }
+    }
+}
+
 private data class Hero(
     val key: String,
     val title: String,

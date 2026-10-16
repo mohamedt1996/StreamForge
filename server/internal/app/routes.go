@@ -58,6 +58,12 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/stats", a.authed(a.handleStats))
 	mux.HandleFunc("GET /api/audit", a.authed(a.handleAudit))
 
+	mux.HandleFunc("GET /api/admin/operations", a.adminOnly(a.handleOperations))
+	mux.HandleFunc("GET /api/admin/backups", a.adminOnly(a.handleBackups))
+	mux.HandleFunc("POST /api/admin/backups", a.adminOnly(a.handleCreateBackup))
+	mux.HandleFunc("PUT /api/admin/backups/schedule", a.adminOnly(a.handleBackupSchedule))
+	mux.HandleFunc("GET /api/admin/backups/{name}", a.adminOnly(a.handleDownloadBackup))
+	mux.HandleFunc("POST /api/admin/dispatcharr/{id}/users/{userId}/test", a.adminOnly(a.handleTestProvider))
 	// Admin-managed configuration (PROTOCOL.md §5)
 	mux.HandleFunc("GET /api/admin/dispatcharr", a.adminOnly(a.handleListDispatcharr))
 	mux.HandleFunc("POST /api/admin/dispatcharr", a.adminOnly(a.handleCreateDispatcharr))

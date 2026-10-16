@@ -305,3 +305,39 @@ Addon = {"id": "a_…", "transportUrl", "name", "customName", "manifestName", "m
   doesn't know yet, keeping their UUID) and synced settings as managed configuration.
 * `POST /api/users` additionally accepts `"dispatcharr": [{"serverId","authMode","username","xcPassword"?,"webPassword"?,"apiKey"?}]`
   and `"addons": ["a_…"]` to assign right away.
+
+
+## Progress conflict extension (optional, backward compatible)
+
+Updated clients send `baseRev` on `progress` pushes: the revision of that record last
+observed from the server (0 when it has never been observed). Keep this revision when
+replacing an unsent edit in the outbox. Store revisions from pulls and applied push
+results independently of local optimistic timestamps.
+
+If another device has replaced that base revision, the server retains the current
+record, returns `stale`, and republishes the winner with a new revision and timestamp
+so existing timestamp-based pull/apply logic converges. This also protects progress
+tombstones. Changes following the same device's writes remain timestamp ordered.
+A seek backward or restart based on the current revision is allowed: progress is
+never merged by taking the maximum position. Clients without `baseRev` retain the
+original last-write-wins behavior. Deploy the updated server and Apple/Android clients together
+for this protection. Older clients remain compatible but do not send revision guards.
+
+## Operations endpoints (admin)
+
+- `GET /api/admin/operations`: database health, version, server-wide counts, recent
+  device contacts (15 minutes), SQLite file size, latest backup time.
+- `GET /api/devices`: now also returns `lastSyncAt`, initially 0 for older devices.
+  This records a successful sync request, not playback or client-side application.
+- `GET /api/admin/backups`: completed archives, daily schedule, retention count.
+- `POST /api/admin/backups`: create a consistent snapshot, returning archive metadata.
+- `PUT /api/admin/backups/schedule`: `{ "daily": true }` enables the hourly scheduler's
+  daily backup check. Default off; the next due check runs within an hour or at startup.
+- `GET /api/admin/backups/{name}`: download an archive.
+- `POST /api/admin/dispatcharr/{id}/users/{userId}/test`: test saved credentials with
+  an 8-second deadline. Returns `ok`, safe `message`, `latencyMs`, `checkedAt`.
+
+Backup and provider-test endpoints additionally require the device's `secrets` scope.
+Connection tests do not follow redirects or expose raw upstream responses. A successful
+probe verifies authentication from the server; it does not prove device connectivity
+or that every stream plays. Existing addon refresh tests manifest connectivity.

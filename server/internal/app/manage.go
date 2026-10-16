@@ -43,6 +43,7 @@ func (a *App) handleListDevices(w http.ResponseWriter, r *http.Request, p *princ
 	}
 	for i := range devs {
 		devs[i].Current = devs[i].ID == p.device.ID
+		_ = a.db.QueryRow(`SELECT last_sync_at FROM device_health WHERE device_id=?`, devs[i].ID).Scan(&devs[i].LastSyncAt)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"devices": devs})
 }

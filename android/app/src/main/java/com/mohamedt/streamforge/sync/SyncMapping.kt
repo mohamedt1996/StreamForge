@@ -47,6 +47,7 @@ internal data class SyncState(
     val known: MutableMap<String, String> = mutableMapOf(),
     /** updatedAt of the local copy of each record (LWW). */
     val stamps: MutableMap<String, Long> = mutableMapOf(),
+    val revisions: MutableMap<String, Long> = mutableMapOf(),
     /** Favourite channel ids per Dispatcharr server UUID (the local Library only keeps the active server's). */
     val channelFavs: MutableMap<String, List<Long>> = mutableMapOf(),
     var lastActiveServer: String? = null,
@@ -86,6 +87,7 @@ internal data class OutboxEntry(
     val data: JsonObject? = null,
     val deleted: Boolean = false,
     val updatedAt: Long,
+    val baseRev: Long? = null,
 ) {
     val key: String get() = rk(collection, id)
 }

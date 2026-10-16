@@ -201,3 +201,24 @@ cd server
 go vet ./...
 go test ./...
 ```
+
+
+### Built-in backups and operations
+
+Admins can open **Overview** for server-wide health and **Devices** for each device's
+last successful sync. **Dispatcharr → Test connection** checks each saved assignment;
+**Addons → Test & refresh** verifies its manifest.
+
+**Backups** creates and downloads a consistent SQLite snapshot with its matching
+`secret.key` and a version manifest. Optional daily backups run on an hourly check
+(and at server startup); the seven newest completed ZIPs are kept in `/data/backups`.
+Enable the schedule in the page. A manual snapshot also counts toward daily cadence.
+Only admins with the Secrets scope can manage or download backups. Archives contain
+credentials and device tokens; keep them private and copy one off the server.
+
+To restore: stop the server, preserve the current data directory, extract the database
+and key together into a **new empty private directory**, and point `STREAMFORGE_DATA`
+(or Docker's `/data` mount) at it. Do not include old `-wal`/`-shm` files. Start the same
+or a newer server version, verify `/healthz`, then check users and provider tests.
+Permissions and tokens are restored too: revoke devices that no longer need access.
+The web page includes these steps. There is deliberately no live database replacement.

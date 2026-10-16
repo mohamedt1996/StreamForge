@@ -167,7 +167,7 @@ fun SfButton(
 ) {
     val tv = isTv()
     var focused by remember { mutableStateOf(false) }
-    val height = if (tv) 52.dp else 42.dp
+    val height = if (tv) 52.dp else 48.dp
     val shape = RoundedCornerShape(percent = 50)
     val lit = focused && tv
     val bg = when {

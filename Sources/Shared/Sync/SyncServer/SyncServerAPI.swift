@@ -267,10 +267,12 @@ struct OutboxEntry: Codable, Sendable {
     var data: SyncJSON?
     var deleted: Bool
     var updatedAt: Int64
+    var baseRev: Int64?
 
-    enum CodingKeys: String, CodingKey { case collection, id, data, deleted, updatedAt }
+    enum CodingKeys: String, CodingKey { case collection, id, data, deleted, updatedAt, baseRev }
 
-    init(collection: String, id: String, data: SyncJSON?, deleted: Bool, updatedAt: Int64) {
+    init(collection: String, id: String, data: SyncJSON?, deleted: Bool, updatedAt: Int64, baseRev: Int64? = nil) {
+        self.baseRev = baseRev
         self.collection = collection
         self.id = id
         self.data = data
@@ -286,6 +288,7 @@ struct OutboxEntry: Codable, Sendable {
         data = (d?.isNull ?? true) ? nil : d
         deleted = (try? c.decodeIfPresent(Bool.self, forKey: .deleted)) ?? false
         updatedAt = c.lenientInt64(.updatedAt) ?? 0
+        baseRev = c.lenientInt64(.baseRev)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -295,6 +298,7 @@ struct OutboxEntry: Codable, Sendable {
         if let data, !deleted { try c.encode(data, forKey: .data) } else { try c.encodeNil(forKey: .data) }
         try c.encode(deleted, forKey: .deleted)
         try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(baseRev, forKey: .baseRev)
     }
 }
 

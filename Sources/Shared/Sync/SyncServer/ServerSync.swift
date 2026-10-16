@@ -73,6 +73,7 @@ final class ServerSync {
         var t: Int64
         /// Deleted.
         var d: Bool
+        var rev: Int64? = nil
     }
 
     struct PendingAddon: Codable {
@@ -474,6 +475,13 @@ final class ServerSync {
                 var removed = 0
                 for r in res.results {
                     let key = Self.recordKey(r.collection, r.id)
+                    if r.status == "applied", let rev = r.rev {
+                        state.known[key]?.rev = rev
+                        // A newer local edit can follow our acknowledged write safely.
+                        if outbox[key]?.updatedAt != sent[key], r.collection == "progress" {
+                            outbox[key]?.baseRev = rev
+                        }
+                    }
                     // "applied" / "stale" (and any per-record rejection) are final for that version;
                     // a newer local edit made while the request was in flight stays queued.
                     if let entry = outbox[key], entry.updatedAt == sent[key] {
@@ -568,8 +576,9 @@ final class ServerSync {
                 t = rec.stamp ?? now
                 if let known, t <= known.t { t = known.t + 1 }
             }
-            state.known[key] = Known(h: h, t: t, d: false)
-            outbox[key] = OutboxEntry(collection: rec.collection, id: rec.id, data: rec.data, deleted: false, updatedAt: t)
+            let baseRev = outbox[key]?.baseRev ?? known?.rev
+            state.known[key] = Known(h: h, t: t, d: false, rev: known?.rev)
+            outbox[key] = OutboxEntry(collection: rec.collection, id: rec.id, data: rec.data, deleted: false, updatedAt: t, baseRev: rec.collection == "progress" ? (baseRev ?? 0) : nil)
             queued += 1
         }
         if !baseline {
@@ -581,7 +590,7 @@ final class ServerSync {
                 if parts.collection == "servers" || parts.collection == "addons", isManagedForUser(key) {
                     state.locallyRemoved.insert(key)
                 }
-                outbox[key] = OutboxEntry(collection: parts.collection, id: parts.id, data: nil, deleted: true, updatedAt: t)
+                outbox[key] = OutboxEntry(collection: parts.collection, id: parts.id, data: nil, deleted: true, updatedAt: t, baseRev: parts.collection == "progress" ? (known.rev ?? 0) : nil)
                 queued += 1
             }
         }

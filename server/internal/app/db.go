@@ -93,6 +93,13 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS device_health (
+ device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+ last_sync_at INTEGER NOT NULL DEFAULT 0
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -304,6 +311,7 @@ type Device struct {
 	Scopes     []string `json:"scopes"`
 	CreatedAt  int64    `json:"createdAt"`
 	LastSeenAt int64    `json:"lastSeenAt"`
+	LastSyncAt int64    `json:"lastSyncAt"`
 	LastIP     string   `json:"lastIp"`
 	Current    bool     `json:"current"`
 

@@ -67,8 +67,9 @@ type App struct {
 	codeLimiter  *limiter // wrong pairing codes per user
 	pwLimiter    *limiter // wrong current password per user
 
-	setupMu sync.Mutex
-	handler http.Handler
+	backupMu sync.Mutex
+	setupMu  sync.Mutex
+	handler  http.Handler
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -190,12 +191,14 @@ func (a *App) janitor() {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	a.cleanup()
+	a.scheduledBackup()
 	for {
 		select {
 		case <-a.stop:
 			return
 		case <-t.C:
 			a.cleanup()
+			a.scheduledBackup()
 		}
 	}
 }

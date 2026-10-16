@@ -36,6 +36,7 @@
   }
 
   const ICONS = {
+    backups: "M4 4h16v16H4zM8 4v6h8V4M8 16h8",
     overview: "M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z",
     devices: "M4 5h16v10H4zM2 19h20M9 15v4M15 15v4",
     pair: "M3 6h18v11H3zM8 21h8M12 17v4M9 10.5h6",
@@ -245,6 +246,7 @@
   // ---------- shell ----------
   const ROUTES = [
     { id: "overview", label: "Overview", view: viewOverview },
+    { id: "backups", label: "Backups", view: viewBackups, admin: true },
     { id: "devices", label: "Devices", view: viewDevices },
     { id: "pair", label: "Pair a TV", view: viewPair },
     { id: "users", label: "Users", view: viewUsers, admin: true },
@@ -290,6 +292,7 @@
     const root = h("div", null, pageHead("Overview", "What's synced for your account on " + state.me.server.name + "."));
     const body = h("div", null, h("div", { class: "card" }, h("div", { class: "empty" }, "Loading…")));
     root.append(body);
+    if (state.me.user.role === "admin") root.prepend(operationsPanel());
     (async () => {
       try {
         const [s, d] = await Promise.all([api("GET", "/api/stats"), api("GET", "/api/devices")]);
@@ -320,6 +323,82 @@
   }
   function stat(label, value, hint) {
     return h("div", { class: "stat" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value), h("div", { class: "hint" }, hint));
+  }
+
+  function operationsPanel() {
+    const panel = h("div", { class: "card" }, h("h2", null, "Server health"), h("p", null, "Checking…"));
+    api("GET", "/api/admin/operations").then(s => panel.replaceChildren(
+      h("div", { class: "card-head" }, h("h2", null, "Server health"), h("span", { class: "badge accent" }, "Database healthy · " + s.version)),
+      h("div", { class: "stats" }, stat("Users", num(s.users), "server-wide"), stat("Recent devices", num(s.recentDevices), "seen in the last 15 minutes"),
+        stat("Storage", (s.databaseBytes / 1048576).toFixed(1) + " MB", "database and write-ahead log"),
+        stat("Last backup", s.lastBackupAt ? ago(s.lastBackupAt) : "None", "7 snapshots retained")),
+      h("div", { class: "btns" }, h("a", { class: "btn", href: "#/backups" }, "Manage backups"),
+        h("a", { class: "btn", href: "#/dispatcharr" }, "Test providers"), h("a", { class: "btn", href: "#/devices" }, "Device health")),
+      h("p", { class: "sub" }, "Recent activity indicates contact with the server, not whether a device is watching.")))
+      .catch(e => panel.replaceChildren(h("h2", null, "Server health"), h("p", { role: "alert" }, e.message)));
+    return panel;
+  }
+
+  function providerTestButton(path) {
+    const result = h("span", { class: "small muted", role: "status", "aria-live": "polite" });
+    const button = h("button", { class: "btn sm", type: "button" }, "Test connection");
+    button.addEventListener("click", busy(button, async () => {
+      result.textContent = "Testing…";
+      try { const r = await api("POST", path, {}); result.textContent = r.message + " (" + r.latencyMs + " ms)"; }
+      catch(e) { result.textContent = e.message; }
+    }));
+    return h("div", null, button, result);
+  }
+
+  function viewBackups() {
+    const list = h("div", null, loadingCard());
+    const status = h("p", { role: "status", "aria-live": "polite" });
+    const create = h("button", { class: "btn primary", type: "button" }, "Create backup");
+    const daily = h("input", { type: "checkbox", class: "chk" });
+    create.addEventListener("click", busy(create, async () => {
+      status.textContent = "Creating a consistent snapshot…";
+      try { await api("POST", "/api/admin/backups", {}); status.textContent = "Backup ready."; await load(); }
+      catch(e) { status.textContent = e.message; }
+    }));
+    daily.addEventListener("change", async () => {
+      daily.disabled = true;
+      try { await api("PUT", "/api/admin/backups/schedule", { daily: daily.checked }); status.textContent = daily.checked ? "Daily backups enabled. The hourly scheduler creates the next due snapshot." : "Daily backups disabled."; }
+      catch(e) { daily.checked = !daily.checked; status.textContent = e.message; }
+      finally { daily.disabled = false; }
+    });
+    async function download(name, button) {
+      button.disabled = true;
+      try {
+        const r = await fetch("/api/admin/backups/" + enc(name), { headers: { Authorization: "Bearer " + state.token }, cache: "no-store", credentials: "omit" });
+        if (!r.ok) throw new Error("Download failed. Check your session and Secrets scope.");
+        const url = URL.createObjectURL(await r.blob());
+        const a = h("a", { href: url, download: name }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+      } catch(e) { status.textContent = e.message; }
+      finally { button.disabled = false; }
+    }
+    async function load() {
+      try {
+        const r = await api("GET", "/api/admin/backups"); daily.checked = r.daily;
+        list.replaceChildren(...(r.backups.length ? r.backups.map(b => {
+          const button = h("button", { class: "btn", type: "button" }, "Download");
+          button.addEventListener("click", () => download(b.name, button));
+          return h("div", { class: "card" }, h("div", { class: "card-head" },
+            h("div", null, h("h3", null, fullDate(b.createdAt)), h("p", { class: "sub" }, (b.size/1048576).toFixed(1) + " MB · " + b.name)), button));
+        }) : [messageCard("No backups yet. Create your first snapshot above.")]));
+      } catch(e) { list.replaceChildren(messageCard(e.message)); create.disabled = daily.disabled = true; }
+    }
+    load();
+    return h("div", null, pageHead("Backups", "Database and matching encryption key. The newest seven snapshots are retained."),
+      h("div", { class: "card" }, h("div", { class: "btns" }, create, h("label", null, daily, " Daily backups")), status,
+        h("p", { class: "sub" }, "Backups contain credentials and sign-in tokens. Store downloaded archives privately. Keep a copy outside this server.")),
+      list, h("div", { class: "card" }, h("h2", null, "Restore a backup"),
+        h("ol", null,
+          h("li", null, "Download the chosen ZIP and keep a separate copy of your current data directory."),
+          h("li", null, "Stop StreamForge Sync. Never replace an open database."),
+          h("li", null, "Extract streamforge.db and secret.key together into a new, empty private data directory. Do not copy old -wal or -shm files."),
+          h("li", null, "Point STREAMFORGE_DATA (or the Docker /data volume) at that directory and start the server with the same or a newer version."),
+          h("li", null, "Verify /healthz, sign in, and check users and provider connections. Clients will reconcile on their next sync.")),
+        h("p", { class: "sub" }, "Restoring also restores tokens and permissions from that snapshot. Revoke any devices that should no longer have access.")));
   }
 
   // ---------- Devices ----------
@@ -401,7 +480,9 @@
         h("div", { class: "info" }, titleBox,
           h("div", { class: "device-meta" },
             h("span", null, PLATFORM_NAMES[d.platform] || d.platform),
-            h("span", null, "active ", timeEl(d.lastSeenAt)),
+            h("span", { class: "badge" }, Date.now() - d.lastSeenAt < 900000 ? "Seen recently" : "Inactive"),
+            h("span", null, "last seen ", timeEl(d.lastSeenAt)),
+            h("span", null, "last successful sync: ", d.lastSyncAt ? timeEl(d.lastSyncAt) : "not recorded"),
             d.lastIp ? h("span", { class: "mono" }, d.lastIp) : null,
             h("span", null, "added ", timeEl(d.createdAt)))),
         h("div", { class: "device-actions" },
@@ -799,7 +880,7 @@
           h("td", null, h("a", { class: "user-link", href: "#/user?id=" + enc(u.id) }, u.username), u.disabled ? h("span", { class: "badge danger" }, "Disabled") : null),
           h("td", null, x ? [authLabel(x.authMode), x.username ? h("span", { class: "muted" }, " · " + x.username) : null] : h("span", { class: "muted" }, "—")),
           h("td", null, x ? credBadges(x) : null),
-          h("td", { class: "actions" }, credBtn));
+          h("td", { class: "actions" }, x ? providerTestButton(base + "/users/" + enc(u.id) + "/test") : null, credBtn));
       });
       const editBtn = h("button", { class: "btn sm", type: "button", onclick: async () => {
         const v = await formDialog("Edit " + s.name, "Changes reach every assigned user's devices on their next sync.", [
@@ -892,7 +973,7 @@
           });
           return h("td", { class: "center" }, cb);
         });
-        const refresh = h("button", { class: "btn sm", type: "button", title: "Fetch the manifest again" }, "Refresh");
+        const refresh = h("button", { class: "btn sm", type: "button", title: "Test the connection and refresh the manifest" }, "Test & refresh");
         refresh.addEventListener("click", busy(refresh, async () => {
           try { const r = await api("POST", base + "/refresh"); toast(r.fetchError ? "Manifest: " + r.fetchError : "Manifest updated.", r.fetchError ? "error" : "ok"); load(); }
           catch (e) { toast(e.message, "error"); }

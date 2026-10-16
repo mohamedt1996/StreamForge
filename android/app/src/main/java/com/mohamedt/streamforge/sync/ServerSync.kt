@@ -268,8 +268,11 @@ object ServerSync {
         if (!canPush) return false
         if (collection == "secrets" && !canReadSecrets) return false
         if (data != null && data.toString().length > MAX_RECORD_BYTES) return false
+        val base = if (collection == "progress")
+            outbox.firstOrNull { it.key == rk(collection, id) }?.baseRev ?: state.revisions[rk(collection, id)] ?: 0L
+            else null
         outbox.removeAll { it.collection == collection && it.id == id }
-        outbox.add(OutboxEntry(collection, id, data, data == null, updatedAt))
+        outbox.add(OutboxEntry(collection, id, data, data == null, updatedAt, base))
         pending = outbox.size
         return true
     }
@@ -321,6 +324,7 @@ object ServerSync {
         put("data", e.data ?: JsonNull)
         put("deleted", e.deleted)
         put("updatedAt", e.updatedAt)
+        e.baseRev?.let { put("baseRev", it) }
     }
 
     /** Pushes the whole outbox in ≤ 500-record / ≤ 1.8 MB requests. Never throws (except cancellation). */
@@ -368,7 +372,15 @@ object ServerSync {
                 for (r in results) {
                     val c = raw(r, "collection") ?: continue
                     val id = raw(r, "id") ?: continue
-                    done.add(rk(c, id))
+                    val key = rk(c, id)
+                    done.add(key)
+                    if (r.str("status") == "applied") r.long("rev")?.let { rev ->
+                        state.revisions[key] = rev
+                        val index = outbox.indexOfFirst { it.key == key }
+                        if (c == "progress" && index >= 0 && outbox[index].updatedAt != sent[key]?.updatedAt) {
+                            outbox[index] = outbox[index].copy(baseRev = rev)
+                        }
+                    }
                     // rev 0 = nothing to re-pull (e.g. a secret refused for lack of the secrets scope);
                     // treating it as a rev would restart the pull from scratch.
                     if (r.str("status") == "stale") r.long("rev")?.takeIf { it > 0 }?.let { rev -> staleRev = minOf(staleRev ?: rev, rev) }
@@ -489,7 +501,10 @@ object ServerSync {
             val id = raw(r, "id") ?: continue
             val ts = r.long("updatedAt") ?: 0L
             trackManaged(c, id, r)
-            if (ts <= (state.stamps[rk(c, id)] ?: 0L)) continue
+            if (ts <= (state.stamps[rk(c, id)] ?: 0L)) {
+                if (ts == state.stamps[rk(c, id)]) r.long("rev")?.let { state.revisions[rk(c, id)] = it }
+                continue
+            }
             accepted.add(r)
         }
         if (accepted.isEmpty()) {
@@ -522,6 +537,8 @@ object ServerSync {
                 } catch (_: Exception) {
                 }
                 state.stamps[rk(c, id)] = ts
+                r.long("rev")?.let { state.revisions[rk(c, id)] = it }
+                outbox.removeAll { it.key == rk(c, id) && it.updatedAt <= ts }
             }
         } finally {
             applyingRemote = false

@@ -529,7 +529,10 @@ extension ServerSync {
             if r.collection == "secrets", !hasSecretsScope { continue }
             let key = Self.recordKey(r.collection, r.id)
             trackManaged(r)
-            if let known = state.known[key], r.updatedAt <= known.t { continue }
+            if let known = state.known[key], r.updatedAt <= known.t {
+                if r.updatedAt == known.t { state.known[key]?.rev = r.rev }
+                continue
+            }
             if !r.deleted, r.data == nil { continue }
             // A managed item the user removed here comes back: ask first (restore prompt).
             if holdIfLocallyRemoved(r) { continue }
@@ -605,7 +608,7 @@ extension ServerSync {
             default:
                 break
             }
-            state.known[key] = Known(h: r.deleted ? "" : Self.fingerprint(data), t: r.updatedAt, d: r.deleted)
+            state.known[key] = Known(h: r.deleted ? "" : Self.fingerprint(data), t: r.updatedAt, d: r.deleted, rev: r.rev)
             outbox[key] = nil
         }
 
