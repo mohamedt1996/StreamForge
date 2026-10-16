@@ -189,7 +189,27 @@ struct MediaDetailView: View {
             && TrailerPolicy.allowsAutoplay
     }
 
+    @ViewBuilder
     private func header(_ layout: DetailLayout) -> some View {
+        #if os(iOS)
+        VStack(alignment: .leading, spacing: 20) {
+            RemoteImage(url: item.backdrop ?? item.poster)
+                .frame(width: layout.width, height: min(layout.width * 9 / 16, layout.heroHeight))
+                .overlay { TrailerSurface(controller: trailer) }
+                .overlay(alignment: .bottomTrailing) { TrailerControlButton(controller: trailer).padding(16) }
+                .clipped()
+                .background(HeroVisibilityReader(height: min(layout.width * 9 / 16, layout.heroHeight), isVisible: $heroVisible))
+            VStack(alignment: .leading, spacing: 10) {
+                Text(item.title).font(.largeTitle.weight(.bold)).fixedSize(horizontal: false, vertical: true)
+                metaLine.foregroundStyle(Theme.secondaryText)
+                if !model.details.ratings.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) { ForEach(model.details.ratings) { RatingBadgeView(badge: $0) } }
+                    }
+                }
+            }.padding(.horizontal, Theme.gutter)
+        }
+        #else
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.backdrop ?? item.poster)
                 .frame(width: layout.width, height: layout.heroHeight)
@@ -248,6 +268,7 @@ struct MediaDetailView: View {
             .frame(width: layout.width, alignment: .leading)
         }
         .frame(width: layout.width, alignment: .bottomLeading)
+        #endif
     }
 
     private var logoWidth: CGFloat {
@@ -275,7 +296,39 @@ struct MediaDetailView: View {
 
     // MARK: Actions
 
-    private var actions: some View {
+    @ViewBuilder private var actions: some View {
+        #if os(iOS)
+        VStack(spacing: 12) {
+            Button { playPrimary() } label: {
+                Label(primaryLabel, systemImage: "play.fill")
+                    .font(.headline).frame(maxWidth: .infinity, minHeight: 42)
+            }
+            .buttonStyle(.borderedProminent).tint(Theme.accent)
+            .disabled(model.loading && item.type == .series)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    Button { library.toggleFavorite(item) } label: {
+                        Label(library.isFavorite(item) ? "In My List" : "My List", systemImage: library.isFavorite(item) ? "checkmark" : "plus")
+                    }
+                    if let key = model.details.trailerYouTubeKey, let url = URL(string: "https://www.youtube.com/watch?v=\(key)") {
+                        Button { openURL(url) } label: { Label("Trailer", systemImage: "film") }
+                    }
+                    if item.type == .movie {
+                        Button { sourceSheet = SourceSheetContext(item: item, episode: nil, upcoming: []) } label: {
+                            Label("Sources", systemImage: "list.bullet")
+                        }
+                        if DownloadManager.isSupported {
+                            DownloadButton(item: item, episode: nil) { downloadSheet = DownloadSheetContext(item: item, episode: nil) }
+                                .accessibilityLabel("Download")
+                        }
+                        Button { library.setWatched(item, !library.isWatched(item)) } label: {
+                            Label(library.isWatched(item) ? "Watched" : "Mark watched", systemImage: "checkmark.circle")
+                        }
+                    }
+                }.buttonStyle(.bordered).controlSize(.large).font(.subheadline.weight(.semibold))
+            }
+        }.padding(.horizontal, Theme.gutter)
+        #else
         HStack(spacing: 12) {
             Button { playPrimary() } label: {
                 Label(primaryLabel, systemImage: "play.fill")
@@ -316,6 +369,7 @@ struct MediaDetailView: View {
             }
         }
         .padding(.horizontal, Theme.gutter)
+        #endif
     }
 
     private var actionMaxWidth: CGFloat? {

@@ -322,7 +322,7 @@ private fun DetailPhone(
         }
     } else {
         LazyColumn(Modifier.fillMaxSize(), state = listState) {
-            item(key = "hero") { PhoneHero(item, trailer, Modifier.fillMaxWidth().height(heroHeight), compact = heroHeight < 240.dp) }
+            item(key = "hero") { PhoneHero(item, trailer, Modifier.fillMaxWidth().aspectRatio(16f / 9f), compact = heroHeight < 240.dp) }
             item(key = "actions") { PhoneActions(item, playLabel, onPlay, onTrailer) }
             item(key = "overview") { PhoneOverview(item, maxLines = 6) }
             body()
@@ -332,48 +332,33 @@ private fun DetailPhone(
 
 @Composable
 private fun PhoneHero(item: MediaItem, trailer: TrailerController, modifier: Modifier, compact: Boolean) {
-    Box(modifier) {
-        Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
-        // Edge-to-edge muted trailer over the artwork (cropped, no controls).
-        TrailerSurface(trailer, Modifier.fillMaxSize())
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.3f), Color.Transparent, Palette.background))))
-        Row(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(Dims.gutter()), verticalAlignment = Alignment.Bottom) {
-            Column(Modifier.weight(1f)) {
-                // Like Netflix, the title shrinks a little while the trailer plays.
-                val logoScale by animateFloatAsState(if (trailer.revealed) 0.8f else 1f, tween(TrailerPolicy.FADE_MS), label = "logo-scale")
-                val shrink = Modifier.graphicsLayer {
-                    scaleX = logoScale
-                    scaleY = logoScale
-                    transformOrigin = TransformOrigin(0f, 1f)
-                }
-                if (item.logo != null) {
-                    Artwork(item.logo, shrink.widthIn(max = 320.dp).height(if (compact) 64.dp else 90.dp), ContentScale.Fit)
-                } else {
-                    Text(item.title, fontSize = if (compact) 26.sp else 32.sp, fontWeight = FontWeight.Black, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis, modifier = shrink)
-                }
-                Text(metaLine(item).joinToString("  ·  "), color = Palette.secondary, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            TrailerButton(trailer, Modifier.padding(start = 12.dp))
+    Column {
+        Box(modifier) {
+            Artwork(item.backdrop ?: item.poster, Modifier.fillMaxSize())
+            TrailerSurface(trailer, Modifier.fillMaxSize())
+            TrailerButton(trailer, Modifier.align(Alignment.BottomEnd).padding(16.dp))
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(item.title, fontSize = if (compact) 26.sp else 32.sp, fontWeight = FontWeight.Bold)
+            Text(metaLine(item).joinToString("  ·  "), color = Palette.secondary, fontSize = 14.sp)
         }
     }
 }
 
 @Composable
 private fun PhoneActions(item: MediaItem, playLabel: String, onPlay: () -> Unit, onTrailer: (() -> Unit)?) {
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = Dims.gutter(), vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.heightIn(min = 48.dp).card(onPlay, shape = RoundedCornerShape(24.dp)).background(Palette.gradient).padding(horizontal = 22.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(playLabel, fontWeight = FontWeight.Bold, maxLines = 1)
+    Column(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter()).padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).card(onPlay, shape = RoundedCornerShape(14.dp))
+            .background(Palette.accent).padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.PlayArrow, null)
+            Spacer(Modifier.width(8.dp))
+            Text(playLabel, fontWeight = FontWeight.Bold)
         }
-        Box(Modifier.size(48.dp).card({ Library.toggleFavorite(item) }, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
-            Icon(if (Library.isFavorite(item)) Icons.Filled.Check else Icons.Filled.Add, "My List")
-        }
-        if (onTrailer != null) {
-            Box(Modifier.size(48.dp).card(onTrailer, shape = CircleShape).background(Palette.surfaceHigh), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Movie, "Trailer")
-            }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            SfButton(if (Library.isFavorite(item)) "In My List" else "My List", { Library.toggleFavorite(item) },
+                icon = if (Library.isFavorite(item)) Icons.Filled.Check else Icons.Filled.Add)
+            if (onTrailer != null) SfButton("Trailer", onTrailer, icon = Icons.Filled.Movie)
         }
     }
 }

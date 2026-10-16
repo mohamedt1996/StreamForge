@@ -9,6 +9,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
@@ -417,7 +419,7 @@ fun PlayerScreen(c: PlayerController, surface: SurfaceView, inPip: Boolean, inte
                 enter = fadeIn(tween(160)) + slideInHorizontally(tween(200)) { it / 6 },
                 exit = fadeOut(tween(140)) + slideOutHorizontally(tween(160)) { it / 6 },
             ) {
-                key(shownPanel) { SidePanel(c, shownPanel, active = panel != null, onClose = closePanel) }
+                key(shownPanel) { SidePanel(c, shownPanel, active = panel != null, onClose = closePanel, onPanel = { openPanel(it, null) }) }
             }
         }
     }
@@ -542,12 +544,11 @@ private fun Controls(c: PlayerController, onClose: () -> Unit, onPip: () -> Unit
                         Text("-" + (c.durationMs - c.positionMs).coerceAtLeast(0).clockText(), fontSize = 12.sp)
                     }
                 }
-                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (c.isLive) TextChipIcon(Icons.AutoMirrored.Filled.List, "Channels") { openPanel(Panel.CHANNELS) }
-                    if (c.isLive) TextChipIcon(Icons.Filled.History, "Last") { c.lastChannel() }
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+
                     TextChipIcon(Icons.Filled.Audiotrack, "Audio") { openPanel(Panel.AUDIO) }
                     TextChipIcon(Icons.Filled.Subtitles, "Subtitles") { openPanel(Panel.SUBTITLES) }
-                    if (!c.isLive) c.nextEpisode?.let { TextChipIcon(Icons.Filled.SkipNext, "Next") { c.playNextEpisode() } }
+
                     Spacer(Modifier.weight(1f))
                     TextChipIcon(Icons.Filled.Tune, "More") { openPanel(Panel.SETTINGS) }
                 }
@@ -758,7 +759,7 @@ private fun TextChip(text: String, onClick: () -> Unit) {
 
 @Composable
 private fun TextChipIcon(icon: ImageVector, text: String, onClick: () -> Unit) {
-    Row(Modifier.heightIn(min = 40.dp).card(onClick, shape = RoundedCornerShape(20.dp)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 8.dp),
+    Row(Modifier.heightIn(min = 48.dp).card(onClick, shape = RoundedCornerShape(20.dp)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
@@ -771,7 +772,7 @@ private fun TextChipIcon(icon: ImageVector, text: String, onClick: () -> Unit) {
  * keeps it (nothing else is focusable while it's open); Back or picking a channel closes it.
  */
 @Composable
-private fun SidePanel(c: PlayerController, panel: Panel, active: Boolean, onClose: () -> Unit) {
+private fun SidePanel(c: PlayerController, panel: Panel, active: Boolean, onClose: () -> Unit, onPanel: (Panel) -> Unit) {
     val tv = isTv()
     val first = remember { FocusRequester() }
     val channels = c.request.channelList
@@ -787,8 +788,8 @@ private fun SidePanel(c: PlayerController, panel: Panel, active: Boolean, onClos
         }
     }
     val outside = if (tv || !active) Modifier else Modifier.pointerInput(Unit) { detectTapGestures { onClose() } }
-    Box(Modifier.fillMaxSize().then(outside)) {
-        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(if (tv) 460.dp else 340.dp).background(Color(0xF215131F))
+    BoxWithConstraints(Modifier.fillMaxSize().then(outside)) {
+        Column(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(minOf(maxWidth, if (tv) 460.dp else 380.dp)).background(Color(0xF215131F))
             .then(if (tv) Modifier else Modifier.safeDrawingPadding())
             .padding(horizontal = if (tv) 28.dp else 16.dp, vertical = if (tv) 27.dp else 16.dp)
             .pointerInput(Unit) { detectTapGestures { } }
@@ -836,6 +837,13 @@ private fun SidePanel(c: PlayerController, panel: Panel, active: Boolean, onClos
                         }
                     }
                     Panel.SETTINGS -> {
+                        if (!tv && c.isLive) {
+                            item { Option("Channels", false) { onPanel(Panel.CHANNELS) } }
+                            item { Option("Previous channel", false) { c.lastChannel(); onClose() } }
+                        }
+                        if (!tv && !c.isLive && c.nextEpisode != null) {
+                            item { Option("Next episode", false) { c.playNextEpisode(); onClose() } }
+                        }
                         item { Option("Night mode", c.nightMode, Modifier.focusRequester(first)) { c.toggleNightMode() } }
                         item { Option("Volume +25%", false) { c.changeVolume(25) } }
                         item { Option("Volume −25%", false) { c.changeVolume(-25) } }

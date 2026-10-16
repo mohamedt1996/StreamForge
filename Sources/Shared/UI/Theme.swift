@@ -3,11 +3,11 @@ import NukeUI
 import Nuke
 
 enum Theme {
-    static let background = Color(red: 0.03, green: 0.027, blue: 0.07)
+    static let background = Color(red: 0.045, green: 0.05, blue: 0.065)
     static let surface = Color(white: 1, opacity: 0.06)
     static let surfaceHigh = Color(white: 1, opacity: 0.11)
     static let accent = Color(red: 0.55, green: 0.36, blue: 0.96)
-    static let accent2 = Color(red: 0.93, green: 0.28, blue: 0.60)
+    static let accent2 = accent
     static let live = Color(red: 0.96, green: 0.26, blue: 0.30)
     static let gold = Color(red: 0.98, green: 0.78, blue: 0.25)
     static let secondaryText = Color.white.opacity(0.62)

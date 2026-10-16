@@ -7,6 +7,9 @@ struct LibraryView: View {
     @Environment(TraktService.self) private var trakt
     @Environment(DispatcharrStore.self) private var store
 
+    @State private var librarySection = "Continue"
+    private let sections = ["Continue", "My List", "Downloads"]
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.rowSpacing) {
@@ -21,6 +24,13 @@ struct LibraryView: View {
                 }
                 .padding(.horizontal, Theme.gutter)
 
+                Picker("Library", selection: $librarySection) {
+                    ForEach(sections, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, Theme.gutter)
+
+                if librarySection == "Continue" {
                 remindersSection
 
                 Shelf(title: "Up Next", subtitle: "From Trakt", items: trakt.upNext) { entry in
@@ -32,7 +42,12 @@ struct LibraryView: View {
                     .cardButtonStyle()
                 }
 
+                }
+                if librarySection == "Downloads" {
                 let downloaded = DownloadManager.shared.visibleRecords.filter { $0.state == .completed }
+                if downloaded.isEmpty {
+                    EmptyStateView(icon: "arrow.down.circle", title: "No downloads yet", message: "Downloaded movies and episodes will appear here.")
+                }
                 Shelf(title: "Downloaded", items: downloaded) { rec in
                     Button { DownloadManager.shared.play(rec) } label: {
                         LandscapeCard(title: rec.displayTitle, subtitle: rec.bytesWritten.byteText,
@@ -42,6 +57,11 @@ struct LibraryView: View {
                     .cardButtonStyle()
                 }
 
+                }
+                if librarySection == "Continue" {
+                if library.continueWatching.isEmpty && trakt.upNext.isEmpty {
+                    EmptyStateView(icon: "play.circle", title: "Ready when you are", message: "Start watching a movie or episode to find it here.")
+                }
                 Shelf(title: "Continue Watching", items: library.continueWatching) { entry in
                     Button { router.resume(entry) } label: {
                         LandscapeCard(title: entry.item.title, subtitle: entry.episode.map { "\($0.code) · \(entry.remainingText)" } ?? entry.remainingText,
@@ -50,14 +70,17 @@ struct LibraryView: View {
                     .cardButtonStyle()
                     .contextMenu { ContinueWatchingMenu(entry: entry) }
                 }
+                }
+                if librarySection == "My List" {
                 Shelf(title: "My List · Movies", items: library.favorites.filter { $0.type == .movie }) { poster($0) }
                 Shelf(title: "My List · Series", items: library.favorites.filter { $0.type == .series }) { poster($0) }
                 Shelf(title: "Trakt Watchlist", items: trakt.watchlist) { poster($0) }
-                if library.favorites.isEmpty && library.continueWatching.isEmpty {
+                if library.favorites.isEmpty && trakt.watchlist.isEmpty {
                     EmptyStateView(icon: "books.vertical", title: "Your library is empty",
                                    message: "Add movies and series to My List, and what you watch shows up here automatically.")
                         .frame(height: 320)
                 }
+            }
             }
             .padding(.vertical, 12)
         }

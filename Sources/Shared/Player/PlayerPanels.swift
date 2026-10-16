@@ -167,6 +167,25 @@ extension PlayerScreen {
     // MARK: Playback settings
 
     @ViewBuilder var settingsPanel: some View {
+        #if os(iOS)
+        sectionLabel("Playback actions")
+        if model.isLive {
+            optionRow("Channels", selected: false) { panel = .channels }
+            optionRow("Enter channel number", selected: false) { openNumberPad() }
+            if model.previousChannelID != nil { optionRow("Previous channel", selected: false) { model.toggleLastChannel() } }
+        } else {
+            if model.hasStarted && !ProfileStore.shared.isKidsMode {
+                optionRow("Play trailer", selected: false) {
+                    resumeAfterTrailer = !model.isPaused
+                    model.pauseForHandoff(forTrailer: true)
+                    panel = nil
+                    showingTrailer = true
+                }
+            }
+            if model.nextEpisode != nil { optionRow("Next episode", selected: false) { model.playNextEpisode(); panel = nil } }
+        }
+        if model.chapters.count > 1 { optionRow("Chapters", selected: false) { panel = .chapters } }
+        #endif
         sectionLabel("Speed")
         ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { s in
             optionRow(s == 1 ? "Normal" : String(format: "%.2g×", s), selected: abs(model.speed - s) < 0.01) { model.setSpeed(s) }

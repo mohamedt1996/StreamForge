@@ -83,13 +83,13 @@ import androidx.compose.ui.text.font.FontFamily
 
 /** Same palette as the Apple TV app: near-black violet night, violet → pink accent, gold for 4K. */
 object Palette {
-    val background = Color(0xFF08070F)
+    val background = Color(0xFF0C0D11)
     val surface = Color(0x14FFFFFF)
     val surfaceHigh = Color(0x22FFFFFF)
     /** Opaque panel colour (side panels, dialogs). */
-    val raised = Color(0xFF15131F)
+    val raised = Color(0xFF191B22)
     val accent = Color(0xFF8C5CF5)
-    val accent2 = Color(0xFFED4799)
+    val accent2 = accent
     val live = Color(0xFFF5424D)
     val gold = Color(0xFFFACC15)
     val secondary = Color(0x9EFFFFFF)

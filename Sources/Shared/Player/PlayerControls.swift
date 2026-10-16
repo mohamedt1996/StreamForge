@@ -74,8 +74,7 @@ extension PlayerScreen {
                     .opacity(model.hasStarted ? 1 : 0.45)
                     .accessibilityLabel("Picture in Picture")
                 }
-                compactButton("chart.bar.xaxis") { model.showStats.toggle() }
-                    .accessibilityLabel("Statistics")
+
             }
             #endif
         }
@@ -162,7 +161,14 @@ extension PlayerScreen {
         }
     }
 
-    var bottomActions: some View {
+    @ViewBuilder var bottomActions: some View {
+        #if os(iOS)
+        HStack(spacing: 20) {
+            toolbarButton("speaker.wave.2", "Audio") { panel = .audio }
+            toolbarButton("captions.bubble", "Subtitles") { panel = .subtitles }
+            toolbarButton("ellipsis", "More") { panel = .settings }
+        }
+        #else
             HStack(spacing: 18) {
                 if model.isLive {
                     toolbarButton("list.bullet", "Channels") { panel = .channels }
@@ -190,6 +196,7 @@ extension PlayerScreen {
                 toolbarButton("chart.bar.xaxis", "Stats") { model.showStats.toggle() }
                 #endif
             }
+        #endif
     }
 
     // MARK: VOD timeline
@@ -359,7 +366,8 @@ extension PlayerScreen {
             #if os(tvOS)
             Label(label, systemImage: symbol).font(.callout.weight(.semibold))
             #else
-            Image(systemName: symbol).font(.title3).frame(width: 48, height: 48).contentShape(Rectangle())
+            Label(label, systemImage: symbol).font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 12).frame(minHeight: 48).contentShape(Rectangle())
             #endif
         }
         .buttonStyle(PlayerControlButtonStyle(onPress: { hideTask?.cancel() }, onRelease: { scheduleHide() }))

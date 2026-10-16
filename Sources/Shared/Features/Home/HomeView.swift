@@ -361,7 +361,7 @@ struct HeroCarousel: View {
         #if os(tvOS)
         return 620
         #else
-        return UIDevice.current.userInterfaceIdiom == .pad ? 460 : 300
+        return UIDevice.current.userInterfaceIdiom == .pad ? 340 : 280
         #endif
     }
 

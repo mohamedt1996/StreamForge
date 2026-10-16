@@ -133,8 +133,9 @@ fun HomeScreen(onSearch: () -> Unit, onSettings: () -> Unit) {
 private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
     val nav = LocalNav.current
     val context = LocalContext.current
-    val open: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
+    val openDetails: (MediaItem) -> Unit = { nav.push(Screen.Detail(it)) }
 
+    var homeSection by remember { mutableStateOf("Discover") }
     PullRefresh({ DispatcharrRepo.refreshAll(true); GuideRepo.refresh() }) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
@@ -144,6 +145,22 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
                 IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, "Settings") }
             }
         }
+        item {
+            Row(Modifier.fillMaxWidth().padding(horizontal = Dims.gutter(), vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf("Discover", "My List").forEach { section ->
+                    com.mohamedt.streamforge.ui.SfButton(section, { homeSection = section },
+                        kind = if (homeSection == section) com.mohamedt.streamforge.ui.ButtonKind.PRIMARY else com.mohamedt.streamforge.ui.ButtonKind.SECONDARY)
+                }
+            }
+        }
+        if (homeSection == "My List") {
+            if (Library.favorites.isEmpty()) { item {
+                Text("Your list starts here. Add a movie or series from its details page.", color = Palette.secondary, modifier = Modifier.padding(Dims.gutter()))
+            }
+            }
+            item { Shelf("Saved movies", Library.favorites.filter { it.type == MediaType.MOVIE }, key = { it.id }) { WatchlistCard(it, { openDetails(it) }) } }
+            item { Shelf("Saved series", Library.favorites.filter { it.type == MediaType.SERIES }, key = { it.id }) { WatchlistCard(it, { openDetails(it) }) } }
+        } else {
         if (!DispatcharrRepo.isConfigured) {
             item {
                 Column(Modifier.padding(Dims.gutter()).fillMaxWidth().background(Palette.surfaceHigh, RoundedCornerShape(18.dp)).padding(20.dp)) {
@@ -171,21 +188,22 @@ private fun HomePhone(onSearch: () -> Unit, onSettings: () -> Unit) {
         }
         item {
             Shelf("Recently Added Movies", recentMovies(), subtitle = DispatcharrRepo.active?.name, key = { it.id }) {
-                PosterCard(it, { open(it) }, { Library.toggleFavorite(it) })
+                PosterCard(it, { openDetails(it) }, { Library.toggleFavorite(it) })
             }
         }
         item {
             Shelf("Recently Updated Series", recentSeries(), subtitle = DispatcharrRepo.active?.name, key = { it.id }) {
-                PosterCard(it, { open(it) }, { Library.toggleFavorite(it) })
+                PosterCard(it, { openDetails(it) }, { Library.toggleFavorite(it) })
             }
         }
-        item { Shelf("My List", Library.favorites, key = { it.id }) { WatchlistCard(it, { open(it) }) } }
-        item { Shelf("Trending Movies", HomeData.trendingMovies, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
-        item { Shelf("Trending Series", HomeData.trendingSeries, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { open(it) }) } }
+        item { Shelf("My List", Library.favorites, key = { it.id }) { WatchlistCard(it, { openDetails(it) }) } }
+        item { Shelf("Trending Movies", HomeData.trendingMovies, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { openDetails(it) }) } }
+        item { Shelf("Trending Series", HomeData.trendingSeries, subtitle = "This week on TMDB", key = { it.id }) { PosterCard(it, { openDetails(it) }) } }
         HomeData.catalogs.forEachIndexed { i, (entry, items) ->
             item(key = "cat-$i-${entry.addon.id}-${entry.catalog.type}-${entry.catalog.id}") {
-                Shelf(entry.title, items, subtitle = entry.addon.name, seeAll = { nav.push(Screen.Catalog(entry)) }, key = { it.id }) { PosterCard(it, { open(it) }) }
+                Shelf(entry.title, items, subtitle = entry.addon.name, seeAll = { nav.push(Screen.Catalog(entry)) }, key = { it.id }) { PosterCard(it, { openDetails(it) }) }
             }
+        }
         }
         item { Spacer(Modifier.height(30.dp)) }
     }
