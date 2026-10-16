@@ -1,4 +1,5 @@
 import SwiftUI
+import Nuke
 
 @MainActor
 @Observable
@@ -354,7 +355,8 @@ struct HeroCarousel: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var index = 0
     @State private var trailer = TrailerController()
-    @State private var enrichedHero: MediaItem?
+    /// Enriched slides (title logo etc.) by id, so a slide already has its logo when it appears.
+    @State private var enriched: [String: MediaItem] = [:]
     @State private var heroVisible = true
     @State private var pageVisible = false
 
@@ -362,7 +364,9 @@ struct HeroCarousel: View {
         #if os(tvOS)
         return 620
         #else
-        return UIDevice.current.userInterfaceIdiom == .pad ? 340 : 280
+        let device = DeviceProfile.current
+        if device.kind == .pad || device.kind == .mac { return 340 }
+        return device.isSmallPhone ? 250 : device.isLargePhone ? 300 : 280
         #endif
     }
 
@@ -377,8 +381,8 @@ struct HeroCarousel: View {
     var body: some View {
         TabView(selection: $index) {
             ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
-                Button { onSelect(item) } label: {
-                    HeroSlide(item: i == index ? (enrichedHero ?? item) : item, height: height, trailer: i == index ? trailer : nil)
+                Button { onSelect(enriched[item.id] ?? item) } label: {
+                    HeroSlide(item: enriched[item.id] ?? item, height: height, trailer: i == index ? trailer : nil)
                 }
                 .buttonStyle(.plain)
                 .tag(i)
@@ -405,15 +409,29 @@ struct HeroCarousel: View {
         .task(id: currentID) {
             // New slide: back to its artwork, then look up its trailer while the backdrop shows.
             trailer.setKeys([])
-            enrichedHero = nil
-            guard let id = currentID, let item = items.first(where: { $0.id == id }) else { return }
+            guard let id = currentID, let i = items.firstIndex(where: { $0.id == id }) else { return }
+            let item = items[i]
             let shownAt = Date()
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            // Short debounce only, so a quick swipe past a slide doesn't fetch it.
+            try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled else { return }
             let details = await MetadataService.shared.details(for: item)
             guard !Task.isCancelled, currentID == id else { return }
-            enrichedHero = details.item
+            enriched[id] = details.item
             trailer.setSources(details.trailerSources, delay: max(0.3, TrailerPolicy.startDelay - Date().timeIntervalSince(shownAt)))
+            // Warm the neighbouring slides so their logos are ready before they slide in.
+            guard items.count > 1 else { return }
+            let neighbours = Set([(i + 1) % items.count, (i - 1 + items.count) % items.count])
+            for n in neighbours.sorted() {
+                let neighbour = items[n]
+                guard enriched[neighbour.id] == nil else { continue }
+                let more = await MetadataService.shared.details(for: neighbour)
+                guard !Task.isCancelled else { return }
+                enriched[neighbour.id] = more.item
+                if let logo = more.item.logo {
+                    _ = try? await ImagePipeline.shared.image(for: ImageRequest(url: logo, processors: [.resize(width: HeroSlide.titleSize.width)]))
+                }
+            }
         }
         .task(id: items.count) {
             // Advance every 7 s of artwork; hold while a trailer loads or plays.
@@ -457,9 +475,9 @@ struct HeroSlide: View {
                 .clipped()
             LinearGradient(colors: [.clear, Theme.background.opacity(0.6), Theme.background], startPoint: .top, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
-                CinematicTitle(item: item, width: 260, height: 90)
-                .scaleEffect(playing ? 0.8 : 1, anchor: .bottomLeading)
-                .animation(.easeInOut(duration: TrailerPolicy.fade), value: playing)
+                CinematicTitle(item: item, width: Self.titleSize.width, height: Self.titleSize.height)
+                    .scaleEffect(playing ? 0.86 : 1, anchor: .bottomLeading)
+                    .animation(TrailerPolicy.titleAnimation, value: playing)
                 HStack(spacing: 8) {
                     if let r = item.rating { RatingView(rating: r) }
                     if let y = item.yearText { Text(y) }
@@ -468,16 +486,30 @@ struct HeroSlide: View {
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.secondaryText)
+                .metaShadow()
                 if let overview = item.overview {
                     Text(overview).font(.subheadline).foregroundStyle(.white.opacity(0.8)).lineLimit(2).frame(maxWidth: 560, alignment: .leading)
+                        .metaShadow()
                         .opacity(playing ? 0 : 1)
-                        .animation(.easeInOut(duration: TrailerPolicy.fade), value: playing)
+                        .animation(TrailerPolicy.titleAnimation, value: playing)
                 }
             }
-            .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
             .padding(.horizontal, Theme.gutter)
             .padding(.bottom, 34)
         }
         .contentShape(Rectangle())
+    }
+
+    /// Title logo box for the hero, per device.
+    static var titleSize: CGSize {
+        let device = DeviceProfile.current
+        switch device.kind {
+        case .tv: return CGSize(width: 480, height: 160)
+        case .pad, .mac: return CGSize(width: 320, height: 110)
+        default:
+            if device.isSmallPhone { return CGSize(width: 230, height: 80) }
+            if device.isLargePhone { return CGSize(width: 290, height: 100) }
+            return CGSize(width: 260, height: 90)
+        }
     }
 }

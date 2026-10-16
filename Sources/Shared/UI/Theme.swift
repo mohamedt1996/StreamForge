@@ -29,6 +29,142 @@ enum Theme {
     static var posterHeight: CGFloat { posterWidth * 1.5 }
 }
 
+// MARK: - Device
+
+/// What the app is running on. Detected once from the hardware model identifier
+/// ("iPhone16,1"; the simulator reports the model it simulates), with the live safe area as
+/// a fallback for phones newer than this table. Layout uses it to size the hero and title
+/// and to keep trailers clear of the Dynamic Island / notch.
+struct DeviceProfile: Equatable {
+    enum Kind: Equatable {
+        /// iPhone 14 Pro and later Dynamic Island models.
+        case phoneDynamicIsland
+        /// iPhone X – 14 and 16e.
+        case phoneNotch
+        /// Touch ID phones (SE, 8 and earlier).
+        case phoneHomeButton
+        case pad
+        /// An iPhone/iPad build running on a Mac.
+        case mac
+        case tv
+    }
+
+    let kind: Kind
+    /// Hardware identifier, e.g. "iPhone17,1" (empty when unavailable).
+    let model: String
+    /// Portrait screen size in points.
+    let screen: CGSize
+
+    @MainActor static let current = DeviceProfile.detect()
+
+    var isPhone: Bool { [.phoneDynamicIsland, .phoneNotch, .phoneHomeButton].contains(kind) }
+    var hasDynamicIsland: Bool { kind == .phoneDynamicIsland }
+    /// Plus / Pro Max / Air-sized phones.
+    var isLargePhone: Bool { isPhone && screen.width >= 428 }
+    /// SE / mini-sized phones.
+    var isSmallPhone: Bool { isPhone && (kind == .phoneHomeButton || screen.height <= 812) }
+
+    /// Portrait height to keep video and overlays below: the Dynamic Island ends ~48 pt down
+    /// (its safe area is 59–62 pt), a notch at ~30 pt (44–50 pt safe area).
+    var minimumTopClearance: CGFloat {
+        switch kind {
+        case .phoneDynamicIsland: return 59
+        case .phoneNotch: return 44
+        case .phoneHomeButton: return 20
+        case .pad, .mac: return 24
+        case .tv: return 0
+        }
+    }
+
+    /// Top inset for something drawn edge to edge under the status bar. `safeTop` is the live
+    /// inset (0 in landscape, where the island/notch sits on the side and the horizontal safe
+    /// area already keeps content clear of it).
+    func topClearance(safeTop: CGFloat, isLandscape: Bool) -> CGFloat {
+        guard !isLandscape, kind != .tv else { return max(0, safeTop) }
+        return max(safeTop, minimumTopClearance)
+    }
+
+    /// Refines an unknown phone once a real safe area is known (portrait top inset).
+    func refined(withPortraitSafeTop top: CGFloat) -> DeviceProfile {
+        guard isPhone, Self.phoneKind(for: model) == nil, top > 0 else { return self }
+        let kind: Kind = top >= 55 ? .phoneDynamicIsland : top >= 40 ? .phoneNotch : .phoneHomeButton
+        return DeviceProfile(kind: kind, model: model, screen: screen)
+    }
+
+    @MainActor private static func detect() -> DeviceProfile {
+        let model = hardwareModel()
+        #if os(tvOS)
+        return DeviceProfile(kind: .tv, model: model, screen: UIScreen.main.bounds.size)
+        #else
+        let bounds = UIScreen.main.bounds.size
+        let screen = CGSize(width: min(bounds.width, bounds.height), height: max(bounds.width, bounds.height))
+        if ProcessInfo.processInfo.isiOSAppOnMac || ProcessInfo.processInfo.isMacCatalystApp {
+            return DeviceProfile(kind: .mac, model: model, screen: screen)
+        }
+        if UIDevice.current.userInterfaceIdiom != .phone {
+            return DeviceProfile(kind: .pad, model: model, screen: screen)
+        }
+        if let kind = phoneKind(for: model) {
+            return DeviceProfile(kind: kind, model: model, screen: screen)
+        }
+        // Unknown (newer) phone: every iPhone since the 14 Pro line has the Dynamic Island;
+        // `refined(withPortraitSafeTop:)` corrects this from the real safe area.
+        return DeviceProfile(kind: .phoneDynamicIsland, model: model, screen: screen)
+        #endif
+    }
+
+    /// Known iPhone identifiers → kind; nil for unknown models.
+    static func phoneKind(for model: String) -> Kind? {
+        guard model.hasPrefix("iPhone") else { return nil }
+        let numbers = model.dropFirst("iPhone".count).split(separator: ",").compactMap { Int($0) }
+        guard numbers.count == 2 else { return nil }
+        let (major, minor) = (numbers[0], numbers[1])
+        switch (major, minor) {
+        case (10, 3), (10, 6): return .phoneNotch                       // X
+        case (...10, _): return .phoneHomeButton                        // 8 and earlier
+        case (12, 8), (14, 6): return .phoneHomeButton                  // SE 2nd / 3rd gen
+        case (11, _), (12, _), (13, _), (14, _): return .phoneNotch     // XS – 14 (incl. 13 mini)
+        case (15, 2), (15, 3): return .phoneDynamicIsland               // 14 Pro / Pro Max
+        case (15, _): return .phoneDynamicIsland                        // 15 / 15 Plus (15,4 / 15,5)
+        case (16, _): return .phoneDynamicIsland                        // 15 Pro / Pro Max
+        case (17, 5): return .phoneNotch                                // 16e
+        case (17, _): return .phoneDynamicIsland                        // 16 / Plus / Pro / Pro Max
+        case (18, 1), (18, 2), (18, 3), (18, 4): return .phoneDynamicIsland // 17 / Air / 17 Pro / Pro Max
+        default: return nil
+        }
+    }
+
+    private static func hardwareModel() -> String {
+        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], !simulated.isEmpty {
+            return simulated
+        }
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+}
+
+// MARK: - Title shadow
+
+extension View {
+    /// Soft dark halo behind title logos and text, like Stremio's: a wide, low-opacity glow
+    /// for separation from bright artwork plus a tight contact shadow for crisp edges. Drawn
+    /// once on the flattened title (compositingGroup), so it follows the logo's transparency.
+    func titleShadow(_ strength: Double = 1) -> some View {
+        self
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.55 * strength), radius: 18, x: 0, y: 0)
+            .shadow(color: .black.opacity(0.45 * strength), radius: 3, x: 0, y: 1)
+    }
+
+    /// Lighter version for the meta row and chips under the title.
+    func metaShadow() -> some View {
+        shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 1)
+    }
+}
+
 /// Image view backed by Nuke's disk + memory cache, with a tasteful placeholder.
 struct RemoteImage: View {
     var url: URL?
@@ -70,26 +206,64 @@ struct RemoteImage: View {
     }
 }
 
-/// Transparent studio title artwork; keep the title readable while loading or on failure.
+/// Stremio-style title: the studio logo, left-aligned in a fixed box, with the title in bold
+/// type underneath until (or unless) the logo arrives.
+///
+/// Kept snappy on purpose:
+/// - the box never changes size, so nothing below it jumps when the logo loads;
+/// - the logo is decoded at display size (studio PNGs are often 2000+ px wide) at high priority;
+/// - text and logo crossfade in 0.18 s instead of popping, and a cached logo shows immediately
+///   (the text only appears if the logo takes longer than a quarter second, or has none).
 struct CinematicTitle: View {
     var item: MediaItem
     var width: CGFloat
     var height: CGFloat
+    /// Point size for the text fallback; scaled down to fit the box when the title is long.
+    var fallbackSize: CGFloat? = nil
+    /// Holds the text back for a moment while a logo loads, so a disk-cached logo doesn't flash text first.
+    @State private var fallbackDue = false
 
     var body: some View {
-        LazyImage(url: item.logo) { state in
-            if let image = state.image {
-                image.resizable().aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: width, maxHeight: height, alignment: .bottomLeading)
+        ZStack(alignment: .bottomLeading) {
+            if let url = item.logo {
+                LazyImage(request: ImageRequest(url: url, processors: [.resize(width: width)], priority: .high)) { state in
+                    ZStack(alignment: .bottomLeading) {
+                        fallbackText
+                            .opacity(state.image == nil && (fallbackDue || !state.isLoading) ? 1 : 0)
+                            .animation(.easeOut(duration: 0.18), value: fallbackDue)
+                        if let image = state.image {
+                            image.resizable().aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: width, maxHeight: height, alignment: .bottomLeading)
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.18), value: state.image != nil)
+                }
+                .pipeline(ImagePipeline.shared)
             } else {
-                Text(item.title).font(.largeTitle.weight(.heavy)).lineLimit(3)
-                    .minimumScaleFactor(0.75)
-                    .frame(maxWidth: width, alignment: .leading)
+                fallbackText
             }
         }
-        .pipeline(ImagePipeline.shared)
+        .frame(width: width, height: height, alignment: .bottomLeading)
+        .titleShadow()
+        .task(id: item.logo) {
+            fallbackDue = false
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if !Task.isCancelled { fallbackDue = true }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.title)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    private var fallbackText: some View {
+        Text(item.title)
+            .font(.system(size: fallbackSize ?? min(40, height * 0.42), weight: .heavy))
+            .tracking(-0.5)
+            .lineLimit(3)
+            .minimumScaleFactor(0.5)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: width, maxHeight: height, alignment: .bottomLeading)
     }
 }
 

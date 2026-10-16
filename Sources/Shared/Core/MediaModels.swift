@@ -54,7 +54,7 @@ struct MediaItem: Identifiable, Hashable, Codable {
     var added: Date?
     var runtimeMinutes: Int?
     var categoryID: String?
-    /// Optional direct AVPlayer-compatible preview; older saved items decode without it.
+    /// Legacy direct preview link. Still decoded for saved items, but no longer used for trailers.
     var trailerURL: URL?
 
     static func == (a: MediaItem, b: MediaItem) -> Bool { a.id == b.id }
@@ -127,9 +127,8 @@ struct MediaDetails {
     /// YouTube ids of trailers/teasers, best first. Players try them in order (a video can be
     /// removed or region-locked), so every source's trailers are kept, not just the first.
     var trailerKeys: [String] = []
-    var trailerSources: [TrailerSource] {
-        TrailerSource.ordered(trailerKeys.map { .youtube($0) })
-    }
+    /// Trailer sources for the players: YouTube only, in metadata order.
+    var trailerSources: [TrailerSource] { trailerKeys.map { .youtube($0) } }
     var ratings: [RatingBadge] = []
     var seasons: [SeasonInfo] = []
     var episodesBySeason: [Int: [EpisodeRef]] = [:]
@@ -142,11 +141,11 @@ struct MediaDetails {
 
     var trailerYouTubeKey: String? { trailerKeys.first }
 
-    /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and junk.
+    /// Adds trailer ids (bare ids or YouTube URLs), skipping duplicates and anything that
+    /// isn't YouTube (direct MP4/HLS and IMDb links are no longer used for trailers).
     mutating func addTrailers(_ raw: [String], atFront: Bool = false) {
-        let incoming = raw.compactMap(Self.cleanYouTubeKey).filter { !trailerKeys.contains($0) }
-        var seen = Set<String>()
-        let unique = incoming.filter { seen.insert($0).inserted }
+        var seen = Set(trailerKeys)
+        let unique = raw.compactMap(Self.cleanYouTubeKey).filter { seen.insert($0).inserted }
         trailerKeys = atFront ? unique + trailerKeys : trailerKeys + unique
     }
 

@@ -90,7 +90,7 @@ struct PlayerScreen: View {
             if let panel { panelView(panel).transition(.move(edge: .trailing).combined(with: .opacity)) }
             if showingTrailer {
                 VStack(spacing: 12) {
-                    NativeTrailerView(item: model.request.item, source: model.request.source, muted: false)
+                    NativeTrailerView(item: model.request.item, muted: false)
                     Button("Back to Full") { returnFromTrailer() }
                         .buttonStyle(.borderedProminent)
                         .padding()

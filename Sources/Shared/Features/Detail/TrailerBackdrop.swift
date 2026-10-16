@@ -13,13 +13,10 @@ import WebKit
 // a player or sheet on top, page left) and resumes when it is again. When it ends it fades
 // back to the artwork and offers a replay button (iOS). Unmuting lasts for the session.
 //
-// Sources, in order (every failure is silent and moves on to the next):
-//   1. The user's optional Invidious instance (native video of the YouTube trailer).
-//   2. iOS: YouTube embeds. Provider branding is governed by YouTube's player settings.
-// tvOS uses the Invidious source only (no WebKit).
-//
-// iPhone: the video is kept below the top safe area so it never runs under the Dynamic Island
-// (or notch / status bar). See `TrailerSurface.topInset`.
+// Trailers are YouTube only (every failure is silent and moves on to the next):
+//   1. The user's optional Invidious instance, which plays the YouTube trailer natively.
+//   2. iOS: the YouTube embed, trying each trailer id in turn.
+// tvOS has no WebKit, so it uses Invidious only.
 
 // MARK: - Policy
 
@@ -32,7 +29,9 @@ enum TrailerPolicy {
     /// Backdrop-only time before the trailer starts.
     nonisolated static let startDelay: TimeInterval = 2.5
     /// Crossfade between artwork and video.
-    nonisolated static let fade: Double = 0.8
+    nonisolated static let fade: Double = 0.5
+    /// Title / meta changes that accompany the crossfade: quick, so the header never feels laggy.
+    nonisolated static var titleAnimation: Animation { .spring(response: 0.32, dampingFraction: 0.9) }
     /// Give up on a source that hasn't produced frames after this much (on-screen) time.
     nonisolated static let loadTimeout: TimeInterval = 15
     /// Unmuting sticks for the rest of the session (never persisted: a relaunch starts silent).
@@ -253,7 +252,7 @@ final class TrailerController {
         phase = .loading
         isMuted = !TrailerPolicy.sessionPrefersSound
         var list: [Candidate] = []
-        let keys = sources.compactMap { if case .youtube(let key) = $0 { return key }; return nil }
+        let keys = sources.map(\.youTubeKey)
         let instance = AppSettings.shared.values.invidiousInstance
         if !instance.isEmpty {
             list += keys.prefix(3).map { Candidate.invidious(key: $0, instance: instance) }
@@ -611,30 +610,27 @@ struct TrailerWebHost: UIViewRepresentable {
 }
 
 /// The video layer: goes over the artwork, fades in when frames flow and out at the end.
+/// `insets` keeps the picture (and YouTube's own top overlay) clear of the status bar /
+/// Dynamic Island when the hero runs edge to edge under it; the artwork still fills that area.
 struct TrailerSurface: View {
     let controller: TrailerController
-    /// Height of the top safe area to keep the video clear of (iPhone Dynamic Island, notch and
-    /// status bar). The strip above the video is black, matching the letterbox bars, so the
-    /// picture never runs under the island. 0 everywhere else.
-    var topInset: CGFloat = 0
+    var insets = EdgeInsets()
 
     var body: some View {
         ZStack {
+            #if os(iOS)
+            // The iOS video is fitted (letterboxed), so the inset strip matches its black bars.
+            Color.black
+            #else
             Color.clear
-            ZStack {
-                if let player = controller.player {
-                    TrailerPlayerSurface(player: player)
-                }
-                if let webView = controller.webView {
-                    TrailerWebHost(webView: webView)
-                }
+            #endif
+            if let player = controller.player {
+                TrailerPlayerSurface(player: player)
+                    .padding(insets)
             }
-            .padding(.top, topInset)
-            if topInset > 0 {
-                VStack(spacing: 0) {
-                    Color.black.frame(height: topInset)
-                    Spacer(minLength: 0)
-                }
+            if let webView = controller.webView {
+                TrailerWebHost(webView: webView)
+                    .padding(insets)
             }
         }
         .opacity(controller.isRevealed ? 1 : 0)
@@ -703,7 +699,7 @@ struct HeroVisibilityReader: View {
 }
 
 
-/// Explicit Trailer action stays in StreamForge and uses the same fallback chain.
+/// Explicit Trailer action stays in StreamForge and uses the same YouTube player.
 struct TrailerPreviewSheet: View {
     let title: String
     let sources: [TrailerSource]

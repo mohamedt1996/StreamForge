@@ -1,21 +1,31 @@
 import SwiftUI
 import AVKit
 
-/// Trailers are YouTube only. Web pages are never handed to AVPlayer; the only native
-/// playback is the user's optional Invidious proxy of a YouTube trailer.
+/// URL check kept for any metadata code that still recognises direct links. Trailers no longer
+/// play them; they are YouTube only.
+enum TrailerSelection {
+    static func directURL(_ url: URL?) -> URL? {
+        guard let url, url.host != nil, ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              ["mp4", "m4v", "mov", "m3u8"].contains(url.pathExtension.lowercased()) else { return nil }
+        return url
+    }
+}
+
+/// Trailers are YouTube only. A YouTube id plays in the iOS embed, or natively through the
+/// user's optional Invidious instance (the only route on tvOS, which has no WebKit).
 enum TrailerSource: Equatable {
     case youtube(String)
 
-    static func parse(_ raw: String) -> TrailerSource? {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let url = URL(string: text), let scheme = url.scheme {
-            guard ["http", "https"].contains(scheme.lowercased()), url.host != nil,
-                  url.user == nil, url.password == nil else { return nil }
-            return MediaDetails.cleanYouTubeKey(text).map { .youtube($0) }
-        }
-        return MediaDetails.cleanYouTubeKey(text).map { .youtube($0) }
+    var youTubeKey: String {
+        switch self { case .youtube(let key): return key }
     }
 
+    /// Accepts a bare YouTube id or a youtube.com / youtu.be link. Anything else is ignored.
+    static func parse(_ raw: String) -> TrailerSource? {
+        MediaDetails.cleanYouTubeKey(raw).map { .youtube($0) }
+    }
+
+    /// Removes duplicates, keeping the metadata's order (best first).
     static func ordered(_ sources: [TrailerSource]) -> [TrailerSource] {
         var unique: [TrailerSource] = []
         for source in sources where !unique.contains(source) { unique.append(source) }
@@ -25,12 +35,13 @@ enum TrailerSource: Equatable {
 
 @MainActor
 enum NativeTrailerResolver {
-    static func resolve(item: MediaItem, source: PlaybackSource? = nil) async -> URL? {
-        let details = await MetadataService.shared.details(for: item)
-        guard !Task.isCancelled else { return nil }
+    /// Native playback of the title's YouTube trailer via Invidious; nil when not configured.
+    static func resolve(item: MediaItem) async -> URL? {
         let instance = AppSettings.shared.values.invidiousInstance
         guard !instance.isEmpty else { return nil }
-        for key in details.trailerKeys {
+        let details = await MetadataService.shared.details(for: item)
+        guard !Task.isCancelled else { return nil }
+        for key in details.trailerKeys.prefix(3) {
             if let url = await InvidiousTrailer.streamURL(instance: instance, youtubeKey: key) {
                 guard !Task.isCancelled else { return nil }
                 return url
@@ -44,7 +55,6 @@ enum NativeTrailerResolver {
 /// Owns the queue and looper only for the lifetime of the visible preview.
 struct NativeTrailerView: View {
     let item: MediaItem
-    var source: PlaybackSource? = nil
     var muted = true
     @Environment(\.scenePhase) private var scenePhase
     @State private var player: AVQueuePlayer?
@@ -68,7 +78,7 @@ struct NativeTrailerView: View {
             player = nil
             looper = nil
             unavailable = false
-            guard let url = await NativeTrailerResolver.resolve(item: item, source: source), !Task.isCancelled else {
+            guard let url = await NativeTrailerResolver.resolve(item: item), !Task.isCancelled else {
                 if !Task.isCancelled { unavailable = true }
                 return
             }

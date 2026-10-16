@@ -15,7 +15,7 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertNil(StreamTextParser.parse(String(repeating: "9", count: 100) + " GB").size)
     }
 
-    func testTrailerMetadataKeepsOnlyYouTubeSources() {
+    func testTrailerMetadataKeepsOnlyYouTube() {
         let item = MediaItem(id: "test", type: .movie, title: "Test", origin: .tmdb(id: 1))
         var details = MediaDetails(item: item)
         details.addTrailers(["https://media.example/trailer.mp4", "https://www.imdb.com/video/vi12345/",
@@ -51,12 +51,35 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertTrue(LibraryStore.continueWatchingEntries([entry], watched: ["movie"]).isEmpty)
     }
 
-    func testTrailerSourceParsingIsYouTubeOnly() {
+    func testTrailerSourcesAreYouTubeOnly() {
         let youtube = TrailerSource.youtube("abcdefghijk")
-        XCTAssertEqual(TrailerSource.ordered([youtube, youtube]), [youtube])
-        XCTAssertEqual(TrailerSource.parse("https://youtu.be/abcdefghijk"), youtube)
+        XCTAssertEqual(TrailerSource.ordered([youtube, .youtube("zyxwvutsrqp"), youtube]), [youtube, .youtube("zyxwvutsrqp")])
+        XCTAssertEqual(TrailerSource.parse("https://www.youtube.com/watch?v=abcdefghijk"), youtube)
+        XCTAssertEqual(TrailerSource.parse("abcdefghijk"), youtube)
         XCTAssertNil(TrailerSource.parse("https://www.imdb.com/video/vi12345/"))
         XCTAssertNil(TrailerSource.parse("https://cdn.example.com/trailer.m3u8"))
         XCTAssertNil(TrailerSource.parse("javascript:alert(1)"))
+    }
+
+    func testIMDbTitlesGetNoTrailerLookup() {
+        var item = MediaItem(id: "tt0111161", type: .movie, title: "Test", origin: .tmdb(id: 1))
+        item.imdbID = "tt0111161"
+        XCTAssertTrue(MediaDetails(item: item).trailerSources.isEmpty)
+    }
+
+    func testDeviceModelClassification() {
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone15,2"), .phoneDynamicIsland) // 14 Pro
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone17,1"), .phoneDynamicIsland) // 16 Pro
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone17,5"), .phoneNotch)         // 16e
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone14,7"), .phoneNotch)         // 14
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone10,6"), .phoneNotch)         // X
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone14,6"), .phoneHomeButton)    // SE 3
+        XCTAssertEqual(DeviceProfile.phoneKind(for: "iPhone10,4"), .phoneHomeButton)    // 8
+        XCTAssertNil(DeviceProfile.phoneKind(for: "iPhone99,1"))
+        XCTAssertNil(DeviceProfile.phoneKind(for: "iPad14,1"))
+        let unknown = DeviceProfile(kind: .phoneDynamicIsland, model: "iPhone99,1", screen: CGSize(width: 402, height: 874))
+        XCTAssertEqual(unknown.refined(withPortraitSafeTop: 47).kind, .phoneNotch)
+        XCTAssertEqual(unknown.topClearance(safeTop: 0, isLandscape: true), 0)
+        XCTAssertEqual(unknown.topClearance(safeTop: 54, isLandscape: false), 59)
     }
 }
