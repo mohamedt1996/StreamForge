@@ -40,8 +40,13 @@ docker compose up -d
 ### Binary
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 MPVKit's LGPL build links mpv/FFmpeg dynamically-compatible static libraries; TorrServer is GPL-3.0. If you distribute builds, comply with those licenses (publish this source alongside your binaries).
 <<<<<<< HEAD
+=======
+Download `streamforge-sync-<os>-<arch>` from the GitHub release (Linux amd64/arm64, macOS arm64,
+Windows amd64) or build it yourself (Go 1.24+, no C compiler needed):
+>>>>>>> parent of b79227c (Add files via upload)
 =======
 Download `streamforge-sync-<os>-<arch>` from the GitHub release (Linux amd64/arm64, macOS arm64,
 Windows amd64) or build it yourself (Go 1.24+, no C compiler needed):
@@ -54,10 +59,13 @@ STREAMFORGE_DATA=./data ./streamforge-sync
 ```
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 Android My List now includes removal with Undo. Poster-grid context previews and player trailer controls use native AVPlayer on Apple platforms; direct trailer media is supported, and YouTube native previews need an Invidious instance configured in Settings. See [issue changes and device QA](docs/ISSUES-QA.md) for behavior, regression coverage and current build-verification limitations.
 =======
 >>>>>>> parent of 217256e (Add files via upload)
 =======
+=======
+>>>>>>> parent of b79227c (Add files via upload)
 `streamforge-sync -version` prints the version; `streamforge-sync healthcheck` exits 0 when the
 local server answers `/healthz` (used by the Docker `HEALTHCHECK`).
 
@@ -211,4 +219,7 @@ cd server
 go vet ./...
 go test ./...
 ```
+<<<<<<< HEAD
+>>>>>>> parent of b79227c (Add files via upload)
+=======
 >>>>>>> parent of b79227c (Add files via upload)
