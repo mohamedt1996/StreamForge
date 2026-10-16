@@ -57,6 +57,8 @@ final class DetailModel {
         let lib = LibraryStore.shared
         if let p = lib.latestEpisodeProgress(for: details.item), let ep = p.episode {
             if !p.isFinished, let match = episodes.first(where: { $0.season == ep.season && $0.episode == ep.episode }) { return match }
+            if p.isFinished, let index = episodes.firstIndex(where: { $0.id == ep.id }),
+               let next = episodes.dropFirst(index + 1).first(where: { !lib.isWatched(details.item, episode: $0) }) { return next }
         }
         return episodes.first { !lib.isWatched(details.item, episode: $0) } ?? episodes.first
     }

@@ -21,17 +21,27 @@ extension PlayerScreen {
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 42)).foregroundStyle(Theme.gold)
             Text("Can't play this").font(.title3.weight(.bold))
             Text(error).font(.subheadline).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center).frame(maxWidth: 520)
-            HStack(spacing: 14) {
-                Button("Close") { close() }.buttonStyle(.bordered)
-                Button("Try Again") { model.retry() }.buttonStyle(.borderedProminent).tint(Theme.accent)
-                if model.isLive {
-                    Button("Next Channel") { model.zap(1) }.buttonStyle(.bordered)
-                }
+            ViewThatFits {
+                HStack(spacing: 14) { errorActions }
+                VStack(spacing: 12) { errorActions }
             }
+            Button("Report a playback problem") { panel = .report }.buttonStyle(.bordered)
         }
         .padding(30)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
         .padding()
+    }
+
+    @ViewBuilder var errorActions: some View {
+                Button("Close") { close() }.buttonStyle(.bordered)
+                Button("Try Again") { model.retry() }.buttonStyle(.borderedProminent).tint(Theme.accent)
+                if model.canTryAnotherSource {
+                    Button(model.isFindingAlternative ? "Finding source…" : "Try another source") { model.tryAnotherSource() }
+                        .buttonStyle(.bordered).disabled(model.isFindingAlternative)
+                }
+                if model.isLive {
+                    Button("Next Channel") { model.zap(1) }.buttonStyle(.bordered)
+                }
     }
 
     func feedbackBubble(_ text: String) -> some View {

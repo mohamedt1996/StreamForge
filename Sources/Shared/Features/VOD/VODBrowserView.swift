@@ -168,11 +168,12 @@ struct VODBrowserView: View {
 
         if !continueItems.isEmpty {
             Shelf(title: "Continue Watching", items: continueItems) { entry in
-                Button { router.push(.detail(entry.item)) } label: {
-                    LandscapeCard(title: entry.item.title, subtitle: entry.episode?.code ?? entry.remainingText,
+                Button { router.resume(entry) } label: {
+                    LandscapeCard(title: entry.item.title, subtitle: entry.episode.map { "\($0.code) · \(entry.remainingText)" } ?? entry.remainingText,
                                   image: entry.episode?.still ?? entry.item.backdrop, fallbackImage: entry.item.poster, progress: entry.fraction)
                 }
                 .cardButtonStyle()
+                    .contextMenu { ContinueWatchingMenu(entry: entry) }
             }
         }
         // Pre-built off the main thread by DispatcharrStore (no full-library sort per render).

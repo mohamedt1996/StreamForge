@@ -8,7 +8,7 @@ struct MPVSurface: UIViewRepresentable {
 }
 
 enum PlayerPanel: Identifiable {
-    case audio, subtitles, settings, channels, chapters
+    case audio, subtitles, settings, channels, chapters, report
     var id: Self { self }
 }
 
@@ -69,9 +69,10 @@ struct PlayerScreen: View {
                 LoadingArtworkView(request: model.request, status: model.statusText ?? model.bufferPercent.flatMap { $0 > 0 && $0 < 100 ? "Buffering \($0)%" : nil })
                     .transition(.opacity)
             } else if model.isBuffering || !model.hasStarted { bufferingOverlay }
-            if let error = model.errorText { errorOverlay(error) }
-
             gestureLayer
+                .allowsHitTesting(model.errorText == nil && !showingTrailer)
+
+            if let error = model.errorText { errorOverlay(error) }
 
             if controlsVisible && model.errorText == nil { controls.transition(.opacity) }
             if let seekFeedback {
@@ -115,6 +116,15 @@ struct PlayerScreen: View {
         .preferredColorScheme(.dark)
         .onChange(of: PlayerPreferences.shared.values) { model.applyPreferences() }
         .onChange(of: model.request.channelID) { showNumberPad = false }
+        .onChange(of: panel) { _, value in
+            if value != nil { hideTask?.cancel() } else { showControls() }
+        }
+        .onChange(of: showingTrailer) { _, value in
+            if value { hideTask?.cancel() } else { scheduleHide() }
+        }
+        .onChange(of: model.isPaused) { _, paused in
+            if paused { showControls() } else { scheduleHide() }
+        }
         #if os(iOS)
         .statusBarHidden(!controlsVisible)
         .persistentSystemOverlays(.hidden)
@@ -252,7 +262,7 @@ struct PlayerScreen: View {
         hideTask?.cancel()
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_500_000_000)
-            guard !Task.isCancelled, !model.isPaused, scrubbing == nil, liveScrubbing == nil, panel == nil else { return }
+            guard !Task.isCancelled, !model.isPaused, scrubbing == nil, liveScrubbing == nil, panel == nil, !showNumberPad, !showingTrailer, model.errorText == nil else { return }
             controlsVisible = false
         }
     }

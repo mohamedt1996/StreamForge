@@ -43,11 +43,12 @@ struct LibraryView: View {
                 }
 
                 Shelf(title: "Continue Watching", items: library.continueWatching) { entry in
-                    Button { router.push(.detail(entry.item)) } label: {
-                        LandscapeCard(title: entry.item.title, subtitle: entry.episode?.code ?? entry.remainingText,
+                    Button { router.resume(entry) } label: {
+                        LandscapeCard(title: entry.item.title, subtitle: entry.episode.map { "\($0.code) · \(entry.remainingText)" } ?? entry.remainingText,
                                       image: entry.episode?.still ?? entry.item.backdrop, fallbackImage: entry.item.poster, progress: entry.fraction)
                     }
                     .cardButtonStyle()
+                    .contextMenu { ContinueWatchingMenu(entry: entry) }
                 }
                 Shelf(title: "My List · Movies", items: library.favorites.filter { $0.type == .movie }) { poster($0) }
                 Shelf(title: "My List · Series", items: library.favorites.filter { $0.type == .series }) { poster($0) }
@@ -205,6 +206,21 @@ struct RecordingsView: View {
         Task {
             try? await rest.deleteRecording(r.id)
             recordings.removeAll { $0.id == r.id }
+        }
+    }
+}
+
+struct ContinueWatchingMenu: View {
+    let entry: WatchProgress
+    @Environment(LibraryStore.self) private var library
+    @Environment(AppRouter.self) private var router
+    var body: some View {
+        Button { router.push(.detail(entry.item)) } label: { Label("Details", systemImage: "info.circle") }
+        Button { library.setWatched(entry.item, episode: entry.episode, true) } label: {
+            Label("Mark watched", systemImage: "checkmark.circle")
+        }
+        Button(role: .destructive) { library.removeFromContinueWatching(entry.item) } label: {
+            Label("Remove from Continue Watching", systemImage: "xmark")
         }
     }
 }

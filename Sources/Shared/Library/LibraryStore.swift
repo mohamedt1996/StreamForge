@@ -14,6 +14,7 @@ struct WatchProgress: Codable, Hashable, Identifiable {
     var fraction: Double { duration > 0 ? min(1, position / duration) : 0 }
     var isFinished: Bool { duration > 0 && (position / duration > 0.92 || duration - position < 120) }
     var remainingText: String {
+        if position == 0 { return "Up next" }
         let mins = Int((duration - position) / 60)
         return mins >= 60 ? "\(mins / 60)h \(mins % 60)m left" : "\(max(1, mins))m left"
     }
@@ -283,9 +284,15 @@ final class LibraryStore {
         let key = Self.key(item, episode)
         if value {
             watched.insert(key)
-            progress[key] = nil
+            if var previous = progress[key], episode != nil {
+                previous.duration = max(1, previous.duration)
+                previous.position = previous.duration
+                previous.updatedAt = Date()
+                progress[key] = previous
+            } else { progress[key] = nil }
             watchedCanonical[key] = SyncKeys.fullKey(item, episode)
         } else {
+            if progress[key]?.isFinished == true { progress[key] = nil }
             watched.remove(key)
             watchedCanonical[key] = nil
         }
@@ -297,24 +304,47 @@ final class LibraryStore {
         let key = Self.key(item, episode)
         let p = WatchProgress(key: key, item: item, episode: episode, position: position, duration: duration, updatedAt: Date())
         if p.isFinished {
-            progress[key] = nil
+            progress[key] = episode == nil ? nil : p
             watched.insert(key)
             watchedCanonical[key] = SyncKeys.fullKey(item, episode)
         } else {
+            watched.remove(key)
+            watchedCanonical[key] = nil
             progress[key] = p
         }
         scheduleSave()
     }
 
+    func queueNextEpisode(item: MediaItem, after episode: EpisodeRef?, next: EpisodeRef?) {
+        guard let episode, let next, isWatched(item, episode: episode),
+              !isWatched(item, episode: next) else { return }
+        let key = Self.key(item, next)
+        guard progress[key] == nil else { return }
+        progress[key] = WatchProgress(key: key, item: item, episode: next, position: 0,
+                                      duration: 0, updatedAt: Date())
+        scheduleSave()
+    }
+
     /// "Continue watching": newest first, one entry per show.
     var continueWatching: [WatchProgress] {
+        Self.continueWatchingEntries(Array(progress.values), watched: watched)
+    }
+
+    nonisolated static func continueWatchingEntries(_ entries: [WatchProgress], watched: Set<String>) -> [WatchProgress] {
         var seen = Set<String>()
-        return progress.values.sorted { $0.updatedAt > $1.updatedAt }.filter { seen.insert($0.item.id).inserted }
+        return entries.filter { !$0.isFinished && !watched.contains($0.key) }
+            .sorted { $0.updatedAt > $1.updatedAt }.filter { seen.insert($0.item.id).inserted }
     }
 
     /// Latest in-progress or most recently finished episode for a series, used to pick "Resume S2E4".
     func latestEpisodeProgress(for item: MediaItem) -> WatchProgress? {
         progress.values.filter { $0.item.id == item.id && $0.episode != nil }.max { $0.updatedAt < $1.updatedAt }
+    }
+
+    /// Removing a series removes all its unfinished entries, so an older episode cannot reappear.
+    func removeFromContinueWatching(_ item: MediaItem) {
+        progress = progress.filter { $0.value.item.id != item.id || $0.value.isFinished }
+        scheduleSave()
     }
 
     func clearProgress(_ key: String) {

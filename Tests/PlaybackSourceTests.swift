@@ -37,4 +37,22 @@ final class PlaybackSourceTests: XCTestCase {
         XCTAssertNil(decoded.trailerURL)
         XCTAssertEqual(decoded.id, item.id)
     }
+    func testContinueWatchingKeepsNewestEpisodeAndExcludesCompletedEntries() {
+        let item = MediaItem(id: "show", type: .series, title: "Show", origin: .tmdb(id: 1))
+        let old = WatchProgress(key: "old", item: item, position: 120, duration: 1800, updatedAt: Date(timeIntervalSince1970: 1))
+        let next = WatchProgress(key: "next", item: item, position: 0, duration: 0, updatedAt: Date(timeIntervalSince1970: 2))
+        let finished = WatchProgress(key: "finished", item: item, position: 1800, duration: 1800, updatedAt: Date(timeIntervalSince1970: 3))
+        let entries = LibraryStore.continueWatchingEntries([old, next, finished], watched: [])
+        XCTAssertEqual(entries.map(\.key), ["next"])
+        XCTAssertEqual(entries.first?.remainingText, "Up next")
+        XCTAssertFalse(next.isFinished)
+        XCTAssertEqual(next.fraction, 0)
+    }
+
+    func testContinueWatchingExcludesExplicitlyWatchedEntries() {
+        let item = MediaItem(id: "movie", type: .movie, title: "Movie", origin: .tmdb(id: 1))
+        let entry = WatchProgress(key: "movie", item: item, position: 600, duration: 7200, updatedAt: Date())
+        XCTAssertTrue(LibraryStore.continueWatchingEntries([entry], watched: ["movie"]).isEmpty)
+    }
+
 }

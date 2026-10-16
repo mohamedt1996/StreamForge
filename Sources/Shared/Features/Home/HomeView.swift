@@ -232,10 +232,7 @@ struct HomeView: View {
                               progress: entry.fraction)
             }
             .cardButtonStyle()
-            .contextMenu {
-                Button { router.push(.detail(entry.item)) } label: { Label("Details", systemImage: "info.circle") }
-                Button(role: .destructive) { library.clearProgress(entry.key) } label: { Label("Remove", systemImage: "xmark") }
-            }
+            .contextMenu { ContinueWatchingMenu(entry: entry) }
         }
     }
 
