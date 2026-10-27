@@ -50,7 +50,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -252,8 +251,7 @@ fun Modifier.card(
     }
     // The coloured elevation glow is re-rendered on every frame of the scale animation; low-end TVs
     // (Chromecast with Google TV) get the white border alone, which reads just as clearly at 3 m.
-    // The focus border and scale already give TV feedback; avoid an expensive animated shadow.
-    if (focused && !tv && glow && !lowEnd) m = m.shadow(18.dp, shape, clip = false, ambientColor = Palette.accent, spotColor = Palette.accent)
+    // The focus border and scale provide feedback without an expensive TV shadow.
     if (border) {
         m = m.border(if (focused) BorderStroke(if (tv) 3.dp else 2.dp, Color.White) else BorderStroke(0.dp, Color.Transparent), shape)
     }
