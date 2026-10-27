@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -156,9 +157,11 @@ fun StreamForgeTheme(content: @Composable () -> Unit) {
         LocalWatchlistAction provides toggleSaved,
     ) {
         MaterialTheme(colorScheme = colors, typography = typography) {
-            Box(Modifier.fillMaxSize()) {
-                content()
-                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 88.dp))
+            CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
+                Box(Modifier.fillMaxSize()) {
+                    content()
+                    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 88.dp))
+                }
             }
         }
     }
@@ -249,7 +252,8 @@ fun Modifier.card(
     }
     // The coloured elevation glow is re-rendered on every frame of the scale animation; low-end TVs
     // (Chromecast with Google TV) get the white border alone, which reads just as clearly at 3 m.
-    if (focused && tv && glow && !lowEnd) m = m.shadow(18.dp, shape, clip = false, ambientColor = Palette.accent, spotColor = Palette.accent)
+    // The focus border and scale already give TV feedback; avoid an expensive animated shadow.
+    if (focused && !tv && glow && !lowEnd) m = m.shadow(18.dp, shape, clip = false, ambientColor = Palette.accent, spotColor = Palette.accent)
     if (border) {
         m = m.border(if (focused) BorderStroke(if (tv) 3.dp else 2.dp, Color.White) else BorderStroke(0.dp, Color.Transparent), shape)
     }
